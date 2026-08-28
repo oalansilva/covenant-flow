@@ -111,7 +111,7 @@ copy_tree "$SOURCE/.cursor/commands/" "$TARGET/.cursor/commands/"
 copy_tree "$SOURCE/.cursor/agents/" "$TARGET/.cursor/agents/"
 copy_tree "$SOURCE/.cursor/skills/" "$TARGET/.cursor/skills/"
 rm -f "$TARGET/.cursor/BUGBOT.md"
-find "$TARGET" -path "$TARGET/.git" -prune -o -name 'BUGBOT.md' -print -delete >/dev/null
+find "$TARGET" -name 'BUGBOT.md' ! -path '*/.git/*' -print -delete
 
 copy_tree "$SOURCE/.grok/hooks/" "$TARGET/.grok/hooks/"
 mkdir -p "$TARGET/.grok/rules"
