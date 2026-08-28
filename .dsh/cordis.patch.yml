@@ -1,0 +1,9 @@
+# Covenant Flow dsh adapter insert ids.
+# Helper scripts/process-fsm/dsh_boot.sh rewrites `name` to absolute plugin paths
+# and launches `dsh web --patch`. `dsh plugin add` is not the v1 pin channel.
+# Relative names only in this file; the helper materializes absolute names.
+- insert:
+    - id: covenant-flow-process-fsm-guard
+      name: .dsh/plugin/process-fsm-guard.js
+    - id: covenant-flow-impeccable-hook
+      name: .dsh/plugin/impeccable-hook.js

@@ -121,6 +121,10 @@ copy_tree "$SOURCE/.grok/skills/" "$TARGET/.grok/skills/"
 copy_tree "$SOURCE/.opencode/plugin/" "$TARGET/.opencode/plugin/"
 copy_tree "$SOURCE/.opencode/skills/" "$TARGET/.opencode/skills/"
 
+copy_tree "$SOURCE/.dsh/plugin/" "$TARGET/.dsh/plugin/"
+copy_tree "$SOURCE/.dsh/skills/" "$TARGET/.dsh/skills/"
+copy_tree "$SOURCE/.dsh/cordis.patch.yml" "$TARGET/.dsh/cordis.patch.yml"
+
 copy_tree "$SOURCE/.agents/skills/impeccable/" "$TARGET/.agents/skills/impeccable/"
 copy_tree "$SOURCE/.agents/skills/design-critic/" "$TARGET/.agents/skills/design-critic/"
 copy_tree "$SOURCE/.agents/skills/playwright-cli/" "$TARGET/.agents/skills/playwright-cli/"

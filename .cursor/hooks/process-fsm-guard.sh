@@ -170,7 +170,7 @@ if path and path not in paths:
     paths.append(path)
 if not paths:
     if tool in ("write", "edit", "apply_patch"):
-        msg = "process-fsm-guard deny reason=empty_path. OpenCode write/edit/apply_patch requires an extractable path."
+        msg = "process-fsm-guard deny reason=empty_path. write/edit/apply_patch (file_path or filePath) and str_replace_editor mutate (create/str_replace/insert path) require an extractable path."
         print(json.dumps({"permission": "deny", "decision": "deny", "agent_message": msg, "user_message": msg, "reason": msg}))
         sys.exit(0)
     print(json.dumps({"permission": "allow", "decision": "allow", "reason": ""}))

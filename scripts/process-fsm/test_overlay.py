@@ -143,7 +143,7 @@ def test_page_unbound_without_overlay_does_not_dump(tmp_path: Path):
 
 
 def test_grok_opencode_have_no_law_table():
-    for folder in (REPO / ".grok", REPO / ".opencode"):
+    for folder in (REPO / ".grok", REPO / ".opencode", REPO / ".dsh"):
         for path in folder.rglob("*"):
             if not path.is_file():
                 continue
@@ -154,8 +154,10 @@ def test_grok_opencode_have_no_law_table():
 
 
 def test_skill_stubs_body_budget():
+    from dsh_stubs import stub_errors as dsh_errors
     from grok_stubs import stub_errors as grok_errors
     from opencode_stubs import stub_errors as oc_errors
 
     assert grok_errors() == []
     assert oc_errors() == []
+    assert dsh_errors() == []

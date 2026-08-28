@@ -1,4 +1,4 @@
-"""Compile process-fsm.yaml + resolver into a Write Guard (Cursor + Grok + OpenCode).
+"""Compile process-fsm.yaml + resolver into a Write Guard (Cursor + Grok + OpenCode + dsh).
 
 Glob-first: evaluate(write_produto) only for product_globs. No GitHub in unit tests.
 """
@@ -50,6 +50,8 @@ WRITE_TOOLS = frozenset(
     }
 )
 OPENCODE_WRITE_TOOLS = frozenset({"write", "edit", "apply_patch"})
+DSH_EDITOR_TOOL = "str_replace_editor"
+DSH_EDITOR_MUTATE = frozenset({"create", "str_replace", "insert"})
 SHELL_TOOLS = frozenset(
     {"Shell", "Bash", "run_terminal_command", "run_terminal_cmd", "bash"}
 )
@@ -152,7 +154,7 @@ def _tool_input(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def normalize(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Canonical envelope: Cursor, Grok, and OpenCode `{ tool, args }` all work."""
+    """Canonical envelope: Cursor, Grok, OpenCode, and dsh `{ tool, args }` all work."""
     src = payload if isinstance(payload, Mapping) else {}
     tool = _first_str(src, "tool_name", "toolName", "tool") or ""
     cwd = (
@@ -165,8 +167,12 @@ def normalize(payload: Mapping[str, Any]) -> dict[str, Any]:
     data = _tool_input(src)
     command = src.get("command") if isinstance(src.get("command"), str) else ""
     if not str(command).strip():
-        nested = data.get("command")
-        command = nested.strip() if isinstance(nested, str) and nested.strip() else ""
+        # str_replace_editor.args.command is view|create|str_replace|insert, not a shell.
+        if tool == DSH_EDITOR_TOOL:
+            command = ""
+        else:
+            nested = data.get("command")
+            command = nested.strip() if isinstance(nested, str) and nested.strip() else ""
     out: dict[str, Any] = {
         "tool_name": tool,
         "tool_input": data,
@@ -338,6 +344,20 @@ def _paths_from_patch_text(text: str) -> list[str]:
     return out
 
 
+def _editor_subcommand(mapping: Mapping[str, Any]) -> str:
+    raw = mapping.get("command")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else ""
+
+
+def is_dsh_editor_mutate(payload: Mapping[str, Any]) -> bool:
+    canonical = normalize(payload)
+    if str(canonical.get("tool_name") or "") != DSH_EDITOR_TOOL:
+        return False
+    data = canonical.get("tool_input")
+    mapping = data if isinstance(data, dict) else {}
+    return _editor_subcommand(mapping) in DSH_EDITOR_MUTATE
+
+
 def extract_paths(
     payload: Mapping[str, Any], overlay: Mapping[str, Any] | None = None
 ) -> list[str]:
@@ -349,6 +369,14 @@ def extract_paths(
     cwd_raw = canonical.get("cwd")
     cwd = Path(str(cwd_raw)) if isinstance(cwd_raw, str) and cwd_raw.strip() else None
     found: list[str] = []
+    if tool == DSH_EDITOR_TOOL:
+        # Mutate via args.path. view is not a write. Do not dump the tool into WRITE_TOOLS.
+        if _editor_subcommand(mapping) in DSH_EDITOR_MUTATE:
+            write_path = mapping.get("path")
+            if isinstance(write_path, str) and write_path.strip():
+                return [write_path.strip()]
+            return []
+        return []
     if tool in WRITE_TOOLS:
         write_path = _path_from_write(canonical)
         if write_path:
@@ -463,7 +491,9 @@ def _deny(reason: str, state: str | None, q_git: str | None, bound: str | None) 
 def _empty_path_deny() -> dict[str, str]:
     message = (
         "process-fsm-guard deny reason=empty_path. "
-        "OpenCode write/edit/apply_patch requires an extractable path."
+        "write/edit/apply_patch (file_path or filePath) and "
+        "str_replace_editor mutate (create/str_replace/insert path) "
+        "require an extractable path."
     )
     return emit("deny", message)
 
@@ -498,11 +528,16 @@ def decide(
     if is_status_edit_command(command, overlay):
         return _status_edit_deny()
     if not paths:
-        if tool in OPENCODE_WRITE_TOOLS:
+        if tool in OPENCODE_WRITE_TOOLS or is_dsh_editor_mutate(canonical):
             return _empty_path_deny()
         return _allow()
 
-    write_like = tool in WRITE_TOOLS or tool in SHELL_TOOLS or bool(command)
+    write_like = (
+        tool in WRITE_TOOLS
+        or tool in SHELL_TOOLS
+        or bool(command)
+        or is_dsh_editor_mutate(canonical)
+    )
     table = fsm if fsm is not None else load_fsm_fn()
     classified: list[tuple[str, str, str]] = []
     for item in paths:
