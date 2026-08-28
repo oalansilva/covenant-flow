@@ -1,0 +1,1461 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/release-guard <audit|pre|post>
+
+Modes:
+  audit  Report release hygiene findings and exit 0.
+  pre    Strict gate before opening/merging a release PR.
+  post   Strict gate after release merge/cleanup.
+USAGE
+}
+
+mode="${1:-}"
+case "$mode" in
+  audit|pre|post) ;;
+  -h|--help|help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+strict=0
+if [[ "$mode" != "audit" ]]; then
+  strict=1
+fi
+
+failures=0
+warnings=0
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+warn() {
+  warnings=$((warnings + 1))
+  printf 'WARN: %s\n' "$1"
+}
+
+blocker() {
+  failures=$((failures + 1))
+  printf 'BLOCKER: %s\n' "$1"
+}
+
+issue() {
+  if [[ "$strict" -eq 1 ]]; then
+    blocker "$1"
+  else
+    warn "$1"
+  fi
+}
+
+indent() {
+  sed 's/^/  /'
+}
+
+# Overlay release hooks (T16): empty production hooks refuse deploy.
+# Missing overlay is skipped so consumers/tests without pin still run hygiene checks.
+overlay_file="${PWD}/.covenant-flow/overlay.yaml"
+if [[ -f "$overlay_file" && "$mode" != "audit" ]]; then
+  if python3 - "$overlay_file" <<'PY'
+import sys
+from pathlib import Path
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)
+data = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8")) or {}
+rel = data.get("release") or {}
+keys = ("restart", "migrate", "build", "health_url")
+if not any(str(rel.get(key) or "").strip() for key in keys):
+    sys.exit(2)
+sys.exit(0)
+PY
+  then
+    :
+  else
+    issue "overlay release.restart/migrate/build/health_url are empty; T16 refuses deploy (covenant-flow-environments + release-guard)"
+  fi
+fi
+
+# --- Remote snapshots (card #509): single authoritative snapshot per run ---
+BOARD_JSON=""
+BOARD_STATE="unloaded"
+PRS_JSON=""
+PRS_STATE="unloaded"
+RATE_LIMIT_DIAGNOSED=0
+
+snapshot_fail_diagnose() {
+  if [[ "$RATE_LIMIT_DIAGNOSED" -eq 0 ]]; then
+    RATE_LIMIT_DIAGNOSED=1
+    local rl
+    rl="$(gh api rate_limit --jq '.resources.graphql | "graphql: \(.remaining)/\(.limit) reset=\(.reset)"' 2>/dev/null || true)"
+    if [[ -n "$rl" ]]; then
+      printf '  rate-limit diagnostic: %s\n' "$rl"
+    fi
+  fi
+}
+
+snapshot_issue() {
+  local which="$1" detail="$2"
+  snapshot_fail_diagnose
+  if [[ "$strict" -eq 1 ]]; then
+    blocker "$which snapshot failed or invalid: $detail"
+  else
+    warn "$which snapshot failed or invalid: $detail"
+  fi
+}
+
+ensure_board_snapshot() {
+  if [[ "$BOARD_STATE" == "ok" ]]; then
+    return 0
+  fi
+  if [[ "$BOARD_STATE" == "failed" ]]; then
+    return 1
+  fi
+  local raw exit_code total_count items_count
+  raw="$(gh project item-list 1 --owner oalansilva --limit 500 --format json 2>/dev/null)"
+  exit_code=$?
+  BOARD_STATE="failed"
+  if [[ $exit_code -eq 0 ]] && printf '%s' "$raw" | jq -e '.items | type == "array"' >/dev/null 2>&1; then
+    total_count="$(printf '%s' "$raw" | jq -r '.totalCount // empty' 2>/dev/null)"
+    items_count="$(printf '%s' "$raw" | jq -r '.items | length' 2>/dev/null)"
+    if [[ "$total_count" =~ ^[0-9]+$ ]] && [[ "$items_count" == "$total_count" ]]; then
+      BOARD_JSON="$raw"
+      BOARD_STATE="ok"
+      return 0
+    fi
+    snapshot_issue "board" "item-list returned $items_count items but totalCount=$total_count (incomplete snapshot)"
+    return 1
+  fi
+  snapshot_issue "board" "gh project item-list failed (exit=$exit_code) or invalid JSON"
+  return 1
+}
+
+ensure_pr_snapshot() {
+  if [[ "$PRS_STATE" == "ok" ]]; then
+    return 0
+  fi
+  if [[ "$PRS_STATE" == "failed" ]]; then
+    return 1
+  fi
+  local raw exit_code count
+  raw="$(gh pr list --repo oalansilva/crypto --state open --limit 1000 --json number,headRefName,headRepositoryOwner 2>/dev/null)"
+  exit_code=$?
+  PRS_STATE="failed"
+  if [[ $exit_code -eq 0 ]] && printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    count="$(printf '%s' "$raw" | jq 'length' 2>/dev/null)"
+    if [[ "$count" -ge 1000 ]]; then
+      snapshot_issue "prs" "open PR list reached the 1000-item limit (possible truncation)"
+      return 1
+    fi
+    if printf '%s' "$raw" | jq -e 'all(.[]; ((.headRefName? | length) > 0) and ((.headRepositoryOwner? | .login? | length) > 0))' >/dev/null 2>&1; then
+      PRS_JSON="$raw"
+      PRS_STATE="ok"
+      return 0
+    fi
+    snapshot_issue "prs" "open PR list entries missing headRefName or headRepositoryOwner.login"
+    return 1
+  fi
+  snapshot_issue "prs" "gh pr list failed (exit=$exit_code) or invalid JSON"
+  return 1
+}
+
+ensure_snapshots() {
+  local failed=0
+  ensure_board_snapshot || failed=1
+  ensure_pr_snapshot || failed=1
+  [[ "$failed" -eq 0 ]]
+}
+
+card_status() {
+  local number="$1"
+  if [[ "$BOARD_STATE" != "ok" ]]; then
+    printf ''
+    return 0
+  fi
+  printf '%s' "$BOARD_JSON" | jq -r --argjson n "$number" '[.items[] | select(.content.number == $n and (.content.repository // "") == "oalansilva/crypto") | .status][0] // ""'
+}
+
+card_lookup() {
+  local number="$1" matches status
+  if [[ "$BOARD_STATE" != "ok" ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  matches="$(printf '%s' "$BOARD_JSON" | jq -c --argjson n "$number" '[.items[] | select(.content.number == $n and (.content.repository // "") == "oalansilva/crypto")]' 2>/dev/null)"
+  [[ -z "$matches" ]] && { printf 'unknown\n'; return 0; }
+  case "$(printf '%s' "$matches" | jq 'length' 2>/dev/null || printf '0')" in
+    0) printf 'unknown\n' ;;
+    1)
+      status="$(printf '%s' "$matches" | jq -r '.[0].status // ""' 2>/dev/null)"
+      case "$status" in
+        Pronto|Cancelado) printf 'terminal\n' ;;
+        "") printf 'unknown\n' ;;
+        *) printf 'non-terminal\n' ;;
+      esac
+      ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+pr_lookup() {
+  local owner="$1" head="$2" matches
+  if [[ "$PRS_STATE" != "ok" ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  matches="$(printf '%s' "$PRS_JSON" | jq -c --arg o "$owner" --arg h "$head" '[.[] | select(.headRepositoryOwner.login == $o and .headRefName == $h)]' 2>/dev/null)"
+  [[ -z "$matches" ]] && { printf 'unknown\n'; return 0; }
+  case "$(printf '%s' "$matches" | jq 'length' 2>/dev/null || printf '0')" in
+    1) printf 'yes\n' ;;
+    *) printf 'no\n' ;;
+  esac
+}
+
+# Canonical RELEASE_CARDS (D4): normalized once, before any remote call in post.
+CANONICAL_CARDS=""
+RELEASE_CARDS_INVALID=""
+RELEASE_CARDS_OUT_OF_RANGE=""
+
+# Canonical release date (card #518 D1): single resolution shared by doc and
+# kaizen checks. Defaults to current UTC date; must be a valid YYYY-MM-DD.
+RELEASE_DATE_ENV="${RELEASE_DATE:-}"
+RELEASE_DATE=""
+RELEASE_DATE_INVALID=""
+
+resolve_release_date() {
+  local raw="$RELEASE_DATE_ENV"
+  if [[ -z "$raw" ]]; then
+    raw="$(date -u +%F 2>/dev/null || true)"
+  fi
+  if [[ -z "$raw" ]]; then
+    RELEASE_DATE_INVALID="unable to resolve date"
+    return 0
+  fi
+  if ! [[ "$raw" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    RELEASE_DATE_INVALID="$raw"
+    return 0
+  fi
+  # Validação estrita de calendário: a data normalizada deve ser idêntica à
+  # informada (rejeita 2026-02-30, 2026-13-99 e ano 0000 em qualquer coreutils).
+  if [[ "$(date -u -d "$raw" +%F 2>/dev/null)" != "$raw" ]]; then
+    RELEASE_DATE_INVALID="$raw"
+    return 0
+  fi
+  RELEASE_DATE="$raw"
+}
+
+normalize_release_cards() {
+  local raw="${RELEASE_CARDS:-}"
+  [[ -z "$raw" ]] && return 0
+  local -A seen=()
+  local canonical=""
+  local raw_token token
+  IFS=',' read -ra raw_arr <<< "$raw"
+  for raw_token in "${raw_arr[@]}"; do
+    token="$(printf '%s' "$raw_token" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^0*//')"
+    if [[ -z "$token" || ! "$token" =~ ^[0-9]+$ ]]; then
+      RELEASE_CARDS_INVALID="$raw_token"
+      return 0
+    fi
+    if [[ ${#token} -gt 10 || "$token" -lt 1 || "$token" -gt 2147483647 ]]; then
+      RELEASE_CARDS_OUT_OF_RANGE="$raw_token"
+      return 0
+    fi
+    if [[ -z "${seen[$token]:-}" ]]; then
+      seen[$token]=1
+      canonical+="$token "
+    fi
+  done
+  CANONICAL_CARDS="$(printf '%s' "$canonical" | sed 's/[[:space:]]*$//')"
+}
+
+card_matches_count() {
+  local number="$1"
+  printf '%s' "$BOARD_JSON" | jq -c --argjson n "$number" '[.items[] | select(.content.number == $n and (.content.repository // "") == "oalansilva/crypto")]' | jq 'length'
+}
+
+branch_merged() {
+  local branch="$1"
+  if git merge-base --is-ancestor "$branch" origin/develop >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ "$(git rev-parse "$branch^{tree}" 2>/dev/null)" == "$(git rev-parse 'origin/develop^{tree}' 2>/dev/null)" ]]; then
+    return 0
+  fi
+  if [[ -z "$(git cherry origin/develop "$branch" 2>/dev/null | grep '^+' || true)" ]]; then
+    return 0
+  fi
+  local base files
+  base="$(git merge-base "$branch" origin/develop 2>/dev/null || true)"
+  if [[ -n "$base" ]]; then
+    files="$(git diff --name-only "$base" "$branch" 2>/dev/null)"
+    if [[ -n "$files" ]] && git diff --quiet "$branch" origin/develop -- $files 2>/dev/null; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+branch_is_preserved() {
+  local name="$1"
+  local preserved_branches="${PRESERVED_BRANCHES:-}"
+  [[ -z "$preserved_branches" || -z "$name" ]] && return 1
+  local raw_token item
+  local -a raw_arr
+  IFS=',' read -ra raw_arr <<< "$preserved_branches"
+  for raw_token in "${raw_arr[@]}"; do
+    item="$(printf '%s' "$raw_token" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [[ "$item" == "$name" ]] && return 0
+  done
+  return 1
+}
+
+worktree_dirty_only_canonical_release_doc() {
+  local wt_status="$1"
+  local canonical="docs/release-${RELEASE_DATE}.md"
+  local line path
+  [[ -z "$wt_status" ]] && return 0
+  [[ -z "$RELEASE_DATE" ]] && return 1
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    path="${line:3}"
+    if [[ "$path" == *" -> "* || "$path" != "$canonical" ]]; then
+      return 1
+    fi
+  done <<< "$wt_status"
+  return 0
+}
+
+closeout_allowlist_path() {
+  local path="$1"
+  case "$path" in
+    docs/*|openspec/changes/archive/*|openspec/specs/*|AGENTS.md|rules.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+unpublished_is_code_pr() {
+  # 0 = code PR, 1 = documental or unknown (fail-closed documental)
+  local from="origin/main" to unpublished line
+  if [[ "$current_branch" == release-* ]]; then
+    to="HEAD"
+  else
+    to="origin/develop"
+  fi
+  if ! unpublished="$(git diff --name-only "$from...$to" 2>/dev/null)"; then
+    return 1
+  fi
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if ! closeout_allowlist_path "$line"; then
+      return 0
+    fi
+  done <<< "$unpublished"
+  return 1
+}
+
+prod_evidence_commit() {
+  local token="${1%% *}"
+  git rev-parse --verify "${token}^{commit}" 2>/dev/null
+}
+
+evidence_abbreviation_in_doc() {
+  local full="$1" doc="$2" token resolved
+  [[ -f "$doc" ]] || return 1
+  while IFS= read -r token; do
+    [[ -z "$token" || ${#token} -lt 7 ]] && continue
+    resolved="$(git rev-parse --verify "${token}^{commit}" 2>/dev/null || true)"
+    if [[ "$resolved" == "$full" ]]; then
+      return 0
+    fi
+  done < <(grep -oE '\b[0-9a-fA-F]{7,40}\b' "$doc" 2>/dev/null | tr 'A-F' 'a-f')
+  return 1
+}
+
+validate_prod_evidence_this_lote() {
+  local token full path unpublished
+  token="${prod_evidence%% *}"
+  if [[ -z "$token" ]]; then
+    return 0
+  fi
+  full="$(prod_evidence_commit "$token" || true)"
+  if [[ -z "$full" ]]; then
+    issue "PROD_DEPLOY_EVIDENCE first token is not a git commit: $token"
+    return 0
+  fi
+  if ! git merge-base --is-ancestor "$full" origin/main 2>/dev/null; then
+    issue "PROD_DEPLOY_EVIDENCE commit is not an ancestor of origin/main: ${full:0:8}"
+    return 0
+  fi
+  if ! unpublished="$(git diff --name-only "$full"..origin/main 2>/dev/null)"; then
+    issue "cannot diff PROD_DEPLOY_EVIDENCE ${full:0:8}..origin/main"
+    return 0
+  fi
+  while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    if ! closeout_allowlist_path "$path"; then
+      issue "PROD_DEPLOY_EVIDENCE ${full:0:8} is not this package's code/PROD tip; ${full:0:8}..origin/main still has non-closeout path: $path"
+      return 0
+    fi
+  done <<< "$unpublished"
+  if [[ -f "$canonical_doc" ]] && ! evidence_abbreviation_in_doc "$full" "$canonical_doc"; then
+    issue "canonical release doc $canonical_doc has no git abbreviation (>=7 hex) of PROD_DEPLOY_EVIDENCE commit ${full:0:8}"
+  fi
+}
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$repo_root" ]]; then
+  printf 'ERROR: not inside a Git repository\n' >&2
+  exit 2
+fi
+cd "$repo_root" || exit 2
+
+section "Release guard"
+printf 'Mode: %s\n' "$mode"
+printf 'Repo: %s\n' "$repo_root"
+
+section "Remote refs"
+if git fetch --prune origin >/dev/null 2>&1; then
+  printf 'Fetched origin with prune.\n'
+else
+  issue "git fetch --prune origin failed; remote release comparison may be stale"
+fi
+
+for ref in origin/develop origin/main; do
+  if git rev-parse --verify -q "$ref" >/dev/null; then
+    printf '%s %s\n' "$ref" "$(git rev-parse --short "$ref")"
+  else
+    issue "missing required remote ref: $ref"
+  fi
+done
+
+current_branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
+if [[ -z "$current_branch" ]]; then
+  issue "detached HEAD; release guard expects a named branch"
+else
+  printf 'Current branch: %s\n' "$current_branch"
+fi
+
+if [[ "$strict" -eq 1 ]]; then
+  case "$current_branch" in
+    develop|main|release-*) ;;
+    *) issue "strict release guard must run from develop, main, or release-*; current branch is ${current_branch:-detached}" ;;
+  esac
+fi
+
+if git rev-parse --verify -q refs/heads/main >/dev/null &&
+   git rev-parse --verify -q origin/main >/dev/null; then
+  if [[ "$(git rev-parse refs/heads/main)" != "$(git rev-parse origin/main)" ]]; then
+    if [[ "$mode" == "post" ]]; then
+      blocker "local main differs from origin/main; sync with 'git switch main && git pull --ff-only origin main' before release closeout (release decisions use origin/main)"
+    else
+      warn "local main differs from origin/main; release decisions use origin/main"
+    fi
+  fi
+elif [[ "$mode" == "post" ]]; then
+  if ! git rev-parse --verify -q refs/heads/main >/dev/null; then
+    blocker "local main missing; create/sync with 'git switch main && git pull --ff-only origin main' before release closeout"
+  fi
+fi
+
+if git rev-parse --verify -q refs/heads/develop >/dev/null &&
+   git rev-parse --verify -q origin/develop >/dev/null; then
+  if [[ "$(git rev-parse refs/heads/develop)" != "$(git rev-parse origin/develop)" ]]; then
+    if [[ "$strict" -eq 1 && "$current_branch" == "develop" ]]; then
+      blocker "local develop differs from origin/develop; push/pull before release"
+    else
+      warn "local develop differs from origin/develop; release decisions use origin/develop"
+    fi
+  fi
+fi
+
+if [[ "$mode" == "post" ]] &&
+   git rev-parse --verify -q origin/develop >/dev/null &&
+   git rev-parse --verify -q origin/main >/dev/null; then
+  develop_commit="$(git rev-parse origin/develop)"
+  main_commit="$(git rev-parse origin/main)"
+
+  if [[ "$develop_commit" == "$main_commit" ]]; then
+    printf 'Post-release refs aligned: origin/develop and origin/main reference the same commit.\n'
+  elif ! git merge-base --is-ancestor origin/develop origin/main >/dev/null 2>&1; then
+    issue "post-release requires origin/develop to equal or be an ancestor of origin/main"
+  else
+    develop_tree="$(git rev-parse 'origin/develop^{tree}')"
+    main_tree="$(git rev-parse 'origin/main^{tree}')"
+    if [[ "$develop_tree" == "$main_tree" ]]; then
+      printf 'Post-release refs aligned: origin/develop is an ancestor of origin/main with identical trees.\n'
+    else
+      issue "post-release requires origin/develop and origin/main to have identical content trees"
+    fi
+  fi
+fi
+
+section "Release date (pre/post/audit)"
+resolve_release_date
+if [[ -n "$RELEASE_DATE_INVALID" ]]; then
+  issue "invalid RELEASE_DATE: '$RELEASE_DATE_INVALID' (expected YYYY-MM-DD valid calendar date; default is current UTC date)"
+else
+  printf 'RELEASE_DATE: %s\n' "$RELEASE_DATE"
+fi
+
+section "Release cards canonicalization (pre/post/audit)"
+if [[ "$mode" == "pre" || "$mode" == "post" || "$mode" == "audit" ]]; then
+  normalize_release_cards
+  if [[ -n "$RELEASE_CARDS_INVALID" ]]; then
+    issue "RELEASE_CARDS contains invalid card identifiers: $RELEASE_CARDS_INVALID (expected comma-separated integers 1..2147483647)"
+  elif [[ -n "$RELEASE_CARDS_OUT_OF_RANGE" ]]; then
+    issue "RELEASE_CARDS contains out-of-range card identifier: $RELEASE_CARDS_OUT_OF_RANGE"
+  elif [[ -n "$CANONICAL_CARDS" ]]; then
+    printf 'RELEASE_CARDS canonicalized: %s\n' "$CANONICAL_CARDS"
+  else
+    printf 'RELEASE_CARDS not set or empty.\n'
+  fi
+else
+  printf 'Skipped (release cards canonicalization runs in pre/post/audit).\n'
+fi
+
+section "Remote snapshots (post/audit)"
+if [[ "$mode" == "post" || "$mode" == "audit" ]]; then
+  if [[ "$strict" -eq 1 && ( -n "$RELEASE_CARDS_INVALID" || -n "$RELEASE_CARDS_OUT_OF_RANGE" ) ]]; then
+    printf 'Remote snapshot load skipped: RELEASE_CARDS invalid (blocker already emitted before any remote call).\n'
+  elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    if ensure_snapshots; then
+      printf 'Board snapshot: %s items (totalCount=%s); PR snapshot: %s open PRs.\n' \
+        "$(printf '%s' "$BOARD_JSON" | jq '.items | length')" \
+        "$(printf '%s' "$BOARD_JSON" | jq -r '.totalCount')" \
+        "$(printf '%s' "$PRS_JSON" | jq 'length')"
+    else
+      printf 'One or more remote snapshots failed; see diagnostics above (global fail-closed).\n'
+    fi
+  else
+    printf 'Skipped (gh unavailable or not authenticated; board/PR checks skip or fail-closed per mode).\n'
+  fi
+else
+  printf 'Skipped (remote snapshots load in post/audit; pre performs no board/PR queries).\n'
+fi
+
+section "Prod deploy evidence"
+prod_evidence="${PROD_DEPLOY_EVIDENCE:-}"
+release_published=0
+if [[ "$mode" == "post" ]]; then
+  release_published=1
+elif [[ "$mode" == "pre" ]] &&
+     git rev-parse --verify -q origin/develop >/dev/null &&
+     git rev-parse --verify -q origin/main >/dev/null &&
+     [[ "$(git rev-parse origin/develop)" == "$(git rev-parse origin/main)" ]]; then
+  release_published=1
+fi
+if [[ "$release_published" -eq 1 ]]; then
+  if [[ -n "$prod_evidence" ]]; then
+    printf 'PROD deploy evidence: %s\n' "$prod_evidence"
+  else
+    issue "missing PROD deploy evidence; export PROD_DEPLOY_EVIDENCE with '<published-commit> services=<svc,...> url=<public-url>' (source PROD on the published commit + services restarted + public URL validated) before moving cards to Pronto"
+  fi
+else
+  printf 'PROD deploy evidence not required yet (release not published; checked in pre only after merge, required in post).\n'
+fi
+
+section "Worktrees"
+mapfile -t worktrees < <(git worktree list --porcelain | awk '$1 == "worktree" { sub(/^worktree /, ""); print }')
+for wt in "${worktrees[@]}"; do
+  wt_branch="$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || true)"
+  printf '%s [%s]\n' "$wt" "${wt_branch:-detached}"
+
+  wt_status="$(git -C "$wt" status --porcelain=v1 --untracked-files=all)"
+  if [[ -z "$wt_status" ]]; then
+    :
+  elif branch_is_preserved "$wt_branch"; then
+    warn "dirty worktree classified via PRESERVED_BRANCHES: $wt [$wt_branch]"
+    printf '%s\n' "$wt_status" | indent
+  elif [[ -n "$wt_branch" ]] && branch_merged "$wt_branch" && worktree_dirty_only_canonical_release_doc "$wt_status"; then
+    printf 'Dirty worktree allowed (merged branch; only docs/release-%s.md): %s\n' "$RELEASE_DATE" "$wt"
+  else
+    issue "dirty worktree: $wt"
+    printf '%s\n' "$wt_status" | indent
+  fi
+
+  if [[ "$wt" != "$repo_root" ]]; then
+    if branch_is_preserved "$wt_branch"; then
+      printf 'Extra worktree classified via PRESERVED_BRANCHES: %s [%s]\n' "$wt" "$wt_branch"
+    elif [[ -n "$wt_branch" ]] && branch_merged "$wt_branch"; then
+      warn "extra worktree on merged branch; remove at closeout (no empty commit): $wt [$wt_branch]"
+    else
+      issue "extra worktree requires classification before release cleanup: $wt"
+    fi
+  fi
+done
+
+section "Orphan refs and preserve worktrees (post)"
+if [[ "$mode" == "post" || "$mode" == "audit" ]]; then
+  orphan_refs="$(git for-each-ref refs/heads refs/remotes/origin --format='%(refname:short)' | grep -E '^(runtime-|rollback-|release-post-|sync-|preserve/)' || true)"
+  if [[ -n "$orphan_refs" ]]; then
+    issue "orphan refs require classification (integrate/preserve/cleanup with authorization):"
+    printf '%s\n' "$orphan_refs" | sort -u | indent
+  else
+    printf 'No orphan refs (runtime-*/rollback-*/release-post-*/sync-*/preserve/*).\n'
+  fi
+
+  for wt in "${worktrees[@]}"; do
+    wt_branch="$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || true)"
+    case "$wt_branch" in
+      preserve/*)
+        wt_status="$(git -C "$wt" status --porcelain=v1 --untracked-files=all)"
+        if [[ -n "$wt_status" ]]; then
+          issue "preserve worktree has uncommitted WIP requiring classification: $wt [$wt_branch]"
+          printf '%s\n' "$wt_status" | indent
+        else
+          printf 'Preserve worktree clean: %s [%s]\n' "$wt" "$wt_branch"
+        fi
+        ;;
+      runtime-*|rollback-*|release-post-*|sync-*)
+        issue "worktree on orphan branch requires classification: $wt [$wt_branch]"
+        ;;
+    esac
+  done
+else
+  printf 'Skipped (orphan inventory runs in post/audit; legacy debt does not block pre).\n'
+fi
+
+section "Card age inventory (audit)"
+if [[ "$mode" == "audit" ]]; then
+  age_threshold="${CARD_AGE_THRESHOLD_DAYS:-30}"
+  age_max_per_column="${CARD_AGE_MAX_PER_COLUMN:-5}"
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    card_age_query='
+      query($project: ID!, $cursor: String) {
+        node(id: $project) {
+          ... on ProjectV2 {
+            items(first: 100, after: $cursor) {
+              pageInfo { hasNextPage endCursor }
+              nodes {
+                updatedAt
+                content { ... on Issue { number title } }
+                fieldValueByName(name: "Status") {
+                  ... on ProjectV2ItemFieldSingleSelectValue { name }
+                }
+              }
+            }
+          }
+        }
+      }'
+    page_json="$(gh api graphql -f query="$card_age_query" -F project=PVT_lAHOAAHtBM4BV8b2zgrMgus 2>/dev/null || true)"
+    if [[ -z "$page_json" ]] || ! printf '%s' "$page_json" | jq -e '.data.node.items.nodes' >/dev/null 2>&1; then
+      warn "card age inventory unavailable (GraphQL project query returned no/invalid data; check auth/rate limit/project scope)"
+    else
+      nodes_json="$(printf '%s' "$page_json" | jq -c '.data.node.items.nodes')"
+      page=0
+      while [[ $page -lt 19 ]]; do
+        has_next="$(printf '%s' "$page_json" | jq -r '.data.node.items.pageInfo.hasNextPage // false' 2>/dev/null)"
+        cursor="$(printf '%s' "$page_json" | jq -r '.data.node.items.pageInfo.endCursor // ""' 2>/dev/null)"
+        if [[ "$has_next" != "true" || -z "$cursor" ]]; then
+          break
+        fi
+        if [[ $page -eq 18 ]]; then
+          warn "card age inventory truncated at 19 GraphQL pages; results are partial"
+          break
+        fi
+        page_json="$(gh api graphql -f query="$card_age_query" -F project=PVT_lAHOAAHtBM4BV8b2zgrMgus -F cursor="$cursor" 2>/dev/null || true)"
+        if [[ -z "$page_json" ]] || ! printf '%s' "$page_json" | jq -e '.data.node.items.nodes' >/dev/null 2>&1; then
+          warn "card age inventory pagination failed; inventory may be partial"
+          break
+        fi
+        nodes_json="$(printf '%s\n%s' "$nodes_json" "$(printf '%s' "$page_json" | jq -c '.data.node.items.nodes')" | jq -s 'add' 2>/dev/null || printf '%s' "$nodes_json")"
+        page=$((page + 1))
+      done
+
+      now_epoch="$(date +%s)"
+      rows="$(printf '%s' "$nodes_json" | jq -r --argjson now "$now_epoch" '
+        .[]
+        | select(.content.number != null)
+        | [
+            (.fieldValueByName.name // "Sem status"),
+            (.content.number|tostring),
+            (.content.title // ""),
+            ((($now - ((.updatedAt | fromdateiso8601) // $now)) / 86400) | floor)
+          ] | @tsv' 2>/dev/null | sort -t$'\t' -k4 -rn)"
+      if [[ -z "$rows" ]]; then
+        warn "card age inventory returned no rows (unexpected board shape); skipping age warnings"
+      else
+        per_column="$(printf '%s\n' "$rows" | awk -F'\t' -v col="$age_threshold" -v max="$age_max_per_column" '
+          {
+            key = $1
+            count[key]++
+            if (count[key] > max) next
+            if ($4 > col) {
+              if (!seen[key]++) {
+                printf "Cards com mais de %d dias sem atualizacao na coluna %s (max %d exibidos):\n", col, key, max
+              }
+              printf "  #%s %s (%dd)\n", $2, $3, $4
+            }
+          }')"
+        if [[ -n "$per_column" ]]; then
+          warn "cards presos por coluna (idade > ${age_threshold}d; inventario informativo):"
+          printf '%s\n' "$per_column" | indent
+        else
+          printf 'No cards older than %s days in their current column.\n' "$age_threshold"
+        fi
+      fi
+    fi
+  else
+    warn "card age inventory unavailable (gh unavailable or not authenticated)"
+  fi
+else
+  printf 'Skipped (card age inventory runs in audit only).\n'
+fi
+
+section "Board/issue title sync (audit)"
+if [[ "$mode" == "audit" ]]; then
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    if [[ "$BOARD_STATE" != "ok" ]]; then
+      warn "board/issue title sync check skipped (board snapshot unavailable (failed or skipped))"
+    else
+      board_json="$BOARD_JSON"
+      title_mismatches=0
+      while IFS=$'\t' read -r card_num board_title issue_title; do
+        [[ -z "$card_num" ]] && continue
+        card_num="${card_num//[$'\r']/}"
+        board_title="${board_title//[$'\r']/}"
+        issue_title="${issue_title//[$'\r']/}"
+        if [[ -z "$issue_title" ]]; then
+          # Item without a linked issue (draft/PR): out of scope per change kaizen-board-issue-rename-note.
+          continue
+        fi
+        if [[ "$board_title" == "$issue_title" ]]; then
+          continue
+        fi
+        note_found="$(gh api "repos/oalansilva/crypto/issues/$card_num/comments" --paginate --jq '[.[] | select((.body // "") | test("Nota de divergência|Nota de sincronização de título"; "i"))] | length' 2>/dev/null || printf '0')"
+        if [[ "$note_found" =~ ^[0-9]+$ ]] && [[ "$note_found" -gt 0 ]]; then
+          printf '  #%s board title != issue title, divergência com nota registrada (sem warn): %s\n' "$card_num" "$board_title"
+        else
+          title_mismatches=$((title_mismatches + 1))
+          warn "board title differs from issue title without divergence note (#$card_num): \"$board_title\" vs \"$issue_title\" (poste nota de divergência no card: Motivo + Aprovado por)"
+        fi
+      done < <(printf '%s' "$board_json" | jq -r '.items[] | select(.content.number != null) | [(.content.number|tostring), (.title // ""), (.content.title // "")] | @tsv' 2>/dev/null)
+      if [[ "$title_mismatches" -eq 0 ]]; then
+        printf 'Board/issue titles consistent or divergence notes registered.\n'
+      fi
+    fi
+  else
+    warn "board/issue title sync check unavailable (gh unavailable or not authenticated)"
+  fi
+else
+  printf 'Skipped (board/issue title sync check runs in audit only).\n'
+fi
+
+section "OpenSpec duplicate changes (post)"
+if [[ "$mode" == "post" || "$mode" == "audit" ]]; then
+  dup_changes="$(comm -12 \
+    <(find openspec/changes -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort) \
+    <(find openspec/changes/archive -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sed 's/^[0-9-]*//' | sort))"
+  if [[ -n "$dup_changes" ]]; then
+    issue "OpenSpec change is BOTH active and archived (verify content with git diff and remove the duplicated copy):"
+    printf '%s\n' "$dup_changes" | indent
+    printf 'Fix: openspec/changes/<name>/ exists next to openspec/changes/archive/*/<name>/; compare contents and remove the duplicate with: git rm -r openspec/changes/<name>\n' | indent
+  else
+    printf 'No OpenSpec change duplicated across active and archive.\n'
+  fi
+else
+  printf 'Skipped (duplicate OpenSpec check runs in post/audit; legacy debt does not block pre).\n'
+fi
+
+# --- OpenSpec terminal changes (card #517): enumerate first, map change->card,
+# then evaluate terminality. Progress (complete|in-progress) is informational
+# and never filters eligibility. ---
+
+_openspec_tokenize() {
+  # Normalize text to unique lowercase ASCII tokens without stopwords.
+  # Translitera acentos (Integração -> integracao) para casar com slugs ASCII
+  # e evita fragmentos tóxicos; tokens com menos de 3 chars são descartados.
+  local ascii
+  ascii="$(printf '%s' "$1" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || printf '%s' "$1")"
+  printf '%s' "$ascii" | \
+    tr '[:upper:]' '[:lower:]' | \
+    sed -E -e 's/[^a-z0-9]+/ /g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | \
+    tr ' ' '\n' | \
+    sed '/^$/d' | \
+    grep -E '^[a-z0-9]{3,}$' | \
+    grep -vE '^(card|issue|change|combo|com|de|da|do|das|dos|a|o|e|em|para|por|com|na|no|que|os|as|um|uma|ao|aos|ou|se|sao|ser|vai|foi|este|esta|essa|esse|no|nao|sim)$' | \
+    sort -u
+}
+
+_openspec_slug_fingerprint() {
+  local change="$1"
+  printf '%s' "$change" | sed -e 's/^card-[0-9]*-//' -e 's/^issue-[0-9]*-//' -e 's/^change-[0-9]*-//'
+}
+
+_openspec_title_candidates() {
+  # JSON lines: "<card_num>\t<title>", restricted to oalansilva/crypto items.
+  printf '%s' "$BOARD_JSON" | jq -r '.items[] | select((.content.number != null) and ((.content.repository // "") == "oalansilva/crypto")) | [(.content.number|tostring), (.content.title // "")] | @tsv' 2>/dev/null || true
+}
+
+_openspec_map_by_title() {
+  # Map a change to a single card by title similarity. Prints "<card_num>" on
+  # a strictly-unique high-score match, "TIE" on ambiguity, empty otherwise.
+  # No remote calls.
+  local change="$1" proposal_file="$2"
+  local slug_fp slug_tokens proposal_corpus proposal_tokens
+  slug_fp="$(_openspec_slug_fingerprint "$change")"
+  slug_tokens="$(_openspec_tokenize "$slug_fp")"
+  if [[ -f "$proposal_file" ]]; then
+    proposal_corpus="$(grep -vE '^#|^---|^$' "$proposal_file" 2>/dev/null || true)"
+  else
+    proposal_corpus=""
+  fi
+  proposal_tokens="$(_openspec_tokenize "$proposal_corpus")"
+
+  local best_card="" best_score=-1 tie=0
+  local card title title_tokens score slug_hits proposal_hits t
+  while IFS=$'\t' read -r card title; do
+    [[ -z "$card" ]] && continue
+    # Priority candidate set: RELEASE_CARDS package first, then full snapshot.
+    if [[ -n "$CANONICAL_CARDS" ]]; then
+      if ! printf ' %s ' " $CANONICAL_CARDS " | grep -q " $card "; then
+        continue
+      fi
+    fi
+    title_tokens="$(_openspec_tokenize "$title")"
+    [[ -z "$title_tokens" ]] && continue
+    slug_hits=0
+    for t in $title_tokens; do
+      if printf '%s\n' "$slug_tokens" | grep -qx "$t"; then
+        slug_hits=$((slug_hits + 1))
+      fi
+    done
+    proposal_hits=0
+    for t in $title_tokens; do
+      if printf '%s\n' "$proposal_tokens" | grep -qx "$t"; then
+        proposal_hits=$((proposal_hits + 1))
+      fi
+    done
+    score=$((5 * slug_hits + proposal_hits))
+    if [[ "$slug_hits" -lt 2 && "$proposal_hits" -lt 4 ]]; then
+      continue
+    fi
+    if [[ "$score" -gt "$best_score" ]]; then
+      best_score=$score
+      best_card="$card"
+      tie=0
+    elif [[ "$score" -eq "$best_score" ]]; then
+      tie=1
+    fi
+  done < <(_openspec_title_candidates)
+
+  if [[ "$tie" -eq 0 && -n "$best_card" ]]; then
+    printf '%s' "$best_card"
+  elif [[ "$tie" -eq 1 && -n "$best_card" ]]; then
+    printf 'TIE'
+  fi
+}
+
+_openspec_change_progress() {
+  # Prints complete|in-progress: complete = expected artifacts + zero open tasks.
+  local change_dir="$1"
+  if [[ -f "$change_dir/proposal.md" && -f "$change_dir/design.md" && -f "$change_dir/tasks.md" && -d "$change_dir/specs" ]]; then
+    if grep -qE '^- \[ \]' "$change_dir/tasks.md" 2>/dev/null; then
+      printf 'in-progress'
+    else
+      printf 'complete'
+    fi
+  else
+    printf 'in-progress'
+  fi
+}
+
+openspec_terminal_changes_check() {
+  if [[ "$mode" != "post" && "$mode" != "audit" ]]; then
+    return 0
+  fi
+  local package_set=""
+  if [[ -n "$CANONICAL_CARDS" ]]; then
+    package_set="package=yes"
+  else
+    package_set="package=no"
+  fi
+
+  if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
+    issue "OpenSpec terminal-changes check could not run (gh unavailable or not authenticated)"
+    return 0
+  fi
+  if [[ "$BOARD_STATE" != "ok" ]]; then
+    issue "OpenSpec terminal-changes check could not run (board snapshot unavailable (failed or skipped))"
+    return 0
+  fi
+
+  local terminal_pending=0 ambiguity_pending=0 unmapped_pending=0
+  local change_dir change_name card_num progress mapping status
+  for change_dir in openspec/changes/*/; do
+    [[ -d "$change_dir" ]] || continue
+    change_name="$(basename "$change_dir")"
+    [[ "$change_name" =~ ^(archive|.*\.md)$ ]] && continue
+
+    progress="$(_openspec_change_progress "$change_dir")"
+
+    card_num="$(printf '%s' "$change_name" | grep -oE '^(card|issue)-[0-9]+' | grep -oE '[0-9]+$' | head -1 || true)"
+    mapping="name"
+    if [[ -z "$card_num" ]]; then
+      card_num="$(_openspec_map_by_title "$change_name" "$change_dir/proposal.md")"
+      mapping="title"
+    fi
+    if [[ "$card_num" == "TIE" ]]; then
+      # Associação ambígua (empate no melhor score): diagnóstico em audit,
+      # blocker em post quando impede provar a higiene do pacote.
+      ambiguity_pending=$((ambiguity_pending + 1))
+      if [[ "$strict" -eq 1 ]]; then
+        blocker "OpenSpec change without safe card association (ambiguous title match, map or rename with id): $change_name ($package_set)"
+      else
+        warn "OpenSpec change without safe card association (ambiguous title match, map or rename with id): $change_name ($package_set)"
+      fi
+      continue
+    fi
+    if [[ -z "$card_num" ]]; then
+      # Sem associação segura (score abaixo do piso): sinalizado como pendência
+      # de mapeamento; a prova de higiene do pacote fica incompleta sem ele.
+      unmapped_pending=$((unmapped_pending + 1))
+      warn "OpenSpec change without safe card association (below score floor, map or rename with id): $change_name ($package_set)"
+      continue
+    fi
+
+    status="$(card_status "$card_num")"
+    case "$status" in
+      Pronto|Cancelado)
+        terminal_pending=$((terminal_pending + 1))
+        local detail
+        detail="OpenSpec change of terminal card is still active (archive or classify): $change_name (card #$card_num is $status, progress=$progress, mapping=$mapping, $package_set)"
+        if [[ "$strict" -eq 1 ]]; then
+          blocker "$detail"
+        else
+          warn "$detail"
+        fi
+        ;;
+      "")
+        ambiguity_pending=$((ambiguity_pending + 1))
+        warn "OpenSpec change mapped to card without status in snapshot: $change_name (card #$card_num, progress=$progress, mapping=$mapping, $package_set)"
+        ;;
+    esac
+  done
+
+  if [[ "$terminal_pending" -eq 0 && "$ambiguity_pending" -eq 0 && "$unmapped_pending" -eq 0 ]]; then
+    printf 'No active OpenSpec changes mapped to terminal cards (Pronto/Cancelado).\n'
+  fi
+}
+
+section "OpenSpec terminal changes (post/audit)"
+if [[ "$mode" == "post" || "$mode" == "audit" ]]; then
+  openspec_terminal_changes_check
+else
+  printf 'Skipped (OpenSpec terminal changes check runs in post/audit).\n'
+fi
+
+section "Change/card/release branch inventory (post/audit)"
+if [[ "$mode" == "post" || "$mode" == "audit" ]]; then
+  branch_has_worktree() {
+    local name="$1"
+    git worktree list --porcelain | awk -v b="refs/heads/$name" '$1 == "branch" && $2 == b { found=1 } END { exit !found }'
+  }
+
+  card_terminal_state() {
+    # Prints terminal|non-terminal|unknown for the card of a branch. Unknown
+    # (board snapshot failed, missing item, or duplicated item) is NOT
+    # non-terminal and must never be classified as preserved.
+    local name="$1" card_num=""
+    card_num="$(printf '%s' "$name" | grep -oE '(^|/)(card|change|issue)-[0-9]+' | grep -oE '[0-9]+$' | head -1 || true)"
+    if [[ -z "$card_num" ]]; then
+      printf 'unknown'
+      return 0
+    fi
+    case "$(card_lookup "$card_num")" in
+      terminal) printf 'terminal' ;;
+      non-terminal) printf 'non-terminal' ;;
+      *) printf 'unknown' ;;
+    esac
+  }
+
+  card_is_terminal() {
+    [[ "$(card_terminal_state "$1")" == "terminal" ]]
+  }
+
+  branch_state_unknown_status() {
+    local name="$1" card_num=""
+    card_num="$(printf '%s' "$name" | grep -oE '(^|/)(card|change|issue)-[0-9]+' | grep -oE '[0-9]+$' | head -1 || true)"
+    [[ -z "$card_num" ]] && return 1
+    [[ "$(card_terminal_state "$name")" == "unknown" ]]
+  }
+
+  local_branches="$(git for-each-ref refs/heads --format='%(refname:short)' | grep -E '^(change-|card-|release-)' | sort -u || true)"
+  remote_branches="$(git for-each-ref refs/remotes/origin --format='%(refname:short)' | grep -E '^origin/(change-|card-|release-)' | sed 's/^origin\///' | sort -u || true)"
+  all_names="$(printf '%s\n%s\n' "$local_branches" "$remote_branches" | grep -v '^$' | sort -u)"
+
+  if [[ -n "$all_names" ]]; then
+    pending=0
+    pending_list=""
+    while IFS= read -r name; do
+      if [[ "$name" == "$current_branch" || "origin/$name" == "$current_branch" ]]; then
+        printf '  %s (current branch, excluded from cleanup check)\n' "$name"
+        continue
+      fi
+      local_sha="$(git rev-parse --short "refs/heads/$name" 2>/dev/null || printf 'none')"
+      remote_sha="$(git rev-parse --short "refs/remotes/origin/$name" 2>/dev/null || printf 'none')"
+      if [[ "$local_sha" == "none" ]]; then
+        sha="$remote_sha"
+        ref="refs/remotes/origin/$name"
+      else
+        sha="$local_sha"
+        ref="refs/heads/$name"
+      fi
+      has_local=0
+      has_remote=0
+      [[ "$local_sha" != "none" ]] && has_local=1
+      [[ "$remote_sha" != "none" ]] && has_remote=1
+
+      merged="no"
+      if branch_merged "$ref"; then
+        merged="yes"
+      fi
+      open_pr="unknown"
+      open_pr="$(pr_lookup oalansilva "$name")"
+
+      state=""
+      # Fatos locais primeiro: preservação explícita e worktree ativa não
+      # dependem do board e sempre vencem a indeterminação de status.
+      if branch_is_preserved "$name" || branch_has_worktree "$name"; then
+        state="preserved (classified; not deleted)"
+      elif branch_state_unknown_status "$name"; then
+        # Unknown status (snapshot failed/missing/duplicate) is fail-closed:
+        # never presented as preserved.
+        if [[ "$strict" -eq 1 ]]; then
+          state="unknown status (not preserved; classify before delete)"
+          pending=$((pending + 1))
+          pending_list+="    $name (unknown status; snapshot failed or card not determinable)"$'\n'
+          blocker "could not determine terminal status for branch $name; remote state unknown (board snapshot failed, missing, or duplicated item)"
+        else
+          state="unknown status (not preserved; classify)"
+          pending=$((pending + 1))
+          pending_list+="    $name (unknown status; snapshot failed or card not determinable)"$'\n'
+          warn "could not determine terminal status for branch $name; remote state unknown (board snapshot failed, missing, or duplicated item)"
+        fi
+      elif ! card_is_terminal "$name"; then
+        state="preserved (card in flight; not deleted)"
+      elif [[ "$merged" == "no" ]]; then
+        state="not merged (requires classification/integrate or cancel)"
+      elif [[ "$open_pr" == "yes" ]]; then
+        state="merged but has open PR (classify before delete)"
+      elif [[ "$open_pr" == "unknown" ]]; then
+        state="merged but PR status unknown (classify before delete)"
+      else
+        state="merged, no open PR (delete in closeout before Pronto)"
+      fi
+
+      printf '  %s %s local=%s remote=%s merged=%s pr_open=%s -> %s\n' "$name" "$sha" "$has_local" "$has_remote" "$merged" "$open_pr" "$state"
+
+      case "$state" in
+        preserved*)
+          ;;
+        "merged, no open PR"*|"not merged"*|"merged but"*)
+          pending=$((pending + 1))
+          pending_list+="    $name ($state)"$'\n'
+          ;;
+      esac
+    done <<< "$all_names"
+
+    if [[ "$pending" -gt 0 ]]; then
+      if [[ "$strict" -eq 1 ]]; then
+        blocker "unclassified change-*/card-*/release-* branches require classification or deletion in closeout:"
+      else
+        warn "unclassified change-*/card-*/release-* branches; classify (integrate/preserve/delete) in closeout:"
+      fi
+      printf '%s' "$pending_list" | indent
+    else
+      printf 'All change-*/card-*/release-* branches classified or preserved.\n'
+    fi
+  else
+    printf 'No change-*/card-*/release-* branches.\n'
+  fi
+
+  section "Package branch cleanup (post)"
+  if [[ "$mode" == "post" ]]; then
+    release_branches="${RELEASE_BRANCHES:-}"
+    if [[ -z "$release_branches" ]]; then
+      issue "RELEASE_BRANCHES not set or empty: list the package branches (change-*/card-*/release-*) that must be absent locally and on origin before moving cards to Pronto"
+    else
+      # Normalize: trim, drop empty tokens, dedupe, validate format.
+      declare -A seen_pkg=()
+      pkg_clean=()
+      pkg_invalid=0
+      pkg_empty=0
+      IFS=',' read -ra pkg_arr <<< "$release_branches"
+      for raw_branch in "${pkg_arr[@]}"; do
+        branch="$(printf '%s' "$raw_branch" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        if [[ -z "$branch" ]]; then
+          pkg_empty=$((pkg_empty + 1))
+          continue
+        fi
+        if ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
+          issue "RELEASE_BRANCHES contains invalid branch name: '$branch'"
+          pkg_invalid=$((pkg_invalid + 1))
+          continue
+        fi
+        case "$branch" in
+          change-*|card-*|release-*) ;;
+          *)
+            issue "RELEASE_BRANCHES token outside change-*/card-*/release-* prefixes: '$branch'"
+            pkg_invalid=$((pkg_invalid + 1))
+            continue
+            ;;
+        esac
+        if [[ -z "${seen_pkg[$branch]:-}" ]]; then
+          seen_pkg[$branch]=1
+          pkg_clean+=("$branch")
+        fi
+      done
+      if [[ "$pkg_empty" -gt 0 ]]; then
+        issue "RELEASE_BRANCHES contains empty tokens (trailing commas or whitespace-only items)"
+      fi
+      if [[ "$pkg_invalid" -gt 0 ]]; then
+        issue "RELEASE_BRANCHES contains invalid tokens; fix the list before retrying"
+      fi
+      remaining=0
+      for branch in "${pkg_clean[@]}"; do
+        local_ok=0
+        remote_ok=0
+        git rev-parse --verify -q "refs/heads/$branch" >/dev/null && local_ok=1
+        git rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null && remote_ok=1
+        if [[ "$local_ok" -eq 1 || "$remote_ok" -eq 1 ]]; then
+          printf '  package branch still present: %s local=%s remote=%s\n' "$branch" "$local_ok" "$remote_ok"
+          remaining=$((remaining + 1))
+        else
+          printf '  package branch deleted: %s\n' "$branch"
+        fi
+      done
+      if [[ "$remaining" -gt 0 ]]; then
+        issue "package branches not deleted before Pronto (RELEASE_BRANCHES): delete locally and remotely in closeout"
+      else
+        printf 'All RELEASE_BRANCHES deleted (local and remote).\n'
+      fi
+    fi
+  else
+    printf 'Skipped (package branch cleanup check runs in post).\n'
+  fi
+else
+  printf 'Skipped (change/card/release branch inventory runs in post/audit; legacy debt does not block pre).\n'
+fi
+
+section "Local branches"
+if git rev-parse --verify -q origin/develop >/dev/null &&
+   git rev-parse --verify -q origin/main >/dev/null; then
+  mapfile -t branches < <(git for-each-ref refs/heads --format='%(refname:short)' | sort)
+  for branch in "${branches[@]}"; do
+    if [[ "$mode" == "pre" && "$branch" == "$current_branch" && "$branch" == release-* ]]; then
+      continue
+    fi
+
+    # Card #618: on release-* pre, local develop tip is noise — authority is origin/develop.
+    # Do not require PRESERVED_BRANCHES=develop; diverge warn (~438) still applies.
+    if [[ "$mode" == "pre" && "$current_branch" == release-* && "$branch" == "develop" ]]; then
+      continue
+    fi
+
+    if [[ "$branch" == "$current_branch" ]]; then
+      continue
+    fi
+
+    if ! branch_merged "$branch"; then
+      if branch_is_preserved "$branch"; then
+        warn "local branch not merged; classified via PRESERVED_BRANCHES: $branch"
+      else
+        issue "local branch not merged into origin/develop or origin/main: $branch"
+      fi
+    fi
+  done
+else
+  issue "cannot check local branch merge state without origin/develop and origin/main"
+fi
+
+section "Stashes"
+stash_list="$(git stash list)"
+if [[ -n "$stash_list" ]]; then
+  issue "stash entries exist; classify, branch, integrate, or explicitly discard before release cleanup"
+  printf '%s\n' "$stash_list" | indent
+else
+  printf 'No stashes.\n'
+fi
+
+section "Tracked ignored/generated files"
+tracked_ignored="$(git ls-files -ci --exclude-standard)"
+if [[ -n "$tracked_ignored" ]]; then
+  issue "tracked files are also ignored; remove from index or unignore intentionally"
+  printf '%s\n' "$tracked_ignored" | indent
+else
+  printf 'No tracked ignored files.\n'
+fi
+
+tracked_generated="$(git ls-files -- output frontend/test-results frontend/playwright-report qa-evidence)"
+if [[ -n "$tracked_generated" ]]; then
+  issue "generated evidence/report files are tracked"
+  printf '%s\n' "$tracked_generated" | indent
+else
+  printf 'No tracked generated evidence/report paths.\n'
+fi
+
+section "Release docs (pre/post/audit)"
+canonical_doc="docs/release-${RELEASE_DATE}.md"
+validate_release_doc() {
+  local doc="$1"
+  if ! [[ -f "$doc" ]]; then
+    return 1
+  fi
+  if ! git ls-files --error-unmatch "$doc" >/dev/null 2>&1; then
+    issue "release doc not committed: $doc (commit it before moving cards to Pronto)"
+    return 0
+  fi
+  placeholders="$(grep -nE 'TBD|TODO|lorem|<!--|FIXME|<[A-Z_]+>' "$doc" 2>/dev/null | head -5)"
+  if [[ -n "$placeholders" ]]; then
+    issue "release doc contains placeholders and is not ready: $doc"
+    printf '%s\n' "$placeholders" | indent
+  fi
+}
+if [[ "$mode" == "pre" ]]; then
+  if [[ -f "$canonical_doc" ]]; then
+    if unpublished_is_code_pr; then
+      warn "canonical release doc already exists for $RELEASE_DATE while unpublished diff still has code; update the same $canonical_doc after this package's deploy (do not reuse previous-lote PROD_DEPLOY_EVIDENCE)"
+    else
+      if [[ -z "$prod_evidence" ]]; then
+        issue "release doc exists without PROD_DEPLOY_EVIDENCE: $canonical_doc (documental PR requires final deploy evidence)"
+      fi
+      validate_release_doc "$canonical_doc"
+    fi
+  else
+    printf 'No canonical release doc yet for %s (code PR; documental PR comes after deploy).\n' "$RELEASE_DATE"
+  fi
+elif [[ "$mode" == "post" || "$mode" == "audit" ]]; then
+  release_docs="$(ls docs/release-*.md 2>/dev/null | sort)"
+  if [[ -z "$release_docs" ]]; then
+    issue "no release doc found in docs/; commit the release doc before moving cards to Pronto"
+  fi
+  # Canonical doc of the release date is mandatory in post/audit.
+  if [[ -f "$canonical_doc" ]]; then
+    validate_release_doc "$canonical_doc"
+  else
+    issue "canonical release doc missing: $canonical_doc (commit the release doc for $RELEASE_DATE before moving cards to Pronto)"
+  fi
+  if [[ "$mode" == "post" && -n "$prod_evidence" ]]; then
+    validate_prod_evidence_this_lote
+  fi
+  # Duplicate release docs for the same date with divergent content
+  declare -A seen_docs
+  for doc in $release_docs; do
+    date="$(basename "$doc" | sed -E 's/^release-([0-9]{4}-[0-9]{2}-[0-9]{2}).*/\1/')"
+    if [[ -z "$date" || "$date" == "$doc" ]]; then
+      continue
+    fi
+    if [[ -n "${seen_docs[$date]:-}" ]]; then
+      if ! diff -q "${seen_docs[$date]}" "$doc" >/dev/null 2>&1; then
+        issue "duplicate release docs with divergent content for date $date: ${seen_docs[$date]} vs $doc (consolidate into one canonical doc)"
+      fi
+    else
+      seen_docs["$date"]="$doc"
+    fi
+  done
+else
+  printf 'Skipped (release docs check runs in pre/post/audit; legacy debt does not block pre).\n'
+fi
+section "Kaizen release evidence (post)"
+if [[ "$mode" == "post" ]]; then
+  kaizen_log="docs/kaizen-log.md"
+  if ! [[ -f "$kaizen_log" ]]; then
+    issue "kaizen-log missing: $kaizen_log (run /kaizen release before moving cards to Pronto)"
+  elif ! git ls-files --error-unmatch "$kaizen_log" >/dev/null 2>&1; then
+    issue "kaizen-log not committed: $kaizen_log (commit the kaizen release entry before moving cards to Pronto)"
+  elif ! grep -qE "^## ${RELEASE_DATE}[^[:alnum:]]+.*(Kaizen release|/kaizen release)" "$kaizen_log" 2>/dev/null; then
+    # A triage/card heading of the same date does NOT satisfy the release
+    # audit marker; only a "## YYYY-MM-DD — Kaizen release" heading counts.
+    issue "kaizen-log has no canonical Kaizen release entry for $RELEASE_DATE (required: heading '## $RELEASE_DATE — Kaizen release ...' before moving cards to Pronto)"
+  else
+    printf 'Kaizen release entry present for %s.\n' "$RELEASE_DATE"
+    # Card #661: materialization (1–3 created / dedupe in-flow / Sem achados acionáveis).
+    kaizen_mat_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/kaizen_materialization_check.py"
+    if ! [[ -f "$kaizen_mat_script" ]]; then
+      issue "kaizen materialization checker missing: $kaizen_mat_script"
+    else
+      mat_out=""
+      mat_rc=0
+      mat_board_file=""
+      if [[ -n "$BOARD_JSON" ]]; then
+        mat_board_file="$(mktemp)"
+        printf '%s' "$BOARD_JSON" > "$mat_board_file"
+      fi
+      mat_out="$(
+        BOARD_STATE="$BOARD_STATE" \
+          python3 "$kaizen_mat_script" "$kaizen_log" "$RELEASE_DATE" \
+          --board-state "$BOARD_STATE" \
+          ${mat_board_file:+--board-json-file "$mat_board_file"} \
+          2>&1
+      )" || mat_rc=$?
+      if [[ -n "$mat_board_file" ]]; then
+        rm -f "$mat_board_file"
+      fi
+      if [[ "$mat_rc" -eq 0 ]]; then
+        printf '%s\n' "$mat_out"
+      else
+        while IFS= read -r mat_line; do
+          [[ -n "$mat_line" ]] && issue "$mat_line"
+        done <<< "$mat_out"
+      fi
+    fi
+  fi
+else
+  printf 'Skipped (kaizen release evidence check runs in post).\n'
+fi
+
+# Board fields for package cards (Responsável/Prioridade/Tipo)
+if [[ "$mode" == "post" || "$mode" == "audit" ]]; then
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    if [[ "$BOARD_STATE" != "ok" ]]; then
+      if [[ -n "$CANONICAL_CARDS" ]]; then
+        issue "board fields check could not run (board snapshot unavailable (failed or skipped))"
+      else
+        warn "board fields check unavailable (board snapshot unavailable (failed or skipped)). Set RELEASE_CARDS to enforce package checks."
+      fi
+    else
+      board_json="$BOARD_JSON"
+      if [[ -n "$CANONICAL_CARDS" ]]; then
+        identity_missing=""
+        for num in $CANONICAL_CARDS; do
+          count="$(card_matches_count "$num")"
+          if [[ "$count" -ne 1 ]]; then
+            identity_missing+="    #$num (found $count matching items)"$'\n'
+          elif [[ -z "$(card_status "$num")" ]]; then
+            identity_missing+="    #$num (no Status)"$'\n'
+          fi
+        done
+        if [[ -n "$identity_missing" ]]; then
+          issue "package cards (RELEASE_CARDS) missing, duplicated, or without Status on Project 1:"
+          printf '%s' "$identity_missing" | indent
+        else
+          filter=''
+          for num in $CANONICAL_CARDS; do
+            filter+=" or (.content.number == $num and (.content.repository // \"\") == \"oalansilva/crypto\")"
+          done
+          filter="select(${filter# or })"
+          missing="$(printf '%s' "$board_json" | jq -r ".items[] | ${filter} | [.content.number, (.responsavel // \"VAZIO\"), (.prioridade // \"VAZIO\"), (.tipo // \"VAZIO\")] | @tsv" 2>/dev/null | awk -F'\t' '$2=="VAZIO" || $3=="VAZIO" || $4=="VAZIO" {print}')"
+          if [[ -n "$missing" ]]; then
+            issue "package cards (RELEASE_CARDS) missing board fields (Responsável/Prioridade/Tipo):"
+            printf '%s\n' "$missing" | indent
+          else
+            printf 'Board fields present for RELEASE_CARDS package.\n'
+          fi
+        fi
+      else
+        missing="$(printf '%s' "$board_json" | jq -r '.items[] | select(.status == "Pronto" or .status == "Homologado") | select((.content.number|tostring|length) > 0) | [.content.number, (.responsavel // "VAZIO"), (.prioridade // "VAZIO"), (.tipo // "VAZIO")] | @tsv' 2>/dev/null | awk -F'\t' '$2=="VAZIO" || $3=="VAZIO" || $4=="VAZIO" {print}')"
+        if [[ -n "$missing" ]]; then
+          warn "Pronto/Homologado cards missing board fields (set RELEASE_CARDS to scope to the package):"
+          printf '%s\n' "$missing" | indent
+        else
+          printf 'Board fields present for Pronto/Homologado cards.\n'
+        fi
+      fi
+    fi
+  else
+    if [[ -n "$CANONICAL_CARDS" ]]; then
+      issue "board fields check could not run (gh unavailable or not authenticated) with RELEASE_CARDS set"
+    else
+      warn "board fields check unavailable (gh unavailable or not authenticated). Set RELEASE_CARDS to enforce package checks."
+    fi
+  fi
+else
+  printf 'Skipped (board fields check runs in post/audit).\n'
+fi
+
+section "Homologation evidence comments (pre)"
+if [[ "$mode" == "pre" ]]; then
+  if [[ -n "$RELEASE_CARDS_INVALID" || -n "$RELEASE_CARDS_OUT_OF_RANGE" ]]; then
+    printf 'Homologation-comment REST skipped (RELEASE_CARDS invalid; blocker already emitted).\n'
+  elif [[ -z "$CANONICAL_CARDS" ]]; then
+    warn "RELEASE_CARDS not set; package homologation-comment check skipped"
+  elif ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
+    issue "homologation-comment check could not run (gh unavailable or not authenticated) with RELEASE_CARDS set"
+  else
+    declare -A seen_pre_evidence_cards=()
+    for card_num in $CANONICAL_CARDS; do
+      if [[ -n "${seen_pre_evidence_cards[$card_num]:-}" ]]; then
+        continue
+      fi
+      seen_pre_evidence_cards["$card_num"]=1
+      comments=""
+      if ! comments="$(gh api "repos/oalansilva/crypto/issues/$card_num/comments" --paginate --jq '.[].body' 2>/dev/null)"; then
+        issue "homologation-comment check could not list all comments for card #$card_num"
+        continue
+      fi
+      if printf '%s\n' "$comments" | grep -qiF 'Homologado por Alan na develop.'; then
+        printf 'Card #%s has canonical homologation evidence.\n' "$card_num"
+      else
+        issue "card #$card_num without canonical homologation comment; run scripts/post-card-evidence-comment.sh --transition homologado --card $card_num --commit <sha>"
+      fi
+    done
+  fi
+else
+  printf 'Skipped (homologation-comment pre check runs in pre).\n'
+fi
+
+section "Homologation evidence comments (post/audit)"
+if [[ "$mode" == "post" || "$mode" == "audit" ]]; then
+  if [[ -z "$CANONICAL_CARDS" ]]; then
+    if [[ -n "$RELEASE_CARDS_INVALID" || -n "$RELEASE_CARDS_OUT_OF_RANGE" ]]; then
+      if [[ "$strict" -ne 1 ]]; then
+        warn "RELEASE_CARDS invalid; package homologation-comment check skipped"
+      fi
+    else
+      warn "RELEASE_CARDS not set; package homologation-comment check skipped"
+    fi
+  elif ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
+    issue "homologation-comment check could not run (gh unavailable or not authenticated) with RELEASE_CARDS set"
+  elif [[ "$BOARD_STATE" != "ok" ]]; then
+    issue "homologation-comment check could not run (board snapshot unavailable (failed or skipped))"
+  else
+    declare -A seen_evidence_cards=()
+    for card_num in $CANONICAL_CARDS; do
+      if [[ -n "${seen_evidence_cards[$card_num]:-}" ]]; then
+        continue
+      fi
+      seen_evidence_cards["$card_num"]=1
+
+      card_status="$(card_status "$card_num")"
+      if [[ -z "$card_status" ]]; then
+        issue "homologation-comment check could not find card #$card_num or its Status on Project 1"
+        continue
+      fi
+      case "$card_status" in
+        Homologado|Pronto) ;;
+        *)
+          printf 'Card #%s is %s; homologation-comment check not applicable.\n' "$card_num" "$card_status"
+          continue
+          ;;
+      esac
+
+      comments=""
+      if ! comments="$(gh api "repos/oalansilva/crypto/issues/$card_num/comments" --paginate --jq '.[].body' 2>/dev/null)"; then
+        issue "homologation-comment check could not list all comments for card #$card_num"
+        continue
+      fi
+      if printf '%s\n' "$comments" | grep -qiF 'Homologado por Alan na develop.'; then
+        printf 'Card #%s has canonical homologation evidence.\n' "$card_num"
+      else
+        issue "card #$card_num is $card_status without canonical homologation comment; confirm Alan's approval and run scripts/post-card-evidence-comment.sh --transition homologado --card $card_num --commit <sha> --dry-run before posting"
+      fi
+    done
+  fi
+else
+  printf 'Skipped (homologation-comment check runs in post/audit).\n'
+fi
+
+section "Summary"
+printf 'Warnings: %d\n' "$warnings"
+printf 'Blockers: %d\n' "$failures"
+
+if [[ "$strict" -eq 1 && "$failures" -gt 0 ]]; then
+  printf 'Result: FAIL\n'
+  exit 1
+fi
+
+printf 'Result: PASS\n'

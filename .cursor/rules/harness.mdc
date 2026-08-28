@@ -1,0 +1,10 @@
+---
+description: Cursor harness identity
+alwaysApply: true
+---
+
+# Harness (Cursor)
+
+- Cliente: Cursor Agent. Hooks: `.cursor/hooks.json`. Task `inherit`.
+- Always-on δ vive em `AGENTS.md`. Não invente aresta; use `process_event`.
+- Overlay on-demand; runbook = skill `covenant-flow`.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Design Critic"
+  short_description: "Prepara e critica entregas de design"
+  default_prompt: "Use $design-critic para preparar e criticar a entrega de design deste card."

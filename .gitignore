@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Generated Moore page
+.grok/rules/process-fsm-page.md
+
+# OpenCode 1.18.18 also discovers .opencode/plugins/; version only .opencode/plugin/.
+.opencode/plugins/
+
+.pytest_cache/

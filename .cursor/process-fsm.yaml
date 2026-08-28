@@ -1,0 +1,134 @@
+# Compilable EFSM for the 12-column process (epic #608, card #609).
+# #610/#611 consume this file. Do not put request_implement in transitions.
+
+version: 1
+fail_closed_asymmetric: true
+
+states:
+  - Em Refinamento
+  - Todo
+  - Design
+  - Aprovação de Design
+  - Pronto para Dev
+  - Em desenvolvimento
+  - Code Review
+  - QA
+  - Done
+  - Homologado
+  - Pronto
+  - Cancelado
+
+terminal_states:
+  - Pronto
+  - Cancelado
+
+illegal_events:
+  - request_implement
+  - pular_coluna
+  - Agent.aprovar_design
+
+illegal_edges:
+  - { id: todo-write, state: Todo, event: write_produto }
+  - { id: develop-write, q_git: develop, event: write_produto }
+  - { id: main-write, q_git: main, event: write_produto }
+  - { id: done-write, state: Done, event: write_produto }
+  - { id: homologado-write, state: Homologado, event: write_produto }
+  - { id: pronto-write, state: Pronto, event: write_produto }
+  - { id: cancelado-write, state: Cancelado, event: write_produto }
+  - { id: unbound-write, unbound: true, event: write_produto }
+  - { id: agent-t7, event: aprovar_design, actor: Agent }
+
+invariants:
+  - id: I1
+    text: "Write(produto) ⇒ q ∈ {Em desenvolvimento, Code Review} ∧ q_git=card-<id> ∧ bound_card=id ∧ path desse worktree"
+  - id: I2
+    text: "T1, T7, T15.ator ⊇ Alan. Agent ⇏ T7. T16.ator ⊇ Agent."
+  - id: I3
+    text: "Em Pronto para Dev, Write produto = deny. Allow só após Status já ser Em desenvolvimento."
+  - id: I4
+    text: "digest mudou em Pronto para Dev ou Em desenvolvimento ⇒ T17, não apply."
+  - id: I5
+    text: "q ∈ {Done, Homologado, Pronto, Cancelado} ⇒ ¬Write(produto)."
+  - id: I6
+    text: "q_git ∈ {develop, main} ⇒ ¬Write(produto)."
+  - id: I7
+    text: "evento ∉ enabled_events(q) ⇒ reject, q inalterado."
+  - id: I8
+    text: "T14 atômico: falha squash/restart ⇒ permanece QA."
+  - id: I9
+    text: "T16 exige M_lote."
+
+enabled_tools:
+  Em Refinamento: [issue_edit, comment]
+  Todo: [create_worktree]
+  Design: [write_openspec, write_prototype, gist, task_critique]
+  Aprovação de Design: [read, gh_view]
+  Pronto para Dev: [process_event]
+  Em desenvolvimento: [write_produto]
+  Code Review: [write_produto, task_reviewers]
+  QA: [gh_checks, rerun]
+  Done: []
+  Homologado: [process_event]
+  Pronto: []
+  Cancelado: []
+
+enabled_events:
+  Em Refinamento: [priorizar, cancelar]
+  Todo: [iniciar_design, cancelar]
+  Design: [recriticar, submeter_design, cancelar]
+  Aprovação de Design: [devolver_design, aprovar_design, cancelar]
+  Pronto para Dev: [iniciar_apply, invalidar_aprovacao, cancelar]
+  Em desenvolvimento: [pedir_review, invalidar_aprovacao, cancelar]
+  Code Review: [achar_bloqueante, aceitar_sha, cancelar]
+  QA: [rerun_infra, falha_codigo, integrar_develop, cancelar]
+  Done: [homologar, cancelar]
+  Homologado: [fechar_release, cancelar]
+  Pronto: []
+  Cancelado: []
+
+context_file:
+  Em Refinamento: |
+    Esclareça o card e grelhe o issue (`grill-card`). Chat ≠ T1. Sem CONTEXT.md na develop.
+  Todo: |
+    Issue grelhado. Próximo evento = iniciar_design. Não apply. Não /opsx:new ainda.
+  Design: |
+    OpenSpec + crítica; sintetizar do issue grelhado, não reentrevistar. Write produto deny.
+  Aprovação de Design: |
+    Espere T7. Read-only. Agent não aprova design.
+  Pronto para Dev: |
+    T8: mover Status primeiro. Write produto deny até Em desenvolvimento.
+  Em desenvolvimento: |
+    tasks.md + Gist. Write produto na branch do card se binding ok.
+  Code Review: |
+    Reviewers inherit readonly. Patch pequeno allow na card-<id>.
+  QA: |
+    Não mexer fonte. CI. T13 volta a Em desenvolvimento.
+  Done: |
+    Done técnico. Espere T15. Write produto deny.
+  Homologado: |
+    T16 = process_event fechar_release com M_lote live. Chat ≠ δ.
+  Pronto: |
+    Terminal. Trabalho novo = T0 filho.
+  Cancelado: |
+    Terminal. Trabalho novo = T0 filho.
+
+transitions:
+  - { id: T0, from: null, event: criar_card, actor: [Agent, Alan], to: Em Refinamento, actions: [create_item] }
+  - { id: T1, from: Em Refinamento, event: priorizar, actor: Alan, to: Todo, actions: [set_status] }
+  - { id: T2, from: Vivo, event: cancelar, actor: Alan, to: Cancelado, actions: [set_status, classify_branch] }
+  - { id: T3, from: Todo, event: iniciar_design, actor: Agent, to: Design, actions: [set_status, declare_ui_impact] }
+  - { id: T4, from: Design, event: recriticar, actor: Agent, to: Design, actions: [spawn_critique], exclusive_group: design-exit }
+  - { id: T5, from: Design, event: submeter_design, actor: Agent, to: Aprovação de Design, guard: G_design, actions: [gist, set_status], exclusive_group: design-exit }
+  - { id: T6, from: Aprovação de Design, event: devolver_design, actor: Alan, to: Design, actions: [set_status] }
+  - { id: T7, from: Aprovação de Design, event: aprovar_design, actor: Alan, to: Pronto para Dev, actions: [set_status, freeze_digest] }
+  - { id: T8, from: Pronto para Dev, event: iniciar_apply, actor: Agent, to: Em desenvolvimento, guard: q_git_card, actions: [set_status_first, opsx_apply] }
+  - { id: T9, from: Em desenvolvimento, event: pedir_review, actor: Agent, to: Code Review, actions: [set_status, spawn_reviewers] }
+  - { id: T10, from: Code Review, event: achar_bloqueante, actor: Agent, to: Em desenvolvimento, guard: open_p0_p1, actions: [set_status], exclusive_group: cr-exit }
+  - { id: T11, from: Code Review, event: aceitar_sha, actor: Agent, to: QA, guard: reviewers_ok, actions: [diff_vs_develop, push, set_status], exclusive_group: cr-exit }
+  - { id: T12, from: QA, event: rerun_infra, actor: Agent, to: QA, guard: flaky_infra, actions: [rerun], exclusive_group: qa-exit }
+  - { id: T13, from: QA, event: falha_codigo, actor: [CI, Agent], to: Em desenvolvimento, guard: source_failure, actions: [set_status], exclusive_group: qa-exit }
+  - { id: T14, from: QA, event: integrar_develop, actor: Agent, to: Done, guard: checks_green, actions: [squash, restart, comment_done, set_status], exclusive_group: qa-exit }
+  - { id: T15, from: Done, event: homologar, actor: Alan, to: Homologado, actions: [comment_homologado] }
+  - { id: T16, from: Homologado, event: fechar_release, actor: Agent, guard: M_lote, to: Pronto, actions: [release_guard, deploy_prod, set_status] }
+  - { id: T17a, from: Pronto para Dev, event: invalidar_aprovacao, actor: Guard, to: Design, guard: digest_changed, actions: [set_status] }
+  - { id: T17b, from: Em desenvolvimento, event: invalidar_aprovacao, actor: Guard, to: Design, guard: digest_changed, actions: [set_status] }

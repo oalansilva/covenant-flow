@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": ".cursor/hooks/process-fsm-session-start.sh"
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": ".cursor/hooks/process-fsm-guard.sh",
+        "matcher": "Write|StrReplace|Delete|EditNotebook",
+        "failClosed": true
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/process-fsm-guard.sh"
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": ".cursor/hooks/impeccable.sh afterFileEdit"
+      }
+    ],
+    "stop": [
+      {
+        "command": ".cursor/hooks/impeccable.sh stop"
+      }
+    ]
+  }
+}
