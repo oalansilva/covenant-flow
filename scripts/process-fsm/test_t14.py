@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 from t14 import (  # noqa: E402
     T14Error,
     LiveT14Runner,
+    _overlay_health_url,
     measure_checks_green,
 )
 
@@ -94,6 +95,17 @@ def test_measure_checks_green_missing_or_fail():
 def test_measure_checks_green_error_is_false():
     boom = Scripted([_ok("{not-json")])
     assert measure_checks_green("632", "card-632-x", runner=boom) is False
+
+
+def test_t14_health_url_uses_dev_not_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "t14.try_load_overlay",
+        lambda _root: {
+            "environments": {"dev": {"url": "https://dev.example.test"}},
+            "release": {"health_url": "https://prod.example.test/api/health"},
+        },
+    )
+    assert _overlay_health_url() == "https://dev.example.test/api/health"
 
 
 def _git(args: list[str], cwd: Path) -> None:

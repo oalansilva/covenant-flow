@@ -112,6 +112,23 @@ def test_missing_overlay_denies_product_write(tmp_path: Path):
     assert "overlay" in result["agent_message"]
 
 
+def test_missing_overlay_allows_overlay_and_design_writes(tmp_path: Path):
+    repo = tmp_path / "card"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "card-773-x", str(repo)], check=True, capture_output=True)
+    for rel in (".covenant-flow/overlay.yaml", "openspec/changes/x/tasks.md"):
+        result = decide(
+            {
+                "tool_name": "Write",
+                "tool_input": {"path": rel},
+                "cwd": str(repo),
+                "status": "Em desenvolvimento",
+            },
+            status_provider=SILENT,
+        )
+        assert result["permission"] == "allow", rel
+
+
 def test_page_unbound_without_overlay_does_not_dump(tmp_path: Path):
     result = page(
         cwd=tmp_path,

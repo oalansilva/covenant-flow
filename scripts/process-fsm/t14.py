@@ -57,14 +57,12 @@ def _overlay_restart(source: Path) -> Path:
 
 
 def _overlay_health_url() -> str:
+    """T14 public health is DEV. `release.health_url` is T16/PROD evidence."""
     data = try_load_overlay(REPO_ROOT)
     if not data:
         return ""
     env = (data.get("environments") or {}).get("dev") or {}
     url = str(env.get("url") or "").rstrip("/")
-    health = str(((data.get("release") or {}).get("health_url")) or "").strip()
-    if health:
-        return health
     return f"{url}/api/health" if url else ""
 
 

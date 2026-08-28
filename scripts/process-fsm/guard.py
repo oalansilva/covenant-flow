@@ -503,11 +503,6 @@ def decide(
         return _allow()
 
     write_like = tool in WRITE_TOOLS or tool in SHELL_TOOLS or bool(command)
-    if not overlay_ok:
-        if write_like:
-            return _deny("overlay", None, None, None)
-        return _allow()
-
     table = fsm if fsm is not None else load_fsm_fn()
     classified: list[tuple[str, str, str]] = []
     for item in paths:
@@ -518,6 +513,10 @@ def decide(
     kind = "product" if product else ("design" if design else "other")
     anchor = product[0][0] if product else (design[0][0] if design else paths[0])
     rel = product[0][1] if product else (design[0][1] if design else classified[0][1])
+    if not overlay_ok:
+        if kind == "product" and write_like:
+            return _deny("overlay", None, None, None)
+        return _allow()
     injected = payload.get("status")
     status = injected.strip() if isinstance(injected, str) and injected.strip() else None
 
