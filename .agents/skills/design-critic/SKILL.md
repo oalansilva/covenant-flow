@@ -25,7 +25,7 @@ Conduzir a entrega de design sem substituir a aprovação humana de Alan.
 
 ## Preflight
 
-1. Confirmar o card/change e, na sessão orquestradora, ler `AGENTS.md`, `rules.md`, a folha `.agents/skills/impeccable/references/cripto-farol-token-sheet.md` (quando UI) e `DESIGN.md` como autoridade visual (não reescrever). Não despejar o YAML inteiro no chat.
+1. Confirmar o card/change e, na sessão orquestradora, ler `AGENTS.md`, `rules.md` e o `DESIGN.md` do consumidor (path em overlay `impeccable.design_md` quando preenchido) como autoridade visual (não reescrever). Não despejar o YAML inteiro no chat.
 2. Confirmar `Status=Design`. Declarar `UI impact: affected` ou `UI impact: none` com justificativa não vazia.
 3. O **pai** spawna um filho Design-autor (mesmo modelo, prompt autocontido, sem transcript) para criar o scaffold OpenSpec e os artifacts. O pai **não** escreve `design.md`/protótipo, salvo depois de A/B: **somente** `## Design Critique`. Não editar código de produção enquanto `Status=Design`.
 4. A crítica usa `Task` / `spawn_subagent` isolada com inherit de **modelo**, prompt autocontido, **sem inherit de transcript**, disparada pelo **pai** após os artefatos (não nested no filho autor). Critics MAY escrever **apenas** `.impeccable/critique/**`. MUST NOT editar `design.md`, HTML de protótipo ou produto. P0/P1 abertos → pai re-despacha o filho autor com os achados no prompt; o pai não faz polish. `process_event submeter_design` é só o pai.
