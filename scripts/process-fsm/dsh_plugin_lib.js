@@ -56,6 +56,42 @@ export function isCordisRestricted(tool) {
   return true;
 }
 
+const GRILL_CARD_NEEDLE = "grill-card";
+
+function grillHaystacks(args) {
+  const out = [];
+  if (args == null) return out;
+  if (typeof args === "string") {
+    out.push(args);
+    try {
+      const parsed = JSON.parse(args);
+      if (parsed && typeof parsed === "object") {
+        out.push(...grillHaystacks(parsed));
+      }
+    } catch {
+      // parse fail → scan the raw string already pushed
+    }
+    return out;
+  }
+  if (typeof args === "object") {
+    if (typeof args.description === "string") out.push(args.description);
+    if (typeof args.prompt === "string") out.push(args.prompt);
+    try {
+      out.push(JSON.stringify(args));
+    } catch {
+      // ignore cyclic / unserializable
+    }
+  }
+  return out;
+}
+
+export function isGrillShapedSpawn(tool, args) {
+  if (tool !== "subagent" && tool !== "subagent_fork") return false;
+  return grillHaystacks(args).some((item) =>
+    String(item).toLowerCase().includes(GRILL_CARD_NEEDLE),
+  );
+}
+
 export function isWriteLike(tool, args = {}) {
   if (WRITEISH.has(tool)) return true;
   if (tool === "str_replace_editor") {

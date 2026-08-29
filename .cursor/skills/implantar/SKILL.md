@@ -35,7 +35,7 @@ Preencha o overlay **antes** de `--pin`. Overlay vazio a meio **não** é sucess
 Exige overlay já válido (join `board.status_options` nome→id; globs e board preenchidos).
 
 ```bash
-/path/to/covenant-flow/install.sh --pin v1.1.1
+/path/to/covenant-flow/install.sh --pin v1.1.3
 ```
 
 Copia: nucleus (`.cursor/process-fsm.yaml`, `scripts/process-fsm/`), quatro adapters (`.cursor/` `.grok/` `.opencode/` `.dsh/`), `.agents/skills/` (`impeccable`, `design-critic`, `playwright-cli`), helpers (`publish-openspec-card-artifacts.sh`, `release-guard` genérico, `dsh_boot.sh`), `AGENTS.md` gerado do overlay. Copia `.dsh/` **sempre**, mesmo quando o overlay omite `clients.dsh`. Grava `pin` no overlay. **Não** injeta `clients.dsh`. **Não** sobrescreve o Markdown `overlay_doc`.

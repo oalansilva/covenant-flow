@@ -503,7 +503,7 @@ def test_pin_copies_dsh_without_injecting_clients_dsh(tmp_path: Path):
         [
             str(INSTALLER),
             "--pin",
-            "v1.1.1",
+            "v1.1.3",
             "--target",
             str(target),
             "--source",
@@ -518,7 +518,7 @@ def test_pin_copies_dsh_without_injecting_clients_dsh(tmp_path: Path):
     assert (target / ".dsh" / "plugin" / "impeccable-hook.js").is_file()
     assert (target / ".dsh" / "cordis.patch.yml").is_file()
     overlay = yaml.safe_load((target / ".covenant-flow" / "overlay.yaml").read_text(encoding="utf-8"))
-    assert overlay["pin"] == "v1.1.1"
+    assert overlay["pin"] == "v1.1.3"
     assert "dsh" not in overlay["clients"]
     agents = (target / "AGENTS.md").read_text(encoding="utf-8")
     assert "dsh" in agents

@@ -19,7 +19,7 @@ Só corre se **as duas** forem verdade:
 
 Senão: recusar (id ausente, N ≠ `#<id>` do pai, ou Status ≠ Em Refinamento). Não editar issue de outro card. Não grelhar em Todo ou Design.
 
-O **pai** spawna este skill isolado (sem transcript) e só faz relaying das rodadas. Este filho escreve o body de N e **não** chama a ferramenta do host. `bound_card` aqui é o id N no prompt, não o git.
+`bound_card` aqui é o id N no prompt, não o git.
 
 ## Quando disparar
 
@@ -46,13 +46,25 @@ O **pai** spawna este skill isolado (sem transcript) e só faz relaying das roda
 
    Idempotente: texto exato já no issue = deixar; texto canônico errado = editar/minimizar esse comentário; **não** postar segundo.
 
-## Perguntas da rodada (host)
+## Cliente: Cursor e Grok
+
+O **pai** spawna este skill isolado (sem transcript) e só faz relaying das rodadas. Este filho escreve o body de N e **não** chama a ferramenta do host.
+
+### Perguntas da rodada (host)
 
 O filho **não** chama a ferramenta do host. Devolve dump D5: cada Q fechada com as N alternativas reais listadas (A/B/…, recomendada primeiro) + recomendação, para o pai mapear 1:1 em `options[]` na mesma ordem. Quem chama `AskUserQuestion` (Cursor) / `ask_user_question` (Grok) é o **pai**.
 
 - **Q fechada** (alternativas mutuamente exclusivas reais): N≥2 em `options[]`. Recomendada primeiro, label com `(Recommended)`. A linha automática **Other não conta** no N e não substitui alternativa em falta. Proibido apresentar só 1 option.
 - **Q aberta** (texto livre): markdown e/ou Other; **não** inventar `options[]` fictícias.
 - **Fallback Matt** (host indisponível): escolhas no **corpo** da Q fechada; `➡️` só a recomendação (não só a seta).
+
+## Cliente: dsh
+
+Esta regra **não** vale para Cursor, Grok nem OpenCode.
+
+O runtime root executa `grill-card` e o primitivo `grilling`, actualiza o issue N com `gh issue edit`, e pergunta as Qs fechadas neste turno. O runtime root chama `ask_user_question`. Qs fechadas: N≥2; recomendada primeiro, label com `(Recommended)`; Other automático não conta no N.
+
+Comentário canónico T1 só depois das respostas ou quando a fronteira for só-fato. Não postar cópia nova do canónico enquanto a rodada fechada estiver sem resposta.
 
 ## Proibido
 

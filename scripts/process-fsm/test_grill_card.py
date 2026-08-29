@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import stat
 import sys
 from pathlib import Path
@@ -157,3 +158,95 @@ def test_em_refinamento_page_stays_short() -> None:
     assert "grill-card" in ctx
     assert "Chat" in ctx
     assert len(ctx.splitlines()) <= 20
+
+
+_EMPH_WORD = re.compile(r"(?<![a-z0-9])_([a-z0-9]+)_(?![a-z0-9])")
+
+
+def _plain(text: str) -> str:
+    s = str(text).lower()
+    s = s.replace("`", "")
+    s = s.replace("**", "")
+    s = s.replace("*", "")
+    s = _EMPH_WORD.sub(r"\1", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def test_n2_client_labelled_grill_copy() -> None:
+    assert "não chama a ferramenta do host" in _plain("**não** chama a ferramenta do host")
+    assert _plain("ask_user_question") == "ask_user_question"
+    assert "o pai spawna" in _plain("O **pai** spawna")
+    assert "root chama ask_user_question" not in _plain(
+        "O runtime root nunca chama ask_user_question."
+    )
+    assert "root chama ask_user_question" not in _plain(
+        "O runtime root não chama. chama ask_user_question."
+    )
+    assert "root chama ask_user_question" in _plain(
+        "O runtime root chama `ask_user_question`."
+    )
+
+    text = GRILL_CARD.read_text(encoding="utf-8")
+    cursor = _heading_section(text, "## Cliente: Cursor e Grok")
+    dsh = _heading_section(text, "## Cliente: dsh")
+    full, cursor_p, dsh_p = map(_plain, (text, cursor, dsh))
+    for frase in (
+        "não chama a ferramenta do host",
+        "o pai spawna",
+        "dump d5",
+        "quem chama",
+    ):
+        assert full.count(frase) == cursor_p.count(frase), frase
+        assert cursor_p.count(frase) >= 1, frase
+    assert "root chama ask_user_question" in dsh_p
+    assert "não chama ask_user_question" not in dsh_p
+    assert "não chama a ferramenta do host" not in dsh_p
+    for needle in HOST_TOOLS:
+        assert needle in cursor, needle
+    if "## Precondição" in text:
+        pre = _plain(_heading_section(text, "## Precondição"))
+        for needle in (
+            "filho",
+            "spawna",
+            "relaying",
+            "dump d5",
+            "ask_user_question",
+            "askuserquestion",
+            "não chama",
+        ):
+            assert needle not in pre, needle
+    cursor_start = text.find("## Cliente: Cursor e Grok")
+    cursor_end = cursor_start + len(cursor)
+    dsh_start = text.find("## Cliente: dsh")
+    dsh_end = dsh_start + len(dsh)
+    for match in re.finditer(r"^## [^#].*$", text, re.M):
+        heading = match.group(0)
+        if "perguntas da rodada" not in _plain(heading):
+            continue
+        off = match.start()
+        assert cursor_start <= off < cursor_end or dsh_start <= off < dsh_end, heading
+
+    cf = _heading_section(ALAN_WORKFLOW.read_text(encoding="utf-8"), "## Grill-card")
+    assert "Cliente dsh:" in cf
+    assert "O **pai** spawna" in cf
+    assert "todas as options" in cf
+    assert "não colapsa" in cf
+
+    guard_src = (ROOT / "guard.py").read_text(encoding="utf-8")
+    for needle in ("grill-card", "dsh_grill_spawn", "isGrillShapedSpawn"):
+        assert needle not in guard_src, needle
+
+    agents = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+    nonempty = [ln for ln in agents.splitlines() if ln.strip()]
+    assert len(nonempty) <= 40
+    assert "ask_user_question" not in agents
+
+    stub = (REPO / ".dsh" / "skills" / "grill-card" / "SKILL.md").read_text(encoding="utf-8")
+    body = stub.split("---", 2)[2]
+    assert len([ln for ln in body.splitlines() if ln.strip()]) <= 8
+    assert "MUST Read" in stub
+
+    if (REPO / "install.sh").is_file():
+        adapter = (ROOT / "test_dsh_adapter.py").read_text(encoding="utf-8")
+        assert 'overlay["pin"] == "v1.1.3"' in adapter

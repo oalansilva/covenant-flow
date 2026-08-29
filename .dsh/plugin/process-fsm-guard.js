@@ -4,6 +4,7 @@ import {
   runPage,
   denyFromDecision,
   isCordisRestricted,
+  isGrillShapedSpawn,
   readAgentsStub,
   createRepoDshSkillProvider,
 } from "../../scripts/process-fsm/dsh_plugin_lib.js";
@@ -16,6 +17,9 @@ export function apply(ctx) {
   ctx.on("tools/pre-execute", async (exec, next) => {
     const tool = exec && exec.name;
     const args = (exec && exec.arguments) || {};
+    if (isGrillShapedSpawn(tool, args)) {
+      return { kind: "deny", reason: "process-fsm-guard deny reason=dsh_grill_spawn" };
+    }
     if (isCordisRestricted(tool)) {
       return { kind: "deny", reason: "process-fsm-guard deny reason=cordis_restrict" };
     }
