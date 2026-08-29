@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -112,4 +112,104 @@ export function runHookMjs(payload, cwd) {
     env: { ...process.env, IMPECCABLE_HOOK_HARNESS: "dsh" },
   });
   return proc.status === null ? 0 : proc.status;
+}
+
+const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---\n/;
+const PROCESS_PROVIDER = "covenant-flow-process";
+const PROCESS_RANK = 300;
+
+function unquoteYamlScalar(raw) {
+  const value = String(raw || "").trim();
+  if (
+    (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+    (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+  ) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function parseStubFrontmatter(text) {
+  const match = FRONTMATTER_RE.exec(String(text || ""));
+  if (!match) return null;
+  const block = match[1];
+  const nameMatch = /^name:\s*(.*)$/m.exec(block);
+  const descMatch = /^description:\s*(.*)$/m.exec(block);
+  if (!nameMatch || !descMatch) return null;
+  const name = unquoteYamlScalar(nameMatch[1]);
+  const description = unquoteYamlScalar(descMatch[1]);
+  if (!SKILL_NAME_RE.test(name) || !description) return null;
+  return { name, description };
+}
+
+export function readAgentsStub(root = REPO_ROOT) {
+  try {
+    return readFileSync(join(root, "AGENTS.md"), "utf8");
+  } catch {
+    return "";
+  }
+}
+
+export function createRepoDshSkillProvider(root) {
+  const skillsRoot = join(root, ".dsh", "skills");
+  return {
+    name: PROCESS_PROVIDER,
+    async list(options) {
+      void options;
+      try {
+        if (!existsSync(skillsRoot) || !statSync(skillsRoot).isDirectory()) {
+          return [];
+        }
+        const out = [];
+        for (const entry of readdirSync(skillsRoot, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const directory = join(skillsRoot, entry.name);
+          const path = join(directory, "SKILL.md");
+          let text;
+          try {
+            text = readFileSync(path, "utf8");
+          } catch {
+            continue;
+          }
+          const parsed = parseStubFrontmatter(text);
+          if (!parsed) continue;
+          if (parsed.name !== entry.name) continue;
+          out.push({
+            name: parsed.name,
+            description: parsed.description,
+            invocation: { modelInvocable: true, userInvocable: true },
+            source: "custom",
+            rank: PROCESS_RANK,
+            provider: PROCESS_PROVIDER,
+            locator: { path, directory },
+            path,
+          });
+        }
+        return out;
+      } catch {
+        return [];
+      }
+    },
+    async get(candidate, options) {
+      void options;
+      const path =
+        (candidate &&
+          (candidate.path ||
+            (candidate.locator && candidate.locator.path))) ||
+        "";
+      const content = readFileSync(path, "utf8");
+      return {
+        name: candidate.name,
+        description: candidate.description,
+        invocation: candidate.invocation,
+        source: candidate.source,
+        rank: candidate.rank,
+        provider: PROCESS_PROVIDER,
+        locator: candidate.locator,
+        path,
+        content,
+      };
+    },
+  };
 }

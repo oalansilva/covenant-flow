@@ -33,6 +33,11 @@ print(dev)
 PY
 )"
 
+if [[ -n "$DEV_ROOT" && ! -d "$DEV_ROOT" ]]; then
+  echo "dsh_boot: canonical_paths.dev is not a directory: $DEV_ROOT" >&2
+  exit 1
+fi
+
 if [[ -n "$DEV_ROOT" && -d "$DEV_ROOT" ]]; then
   LAUNCH_DIR="$DEV_ROOT"
 else

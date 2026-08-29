@@ -14,7 +14,7 @@ In the **consumer** repository:
 ```bash
 /path/to/covenant-flow/install.sh --init --target /path/to/consumer
 # fill .covenant-flow/overlay.yaml (board ids, globs, environments, overlay_doc)
-/path/to/covenant-flow/install.sh --pin v1.1.0 --target /path/to/consumer
+/path/to/covenant-flow/install.sh --pin v1.1.1 --target /path/to/consumer
 ```
 
 Or follow skill `implantar` in `.cursor/skills/implantar/`.

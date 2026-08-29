@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -83,14 +85,105 @@ def _mock_ctx_prelude() -> str:
         "function mockCtx() {\n"
         "  const events = {};\n"
         "  const sections = [];\n"
+        "  const providers = [];\n"
         "  return {\n"
         "    events,\n"
         "    sections,\n"
+        "    providers,\n"
         "    on(name, fn) { events[name] = fn; },\n"
         "    systemPrompt: { section(opts) { sections.push(opts); } },\n"
+        "    skills: {\n"
+        "      registerProvider(create) {\n"
+        "        const provider = create({});\n"
+        "        providers.push(provider);\n"
+        "        return provider;\n"
+        "      },\n"
+        "    },\n"
         "  };\n"
         "}\n"
     )
+
+
+# Copied live rules from dsh-skill listLayerCandidates/validateCandidate/waitWithAbort
+# (packages/skill/skill/src/index.ts). MUST NOT import @deepseek-ai/dsh-skill.
+_FAKE_DSH_SKILL_RULES = r"""
+const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+function validateInvocation(invocation, subject) {
+  if (invocation === undefined) return;
+  if (typeof invocation !== "object" || invocation === null || Array.isArray(invocation)) {
+    throw new TypeError(`${subject} with a non-object invocation policy`);
+  }
+  if (typeof invocation.modelInvocable !== "boolean") {
+    throw new TypeError(`${subject} with a non-boolean invocation.modelInvocable`);
+  }
+  if (typeof invocation.userInvocable !== "boolean") {
+    throw new TypeError(`${subject} with a non-boolean invocation.userInvocable`);
+  }
+}
+function validateCandidate(candidate, providerName) {
+  if (typeof candidate.name !== "string") {
+    throw new TypeError(`skill provider "${providerName}" returned a non-string skill name`);
+  }
+  if (!SKILL_NAME.test(candidate.name)) {
+    throw new Error(`skill provider "${providerName}" returned invalid skill name "${candidate.name}"`);
+  }
+  if (typeof candidate.description !== "string") {
+    throw new TypeError(`skill provider "${providerName}" returned skill "${candidate.name}" with a non-string description`);
+  }
+  if (candidate.description.length === 0) {
+    throw new Error(`skill provider "${providerName}" returned skill "${candidate.name}" without a description`);
+  }
+  validateInvocation(candidate.invocation, `skill provider "${providerName}" returned skill "${candidate.name}"`);
+  if (candidate.whenToUse !== undefined && typeof candidate.whenToUse !== "string") {
+    throw new TypeError(`skill provider "${providerName}" returned skill "${candidate.name}" with a non-string whenToUse`);
+  }
+  if (typeof candidate.source !== "string") {
+    throw new TypeError(`skill provider "${providerName}" returned skill "${candidate.name}" with a non-string source`);
+  }
+  if (typeof candidate.rank !== "number" || !Number.isFinite(candidate.rank)) {
+    throw new Error(`skill provider "${providerName}" returned skill "${candidate.name}" with an invalid rank`);
+  }
+  if (typeof candidate.provider !== "string") {
+    throw new TypeError(`skill provider "${providerName}" returned skill "${candidate.name}" with a non-string provider`);
+  }
+  if (candidate.provider !== providerName) {
+    throw new Error(`skill provider "${providerName}" returned skill "${candidate.name}" for provider "${candidate.provider}"`);
+  }
+  if (candidate.path !== undefined && typeof candidate.path !== "string") {
+    throw new TypeError(`skill provider "${providerName}" returned skill "${candidate.name}" with a non-string path`);
+  }
+}
+function validateDefinition(skill) {
+  const name = skill.name;
+  if (typeof name !== "string") throw new TypeError("loaded skill name must be a string");
+  if (!SKILL_NAME.test(name)) throw new Error(`loaded skill has invalid name "${name}"`);
+  if (typeof skill.description !== "string") throw new TypeError(`loaded skill "${name}" description must be a string`);
+  if (skill.description.length === 0) throw new Error(`loaded skill "${name}" requires a description`);
+  validateInvocation(skill.invocation, `loaded skill "${name}"`);
+  if (skill.whenToUse !== undefined && typeof skill.whenToUse !== "string") {
+    throw new TypeError(`loaded skill "${name}" whenToUse must be a string`);
+  }
+  if (typeof skill.source !== "string") throw new TypeError(`loaded skill "${name}" source must be a string`);
+  if (typeof skill.provider !== "string") throw new TypeError(`loaded skill "${name}" provider must be a string`);
+  if (typeof skill.content !== "string") throw new TypeError(`loaded skill "${name}" content must be a string`);
+  if (skill.path !== undefined && typeof skill.path !== "string") {
+    throw new TypeError(`loaded skill "${name}" path must be a string`);
+  }
+}
+function waitWithAbort(promise, signal) {
+  if (signal === undefined) return promise;
+  if (signal.aborted === true) throw new Error(String(signal.reason));
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { signal.removeEventListener("abort", onAbort); };
+    const onAbort = () => { cleanup(); reject(new Error(String(signal.reason))); };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void promise.then(
+      (value) => { cleanup(); resolve(value); },
+      (error) => { cleanup(); reject(error instanceof Error ? error : new Error(String(error))); },
+    );
+  });
+}
+"""
 
 
 def test_d15_dsh_page_body_injectable():
@@ -202,10 +295,16 @@ try {{
 }} catch (err) {{
   threw = true;
 }}
+const moore = ctx.sections.find((s) => s.name === "covenant-flow:moore" && s.order === 50);
+const agents = ctx.sections.find((s) => s.name === "covenant-flow:agents" && s.order === 40);
 process.stdout.write(JSON.stringify({{
   result, nextCalled, threw,
-  section: ctx.sections[0] && ctx.sections[0].name,
-  textType: typeof (ctx.sections[0] && ctx.sections[0].text),
+  mooreName: moore && moore.name,
+  mooreOrder: moore && moore.order,
+  mooreTextType: typeof (moore && moore.text),
+  agentsName: agents && agents.name,
+  agentsOrder: agents && agents.order,
+  agentsTextType: typeof (agents && agents.text),
 }}));
 """
     proc = _node(code, cwd=repo)
@@ -214,8 +313,59 @@ process.stdout.write(JSON.stringify({{
     assert data["threw"] is False
     assert data["nextCalled"] is False
     assert data["result"]["kind"] == "deny"
-    assert data["section"] == "covenant-flow:moore"
-    assert data["textType"] == "function"
+    assert data["mooreName"] == "covenant-flow:moore"
+    assert data["mooreOrder"] == 50
+    assert data["mooreTextType"] == "function"
+    assert data["agentsName"] == "covenant-flow:agents"
+    assert data["agentsOrder"] == 40
+    assert data["agentsTextType"] == "function"
+
+
+def test_plugin_deny_survives_register_provider_throw(tmp_path: Path):
+    repo = tmp_path / "develop"
+    _init_repo(repo, "develop", "backend/app/main.py")
+    code = f"""
+function mockThrowingCtx() {{
+  const events = {{}};
+  const sections = [];
+  return {{
+    events,
+    sections,
+    on(name, fn) {{ events[name] = fn; }},
+    systemPrompt: {{ section(opts) {{ sections.push(opts); }} }},
+    skills: {{
+      registerProvider(create) {{
+        create({{}});
+        throw new Error("duplicate name");
+      }},
+    }},
+  }};
+}}
+import {{ apply }} from {json.dumps(str(PLUGIN_GUARD))};
+const ctx = mockThrowingCtx();
+let applyThrew = false;
+try {{
+  apply(ctx);
+}} catch (err) {{
+  applyThrew = true;
+}}
+let nextCalled = false;
+const result = await ctx.events["tools/pre-execute"](
+  {{ name: "edit", arguments: {{ file_path: "backend/app/main.py" }} }},
+  async () => {{ nextCalled = true; }},
+);
+process.stdout.write(JSON.stringify({{
+  applyThrew,
+  nextCalled,
+  kind: result && result.kind,
+}}));
+"""
+    proc = _node(code, cwd=repo)
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["applyThrew"] is False
+    assert data["nextCalled"] is False
+    assert data["kind"] == "deny"
 
 
 def test_plugin_next_on_openspec_design(tmp_path: Path):
@@ -353,7 +503,7 @@ def test_pin_copies_dsh_without_injecting_clients_dsh(tmp_path: Path):
         [
             str(INSTALLER),
             "--pin",
-            "v1.1.0",
+            "v1.1.1",
             "--target",
             str(target),
             "--source",
@@ -368,7 +518,7 @@ def test_pin_copies_dsh_without_injecting_clients_dsh(tmp_path: Path):
     assert (target / ".dsh" / "plugin" / "impeccable-hook.js").is_file()
     assert (target / ".dsh" / "cordis.patch.yml").is_file()
     overlay = yaml.safe_load((target / ".covenant-flow" / "overlay.yaml").read_text(encoding="utf-8"))
-    assert overlay["pin"] == "v1.1.0"
+    assert overlay["pin"] == "v1.1.1"
     assert "dsh" not in overlay["clients"]
     agents = (target / "AGENTS.md").read_text(encoding="utf-8")
     assert "dsh" in agents
@@ -392,4 +542,296 @@ def test_init_template_omits_clients_dsh(tmp_path: Path):
     data = yaml.safe_load(raw)
     assert "dsh" not in data["clients"]
     assert "clients.dsh" not in raw
+
+
+def _boot_tree(tmp_path: Path, *, canonical_dev: str | None) -> Path:
+    dest = tmp_path / "consumer"
+    script_dir = dest / "scripts" / "process-fsm"
+    plugin_dir = dest / ".dsh" / "plugin"
+    script_dir.mkdir(parents=True)
+    plugin_dir.mkdir(parents=True)
+    shutil.copy2(BOOT, script_dir / "dsh_boot.sh")
+    shutil.copy2(PLUGIN_GUARD, plugin_dir / "process-fsm-guard.js")
+    shutil.copy2(PLUGIN_HOOK, plugin_dir / "impeccable-hook.js")
+    shutil.copy2(PATCH, dest / ".dsh" / "cordis.patch.yml")
+    (script_dir / "overlay.py").write_text(
+        "from pathlib import Path\n"
+        "import yaml\n"
+        "def try_load_overlay(start, require_filled=False):\n"
+        "    p = Path(start) / '.covenant-flow' / 'overlay.yaml'\n"
+        "    if not p.is_file():\n"
+        "        return None\n"
+        "    data = yaml.safe_load(p.read_text(encoding='utf-8'))\n"
+        "    return data if isinstance(data, dict) else None\n",
+        encoding="utf-8",
+    )
+    overlay: dict = {"canonical_paths": {}}
+    if canonical_dev is not None:
+        overlay["canonical_paths"]["dev"] = canonical_dev
+    (dest / ".covenant-flow").mkdir(parents=True)
+    (dest / ".covenant-flow" / "overlay.yaml").write_text(
+        yaml.safe_dump(overlay, allow_unicode=True, default_flow_style=False),
+        encoding="utf-8",
+    )
+    return dest
+
+
+def _fake_dsh_bin(tmp_path: Path) -> Path:
+    bindir = tmp_path / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    dsh = bindir / "dsh"
+    dsh.write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "DSH_CWD=$(pwd)"\n'
+        'echo "DSH_ARGS=$*"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    dsh.chmod(0o755)
+    return bindir
+
+
+def test_a1_apply_registers_agents_and_moore_by_name_order():
+    lib = PLUGIN_LIB.read_text(encoding="utf-8")
+    guard = PLUGIN_GUARD.read_text(encoding="utf-8")
+    assert "import 'yaml'" not in lib and 'import "yaml"' not in lib
+    assert "FileSystemSkillProvider" not in lib
+    assert "FileSystemSkillProvider" not in guard
+    assert "complete: true" not in guard and "complete:true" not in guard
+    assert "| T0" not in guard
+    assert "T0–T17" not in guard
+    code = f"""
+{_mock_ctx_prelude()}
+import {{ apply, inject }} from {json.dumps(str(PLUGIN_GUARD))};
+const ctx = mockCtx();
+apply(ctx);
+const agents = ctx.sections.find((s) => s.name === "covenant-flow:agents");
+const moore = ctx.sections.find((s) => s.name === "covenant-flow:moore");
+process.stdout.write(JSON.stringify({{
+  inject,
+  agentsName: agents && agents.name,
+  agentsOrder: agents && agents.order,
+  agentsTextType: typeof (agents && agents.text),
+  agentsComplete: agents && Object.hasOwn(agents, "complete") ? agents.complete : null,
+  mooreName: moore && moore.name,
+  mooreOrder: moore && moore.order,
+  mooreTextType: typeof (moore && moore.text),
+  sectionCount: ctx.sections.length,
+}}));
+"""
+    proc = _node(code)
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert "systemPrompt" in data["inject"]
+    assert "skills" in data["inject"]
+    assert data["agentsName"] == "covenant-flow:agents"
+    assert data["agentsOrder"] == 40
+    assert data["agentsTextType"] == "function"
+    assert data["agentsComplete"] is None
+    assert data["mooreName"] == "covenant-flow:moore"
+    assert data["mooreOrder"] == 50
+    assert data["mooreTextType"] == "function"
+    assert data["sectionCount"] == 2
+
+
+def test_a2_a3_agents_stub_compiles_file_fail_open(tmp_path: Path):
+    code = f"""
+{_mock_ctx_prelude()}
+import {{ apply }} from {json.dumps(str(PLUGIN_GUARD))};
+import {{ readAgentsStub }} from {json.dumps(str(PLUGIN_LIB))};
+const ctx = mockCtx();
+apply(ctx);
+const agents = ctx.sections.find((s) => s.name === "covenant-flow:agents" && s.order === 40);
+const present = agents.text();
+const missing = readAgentsStub({json.dumps(str(tmp_path))});
+process.stdout.write(JSON.stringify({{ present, missing }}));
+"""
+    proc = _node(code)
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert "NLU ≠ δ" in data["present"] or "Todo" in data["present"]
+    assert "T0" not in data["present"]
+    assert "release-guard pre" not in data["present"]
+    assert data["missing"] == ""
+    nonempty = [ln for ln in (REPO / "AGENTS.md").read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(nonempty) <= 40
+
+
+def test_a4_a5_provider_thenables_with_signal(tmp_path: Path):
+    homedir = str(Path.home())
+    missing_root = tmp_path / "no-skills"
+    missing_root.mkdir()
+    code = f"""
+{_FAKE_DSH_SKILL_RULES}
+import {{ createRepoDshSkillProvider, REPO_ROOT }} from {json.dumps(str(PLUGIN_LIB))};
+const homedir = {json.dumps(homedir)};
+const provider = createRepoDshSkillProvider(REPO_ROOT);
+const ac = new AbortController();
+const listedP = provider.list({{ cwd: homedir, signal: ac.signal }});
+if (!listedP || typeof listedP.then !== "function") {{
+  throw new Error("list must be thenable");
+}}
+const listed = await waitWithAbort(listedP, ac.signal);
+for (const c of listed) {{
+  validateCandidate(c, "covenant-flow-process");
+}}
+const names = listed.map((c) => c.name);
+const flow = listed.find((c) => c.name === "covenant-flow");
+if (!flow) throw new Error("covenant-flow missing from list");
+const skillsRoot = REPO_ROOT + "/.dsh/skills";
+for (const c of listed) {{
+  if (c.provider !== "covenant-flow-process") throw new Error("provider field");
+  if (!c.path || !c.path.startsWith(skillsRoot)) throw new Error("path not under repo skills");
+  if (c.path.startsWith(homedir) && !skillsRoot.startsWith(homedir)) {{
+    throw new Error("listed a homedir skill");
+  }}
+}}
+const gotP = provider.get(flow, {{ signal: ac.signal }});
+if (!gotP || typeof gotP.then !== "function") {{
+  throw new Error("get must be thenable");
+}}
+const defn = await waitWithAbort(gotP, ac.signal);
+validateDefinition(defn);
+const emptyP = createRepoDshSkillProvider({json.dumps(str(missing_root))}).list({{ cwd: homedir }});
+const empty = await emptyP;
+process.stdout.write(JSON.stringify({{
+  cwd: process.cwd(),
+  repo: REPO_ROOT,
+  names,
+  provider: flow.provider,
+  source: flow.source,
+  rank: flow.rank,
+  modelInvocable: flow.invocation && flow.invocation.modelInvocable,
+  userInvocable: flow.invocation && flow.invocation.userInvocable,
+  path: flow.path,
+  content: defn.content,
+  defnProvider: defn.provider,
+  defnName: defn.name,
+  emptyLen: empty.length,
+}}));
+"""
+    proc = _node(code, cwd=Path.home())
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["cwd"] != data["repo"]
+    assert "covenant-flow" in data["names"]
+    assert data["provider"] == "covenant-flow-process"
+    assert data["source"] == "custom"
+    assert data["rank"] == 300
+    assert data["modelInvocable"] is True
+    assert data["userInvocable"] is True
+    assert data["path"].startswith(str(REPO / ".dsh" / "skills"))
+    assert ".cursor/skills/covenant-flow/SKILL.md" in data["content"]
+    assert "MUST Read" in data["content"]
+    assert data["defnProvider"] == "covenant-flow-process"
+    assert data["defnName"] == "covenant-flow"
+    body = data["content"].split("---", 2)[2]
+    assert len([ln for ln in body.splitlines() if ln.strip()]) <= 8
+    assert data["emptyLen"] == 0
+    imports = [
+        ln
+        for ln in Path(__file__).read_text(encoding="utf-8").splitlines()
+        if ln.startswith("import ") or ln.startswith("from ")
+    ]
+    assert all("dsh-skill" not in ln and "dsh_skill" not in ln for ln in imports)
+
+
+def test_a6_patch_yaml_has_no_skill_paths():
+    text = PATCH.read_text(encoding="utf-8")
+    assert ".dsh/skills" not in text
+    assert "customSkillDirs" not in text
+    assert "skill-filesystem" not in text
+    assert "covenant-flow-process-fsm-guard" in text
+    assert "covenant-flow-impeccable-hook" in text
+
+
+def test_a7_boot_exits_when_dev_is_not_a_directory(tmp_path: Path):
+    not_dir = tmp_path / "dev-is-a-file"
+    not_dir.write_text("nope\n", encoding="utf-8")
+    missing = tmp_path / "does-not-exist"
+    cases = (("tree-file", not_dir), ("tree-missing", missing))
+    for tree_name, path in cases:
+        dest = _boot_tree(tmp_path / tree_name, canonical_dev=str(path))
+        proc = subprocess.run(
+            ["bash", str(dest / "scripts" / "process-fsm" / "dsh_boot.sh")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode != 0, proc.stdout
+        assert str(path) in proc.stderr
+
+
+def test_a8_empty_canonical_dev_launches_repo_root(tmp_path: Path):
+    dest = _boot_tree(tmp_path, canonical_dev="")
+    bindir = _fake_dsh_bin(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(dest / "scripts" / "process-fsm" / "dsh_boot.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"},
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert f"DSH_CWD={dest.resolve()}" in proc.stdout
+    boot = BOOT.read_text(encoding="utf-8")
+    assert "dsh web --patch" in boot
+    assert not any(ln.strip().startswith("dsh plugin add") for ln in boot.splitlines())
+    code_lines = [
+        ln for ln in boot.splitlines() if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+    assert not any("workspace" in ln.lower() for ln in code_lines)
+
+
+def test_a9_directory_canonical_dev_still_preferred(tmp_path: Path):
+    launch = tmp_path / "dev-root"
+    launch.mkdir()
+    dest = _boot_tree(tmp_path, canonical_dev=str(launch))
+    bindir = _fake_dsh_bin(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(dest / "scripts" / "process-fsm" / "dsh_boot.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"},
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert f"DSH_CWD={launch.resolve()}" in proc.stdout
+    assert "web --patch" in proc.stdout
+
+
+def test_a10_apply_registered_provider_survives_wait_with_abort():
+    homedir = str(Path.home())
+    code = f"""
+{_mock_ctx_prelude()}
+{_FAKE_DSH_SKILL_RULES}
+import {{ apply }} from {json.dumps(str(PLUGIN_GUARD))};
+import {{ REPO_ROOT }} from {json.dumps(str(PLUGIN_LIB))};
+const ctx = mockCtx();
+apply(ctx);
+const provider = ctx.providers[0];
+if (!provider || provider.name !== "covenant-flow-process") {{
+  throw new Error("expected registered covenant-flow-process");
+}}
+const ac = new AbortController();
+const listed = await waitWithAbort(
+  provider.list({{ cwd: {json.dumps(homedir)}, signal: ac.signal }}),
+  ac.signal,
+);
+for (const c of listed) validateCandidate(c, "covenant-flow-process");
+process.stdout.write(JSON.stringify({{
+  name: provider.name,
+  names: listed.map((c) => c.name),
+  factorySync: true,
+}}));
+"""
+    proc = _node(code, cwd=Path.home())
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["name"] == "covenant-flow-process"
+    assert "covenant-flow" in data["names"]
+    lib = PLUGIN_LIB.read_text(encoding="utf-8")
+    assert "from 'yaml'" not in lib and 'from "yaml"' not in lib
+    assert "@deepseek-ai/dsh-skill" not in lib
+    assert "deepseek-harness" not in PLUGIN_GUARD.read_text(encoding="utf-8")
 

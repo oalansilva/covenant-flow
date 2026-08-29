@@ -4,10 +4,12 @@ import {
   runPage,
   denyFromDecision,
   isCordisRestricted,
+  readAgentsStub,
+  createRepoDshSkillProvider,
 } from "../../scripts/process-fsm/dsh_plugin_lib.js";
 
 export const name = "covenant-flow-process-fsm-guard";
-export const inject = ["systemPrompt"];
+export const inject = ["systemPrompt", "skills"];
 
 export function apply(ctx) {
   const cwd = process.cwd() || REPO_ROOT;
@@ -23,6 +25,11 @@ export function apply(ctx) {
     return next();
   });
   ctx.systemPrompt.section({
+    name: "covenant-flow:agents",
+    order: 40,
+    text: () => readAgentsStub(),
+  });
+  ctx.systemPrompt.section({
     name: "covenant-flow:moore",
     order: 50,
     text: () => {
@@ -31,4 +38,14 @@ export function apply(ctx) {
       return typeof body === "string" ? body : "";
     },
   });
+  if (typeof ctx.skills?.registerProvider === "function") {
+    try {
+      ctx.skills.registerProvider((control) => {
+        void control;
+        return createRepoDshSkillProvider(REPO_ROOT);
+      });
+    } catch {
+      // provider throw must not skip deny
+    }
+  }
 }
