@@ -54,15 +54,15 @@ O **pai** spawna este skill isolado (sem transcript) e só faz relaying das roda
 
 O filho **não** chama a ferramenta do host. Devolve dump D5: cada Q fechada com as N alternativas reais listadas (A/B/…, recomendada primeiro) + recomendação, para o pai mapear 1:1 em `options[]` na mesma ordem. Quem chama `AskUserQuestion` (Cursor) / `ask_user_question` (Grok) é o **pai**.
 
-- **Q fechada** (alternativas mutuamente exclusivas reais): N≥2 em `options[]`. Recomendada primeiro, label com `(Recommended)`. A linha automática **Other não conta** no N e não substitui alternativa em falta. Proibido apresentar só 1 option.
+- **Q fechada** (alternativas mutuamente exclusivas reais): N≥2 em `options[]`. Recomendada primeiro, label com `(Recommended)`. A linha automática **Other não conta** no N e não substitui alternativa em falta. Proibido apresentar só 1 option. Com o host no ar, o prompt da Q é título + conflito; MUST NOT incluir a linha `➡️` nem `Recomendada:` + o texto da option. A recomendação é só a primeira option `(Recommended)`.
 - **Q aberta** (texto livre): markdown e/ou Other; **não** inventar `options[]` fictícias.
-- **Fallback Matt** (host indisponível): escolhas no **corpo** da Q fechada; `➡️` só a recomendação (não só a seta).
+- **Fallback Matt** (host indisponível): escolhas no **corpo** da Q fechada; `➡️` só a recomendação (não só a seta). Sem `options[]` do host, o `➡️` no corpo é o único sítio da recomendação.
 
 ## Cliente: dsh
 
 Esta regra **não** vale para Cursor, Grok nem OpenCode.
 
-O runtime root executa `grill-card` e o primitivo `grilling`, actualiza o issue N com `gh issue edit`, e pergunta as Qs fechadas neste turno. O runtime root chama `ask_user_question`. Qs fechadas: N≥2; recomendada primeiro, label com `(Recommended)`; Other automático não conta no N.
+O runtime root executa `grill-card` e o primitivo `grilling`, actualiza o issue N com `gh issue edit`, e pergunta as Qs fechadas neste turno. O runtime root chama `ask_user_question`. Qs fechadas: N≥2; recomendada primeiro, label com `(Recommended)`; Other automático não conta no N. O prompt de cada Q fechada é título + conflito. A recomendação vive só na primeira option com `(Recommended)`. Não copie `➡️` nem `Recomendada:` + o texto da option para o prompt.
 
 Comentário canónico T1 só depois das respostas ou quando a fronteira for só-fato. Não postar cópia nova do canónico enquanto a rodada fechada estiver sem resposta.
 

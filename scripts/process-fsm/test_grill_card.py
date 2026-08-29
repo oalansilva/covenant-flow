@@ -202,6 +202,10 @@ def test_n2_client_labelled_grill_copy() -> None:
     assert "root chama ask_user_question" in dsh_p
     assert "não chama ask_user_question" not in dsh_p
     assert "não chama a ferramenta do host" not in dsh_p
+    assert "recomendação vive só" in dsh_p
+    assert "não copie" in dsh_p
+    assert "➡️" in dsh
+    assert "com o host no ar" in cursor_p
     for needle in HOST_TOOLS:
         assert needle in cursor, needle
     if "## Precondição" in text:
@@ -249,4 +253,4 @@ def test_n2_client_labelled_grill_copy() -> None:
 
     if (REPO / "install.sh").is_file():
         adapter = (ROOT / "test_dsh_adapter.py").read_text(encoding="utf-8")
-        assert 'overlay["pin"] == "v1.1.3"' in adapter
+        assert 'overlay["pin"] == "v1.1.4"' in adapter

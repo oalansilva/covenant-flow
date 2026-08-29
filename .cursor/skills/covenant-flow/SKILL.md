@@ -82,7 +82,7 @@ Skill de entrada: `.cursor/skills/grill-card/` (adapter). Primitivo vendorado: `
 
 Disparar quando Alan pede para grelhar/afiar **ou** Status da issue N é Em Refinamento **e** o body não tem as 6 seções do DoD (N no prompt, mesmo em `develop`). Não em todo T0 (cards nítidos podem T1 direto). Não em Todo/Design.
 
-O **pai** spawna o filho `grill-card` (id no prompt, mesmo em `develop`). O filho reescreve o **body do issue N** e, com fronteira vazia, comenta o handoff T1. Pai só relaying das rodadas. Nas Qs fechadas, o pai chama a ferramenta do host com **todas as options** que o filho listou e não colapsa à recomendada. Não arrasta Status. Não grava `CONTEXT.md` / `docs/adr/`. Não chama `/opsx:*`.
+O **pai** spawna o filho `grill-card` (id no prompt, mesmo em `develop`). O filho reescreve o **body do issue N** e, com fronteira vazia, comenta o handoff T1. Pai só relaying das rodadas. Nas Qs fechadas, o pai chama a ferramenta do host com **todas as options** que o filho listou e não colapsa à recomendada. Com o host no ar, o prompt da Q é título + conflito; a recomendação é só a primeira option `(Recommended)`. Não arrasta Status. Não grava `CONTEXT.md` / `docs/adr/`. Não chama `/opsx:*`.
 Cliente dsh: dsh não spawna filho grill.
 
 ## Card primeiro, OpenSpec mais completo
