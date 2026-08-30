@@ -24,7 +24,19 @@ Senão: recusar (id ausente, N ≠ `#<id>` do pai, ou Status ≠ Em Refinamento)
 ## Quando disparar
 
 - **Sim:** Alan pede grelhar/afiar, **ou** Status de N é Em Refinamento **e** o body não tem as 6 seções do DoD. Oferecer; não arrastar coluna. Vale em `develop` se N e Status baterem.
-- **Não:** automático em todo T0; não em Todo/Design; cards já nítidos (DoD completo) podem T1 sem grill.
+- **Não:** automático em todo T0; não em Todo/Design; cards já nítidos (DoD completo) podem T1 sem grill. O tecto de linguagem MUST NOT obrigar a re-grelhar um DoD já escrito.
+
+## Tecto de linguagem (operador)
+
+Vale em **todo card** em Project 1 `Status=Em Refinamento` (história de produto, p.ex. Monitor, e card de harness). Qs fechadas e as options no host em português de operador: quem sofre, o que passa/falha, o que não entra neste card. Entra descreve comportamento observável, não o mecanismo.
+
+Identificador do git (nome de função, path, flag yaml, evento de fluxo, hash) **não** aparece no cartão do host. Esse conteúdo é **facto** no body do issue ou *como* (mecanismo) em Riscos para Design — nunca option. Se a Q só é inteligível com esse identificador, reclassificar: facto no body ou *como* no Design.
+
+Other vazio, silêncio (sem resposta) e «não percebi» / «isto é técnico» (via Other do host ou texto livre) **reclassificam**; MUST NOT gravar a option recomendada como aceite. Other do host é linha automática, não option listada e não conta no N. Outras Qs da mesma rodada continuam à espera. Other vazio, silêncio e «não percebi» / «isto é técnico» nunca são aceite da recomendada.
+
+Fronteira vazia **deste** adapter = as 6 seções do DoD **e** nenhuma decisão de operador em aberto. A árvore Matt MAY continuar no Design e MUST NOT ser exigida em Em Refinamento. Comentário canónico = a linha pinada (texto exacto; só muda o *quando*). Porta de entrada permanece este adapter; MUST NOT promover `/opsx:explore`, schema `grill-driven`, `grill-with-docs`, `to-spec` nem skill de marketplace.
+
+Vendor `.cursor/skills/grilling/SKILL.md` intocado. Contrato N≥2, recomendada primeiro, ramos Cursor-Grok vs dsh intactos.
 
 ## Como
 
@@ -39,12 +51,12 @@ Senão: recusar (id ausente, N ≠ `#<id>` do pai, ou Status ≠ Em Refinamento)
    5. **Critérios de aceite** — observáveis (Given/When/Then ou lista comportamental).
    6. **Riscos / perguntas abertas**.
 
-4. Se a fronteira **não** zerou: o card **fica** em Em Refinamento. Não comentar o handoff T1 (não postar segunda cópia do canônico). Não ir para Todo com furo bloqueante.
-5. Se a fronteira **zerou** e o body tem as 6 seções: exatamente um comentário canônico (texto exato):
+4. Se a fronteira **não** zerou (faltam seções do DoD **ou** há decisão de operador em aberto): o card **fica** em Em Refinamento. Não comentar o handoff T1 (não postar segunda cópia do canônico). Não ir para Todo com furo bloqueante.
+5. Se o body tem as 6 seções **e** nenhuma decisão de operador está em aberto: exatamente um comentário canônico (texto exato):
 
    `grill-card: fronteira vazia; história no body; à espera de T1 (Alan).`
 
-   Idempotente: texto exato já no issue = deixar; texto canônico errado = editar/minimizar esse comentário; **não** postar segundo.
+   Idempotente: texto exato já no issue = deixar; texto canônico errado = editar/minimizar esse comentário; **não** postar segundo. O texto do comentário não muda; só o *quando*.
 
 ## Cliente: Cursor e Grok
 
