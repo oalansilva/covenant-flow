@@ -16,10 +16,10 @@ Canal v1 = copiar as peles para o consumidor e **commitar**. Não é submodule, 
 
 ## Clientes
 
-Quatro clientes, por nome: **Cursor**, **Grok**, **OpenCode** e **dsh**.
+Quatro clientes, por nome: **Cursor**, **Grok**, **OpenCode** e **dsh**. Os quatro são cooperativos.
 
-- **Auto** — só Cursor, overlay `clients.cursor.auto: true`. O cliente pode correr sem prompt de permissão por ferramenta. Auto **não** autoriza cruzar colunas: o agente não arrasta o card.
-- **Cooperativo** — Grok, OpenCode e dsh, `clients.*.auto: false`, até ensaio deny PASS na branch de integração. Estes três **não** estão em Auto.
+- **Cooperativo** — Cursor por contrato; Grok, OpenCode e dsh até ensaio deny PASS na branch de integração. Overlay `clients.*.auto` é claim de máquina e **não** conduz o stub `AGENTS.md`.
+- **Auto** — **não** autoriza cruzar colunas: o agente não arrasta o card. MUST NOT reivindicar Auto em Grok, OpenCode ou dsh.
 
 ## As 12 colunas
 
@@ -54,7 +54,7 @@ No repositório **consumidor**:
 ```bash
 /path/to/covenant-flow/install.sh --init --target /path/to/consumer
 # preencha .covenant-flow/overlay.yaml (board, globs, ambientes, overlay_doc)
-/path/to/covenant-flow/install.sh --pin v1.1.4 --target /path/to/consumer
+/path/to/covenant-flow/install.sh --pin v1.1.5 --target /path/to/consumer
 ```
 
 `--init` escreve as chaves obrigatórias **vazias** e não chuta valores do projeto.
@@ -66,7 +66,7 @@ v1 **não** instala via git submodule, ponteiros gitignore, marketplace nem temp
 
 O campo `pin` do overlay é uma tag semver `vMAJOR.MINOR.PATCH`. Mudança que quebra o schema do overlay é tag major (`v2.0.0`). Bump = voltar a correr `--pin` com a tag nova e commitar o diff; as chaves de projeto mantêm-se.
 
-Exemplo deste entregável: `--pin v1.1.4`.
+Exemplo deste entregável: `--pin v1.1.5`.
 
 ## Layout
 

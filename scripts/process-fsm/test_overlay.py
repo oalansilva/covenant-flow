@@ -16,12 +16,15 @@ sys.path.insert(0, str(ROOT))
 from fsm import load_fsm, validate_fsm  # noqa: E402
 from guard import decide  # noqa: E402
 from overlay import (  # noqa: E402
+    CLIENT_KEYS,
+    SCHEMA_MAJOR,
     OverlayInvalid,
     OverlayMissing,
     dump_template,
     empty_required_keys,
     join_status_options,
     load_overlay,
+    render_agents,
     validate_overlay,
     write_init,
 )
@@ -151,6 +154,45 @@ def test_grok_opencode_have_no_law_table():
             assert "| T0 |" not in text
             assert "### Requirement:" not in text
             assert "illegal_edges" not in text
+
+
+D5_CLIENTS = (
+    "Clientes: Cursor Agent (cooperativo); Grok Build, OpenCode e dsh "
+    "(cooperativos até ensaio deny na branch de integração)."
+)
+D5_NO_AUTO = "Não reivindique modo Auto no Cursor, no Grok, no OpenCode nem no dsh."
+
+
+def test_render_agents_hardcodes_four_cooperative_clients():
+    data = filled_overlay_dict()
+    assert data["clients"]["cursor"]["auto"] is True
+    text = render_agents(data)
+    nonempty = [ln for ln in text.splitlines() if ln.strip()]
+    assert len(nonempty) <= 40
+    assert D5_CLIENTS in text
+    assert D5_NO_AUTO in text
+    assert text.index(D5_CLIENTS) < text.index(D5_NO_AUTO)
+    assert "Cursor Agent" in text and "Grok Build" in text and "OpenCode" in text
+    assert "dsh" in text
+    assert "Auto permitido" not in text
+    assert "Grok Auto" not in text
+    assert "OpenCode Auto" not in text
+    assert "Auto OpenCode" not in text
+    assert "Auto Grok" not in text
+    assert "Auto dsh" not in text
+    assert "dsh Auto" not in text
+    assert "Auto Cursor" not in text
+    assert "até ensaio deny na branch de integração" in text
+    assert "Cursor Agent (cooperativo)" in text
+    assert "ensaio deny" not in text.split("Grok Build", 1)[0]
+    validate_overlay(data, require_filled=True)
+    assert SCHEMA_MAJOR == 1
+    assert CLIENT_KEYS == ("cursor", "grok", "opencode")
+    flipped = filled_overlay_dict()
+    flipped["clients"]["cursor"]["auto"] = False
+    flipped["clients"]["dsh"] = {"auto": False}
+    assert render_agents(flipped) == text
+    validate_overlay(flipped, require_filled=True)
 
 
 def test_skill_stubs_body_budget():

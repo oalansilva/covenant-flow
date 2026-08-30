@@ -14,8 +14,10 @@ sys.path.insert(0, str(ROOT))
 
 from fsm import load_fsm  # noqa: E402
 from grok_stubs import stub_errors  # noqa: E402
+from overlay import render_agents  # noqa: E402
 from paging import UNBOUND_PAGE, page, write_grok_page  # noqa: E402
 from resolve import UNBOUND  # noqa: E402
+from test_overlay_fixtures import filled_overlay_dict  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -166,6 +168,20 @@ def test_agents_md_is_stub():
     assert "dsh Auto" not in text
     assert "cooperativo" in text
     assert "T0–T17" not in text and "T0-T17" not in text
+    generated = render_agents(filled_overlay_dict())
+    assert filled_overlay_dict()["clients"]["cursor"]["auto"] is True
+    assert (
+        "Clientes: Cursor Agent (cooperativo); Grok Build, OpenCode e dsh "
+        "(cooperativos até ensaio deny na branch de integração)."
+    ) in generated
+    assert (
+        "Não reivindique modo Auto no Cursor, no Grok, no OpenCode nem no dsh."
+    ) in generated
+    assert "Auto permitido" not in generated
+    assert "Auto Grok" not in generated
+    assert "Auto OpenCode" not in generated
+    assert "Auto dsh" not in generated
+    assert len([ln for ln in generated.splitlines() if ln.strip()]) <= 40
 
 
 def test_skill_priority_anchor():
