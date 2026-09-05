@@ -545,7 +545,7 @@ def test_e12_pin_expects_free_patch_and_dsh_auto_false(tmp_path: Path) -> None:
         [
             str(INSTALLER),
             "--pin",
-            "v1.1.8",
+            "v1.1.9",
             "--target",
             str(target),
             "--source",
@@ -559,7 +559,7 @@ def test_e12_pin_expects_free_patch_and_dsh_auto_false(tmp_path: Path) -> None:
     overlay = yaml.safe_load(
         (target / ".covenant-flow" / "overlay.yaml").read_text(encoding="utf-8")
     )
-    assert overlay["pin"] == "v1.1.8"
+    assert overlay["pin"] == "v1.1.9"
     assert overlay["clients"]["dsh"]["auto"] is False
     guard = (target / ".dsh" / "plugin" / "process-fsm-guard.js").read_text(encoding="utf-8")
     assert "sanitizeReasoningEffort" in guard

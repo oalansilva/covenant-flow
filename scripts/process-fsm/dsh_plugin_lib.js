@@ -6,6 +6,21 @@ import { fileURLToPath } from "node:url";
 const LIB_DIR = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = join(LIB_DIR, "..", "..");
 const WRITEISH = new Set(["write", "edit", "bash"]);
+
+export function resolveRepoCwd(cwd) {
+  const start = typeof cwd === "string" && cwd.trim() ? cwd : REPO_ROOT;
+  try {
+    const proc = spawnSync("git", ["-C", start, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    const top = (proc.stdout || "").trim();
+    if (proc.status === 0 && top) return top;
+  } catch {
+    // session cwd is not a git work tree (e.g. $HOME)
+  }
+  return REPO_ROOT;
+}
 const EDITOR_MUTATE = new Set(["create", "str_replace", "insert"]);
 
 function pythonBin() {
@@ -279,6 +294,28 @@ export function sanitizeReasoningEffort(config) {
   return out;
 }
 
+function readOwnFact(value, key) {
+  try {
+    const desc = Object.getOwnPropertyDescriptor(value, key);
+    if (desc) {
+      if (Object.prototype.hasOwnProperty.call(desc, "value") && desc.value != null) {
+        return desc.value;
+      }
+      if (typeof desc.get === "function") {
+        const got = desc.get.call(value);
+        if (got != null) return got;
+      }
+    }
+  } catch {
+    // non-configurable exotic
+  }
+  try {
+    return value[key];
+  } catch {
+    return undefined;
+  }
+}
+
 function collectFailureFacts(value, parts, depth = 0) {
   if (value == null || depth > 5) return;
   const kind = typeof value;
@@ -291,7 +328,14 @@ function collectFailureFacts(value, parts, depth = 0) {
     return;
   }
   if (kind === "object") {
+    // Error.message / Error.code / status are often non-enumerable; Object.keys omits them.
+    for (const key of ["message", "code", "status"]) {
+      const fact = readOwnFact(value, key);
+      if (fact == null || typeof fact === "object") continue;
+      parts.push(String(fact));
+    }
     for (const key of Object.keys(value)) {
+      if (key === "message" || key === "code" || key === "status") continue;
       collectFailureFacts(value[key], parts, depth + 1);
     }
   }
@@ -304,16 +348,34 @@ function isGuardDenyFailure(failure) {
   return GUARD_DENY_RE.test(reason);
 }
 
+function failureStatusOf(failure) {
+  if (!failure || typeof failure !== "object") return undefined;
+  const direct = readOwnFact(failure, "status");
+  if (typeof direct === "number") return direct;
+  if (failure.status === 401 || failure.status === 400 || failure.status === 429) {
+    return failure.status;
+  }
+  return typeof failure.status === "number" ? failure.status : undefined;
+}
+
+function failureCodeOf(failure) {
+  if (!failure || typeof failure !== "object") return "";
+  const direct = readOwnFact(failure, "code");
+  if (direct != null && typeof direct !== "object") return String(direct);
+  try {
+    return String(failure.code || "");
+  } catch {
+    return "";
+  }
+}
+
 export function isReasoningEffortRejection(failure) {
   if (failure == null || failure === false) return false;
   if (isGuardDenyFailure(failure)) return false;
   const parts = [];
   collectFailureFacts(failure, parts);
   const text = parts.join(" ");
-  const status =
-    failure && typeof failure === "object" && typeof failure.status === "number"
-      ? failure.status
-      : undefined;
+  const status = failureStatusOf(failure);
   if (status === 401 || UNAUTH_RE.test(text)) return false;
   if (status === 429 || RATE_LIMIT_RE.test(text)) return false;
   const effortNeedle = EFFORT_NEEDLE_RE.test(text);
@@ -322,10 +384,96 @@ export function isReasoningEffortRejection(failure) {
   const status400 =
     status === 400 ||
     STATUS_400_RE.test(text) ||
-    (failure &&
-      typeof failure === "object" &&
-      String(failure.code || "").toUpperCase() === "INVALID_REQUEST");
+    failureCodeOf(failure).toUpperCase() === "INVALID_REQUEST";
   return tokenNeedle || status400;
+}
+
+function diagnosticMessageOf(failure) {
+  if (failure == null) return "";
+  if (typeof failure === "string") return failure;
+  if (typeof failure !== "object") return "";
+  const reason = failure.reason;
+  if (reason && typeof reason === "object") {
+    const nested = reason.error;
+    if (nested && typeof nested === "object") {
+      const fromReasonError = readOwnFact(nested, "message");
+      if (typeof fromReasonError === "string" && fromReasonError) return fromReasonError;
+      if (typeof nested.message === "string" && nested.message) return nested.message;
+    }
+    if (typeof reason.message === "string" && reason.message) return reason.message;
+  }
+  const err = failure.error;
+  if (err && typeof err === "object") {
+    const fromError = readOwnFact(err, "message");
+    if (typeof fromError === "string" && fromError) return fromError;
+    if (typeof err.message === "string" && err.message) return err.message;
+  }
+  const direct = readOwnFact(failure, "message");
+  if (typeof direct === "string" && direct) return direct;
+  try {
+    if (typeof failure.message === "string" && failure.message) return failure.message;
+  } catch {
+    // ignore
+  }
+  return "";
+}
+
+export function formatChildRunFailure({ stopReason, failure } = {}) {
+  const reasonText = stopReason == null || stopReason === "" ? "error" : String(stopReason);
+  const diagnostic = diagnosticMessageOf(failure);
+  const lines = [`stopReason: ${reasonText}`];
+  if (diagnostic) lines.push(`Diagnostic: ${diagnostic}`);
+  if (isReasoningEffortRejection(failure)) {
+    lines.push("class=dsh_reasoning_effort_none");
+    lines.push(
+      "Do not re-spawn the same preset; gate dsh_reasoning_effort_spawn is closed for this parent.",
+    );
+  }
+  return lines.join("\n");
+}
+
+export function createReasoningEffortRequestErrorHandler(state) {
+  const retriedAgents = state && state.retriedAgents instanceof Set ? state.retriedAgents : new Set();
+  const spawnBlockedParents =
+    state && state.spawnBlockedParents instanceof Set ? state.spawnBlockedParents : new Set();
+  return async (payload, next) => {
+    if (!isReasoningEffortRejection(payload && payload.failure)) {
+      return next();
+    }
+    if (isDshChildAgent(payload)) {
+      const parentKey = childParentSessionKey(payload);
+      if (parentKey) spawnBlockedParents.add(parentKey);
+    }
+    const sessionId = agentSessionId(payload && payload.agent);
+    const retryKey = sessionId || "__missing_session__";
+    if (retriedAgents.has(retryKey)) {
+      return next();
+    }
+    retriedAgents.add(retryKey);
+    return { kind: "retry" };
+  };
+}
+
+export function attachAgentEffortGuards(agentCtx, state) {
+  try {
+    if (!agentCtx || typeof agentCtx.on !== "function") return;
+    const shared = state && typeof state === "object" ? state : {};
+    const retriedAgents = shared.retriedAgents instanceof Set ? shared.retriedAgents : new Set();
+    const spawnBlockedParents =
+      shared.spawnBlockedParents instanceof Set ? shared.spawnBlockedParents : new Set();
+    agentCtx.on(
+      "agent/request",
+      async (_payload, next) => sanitizeReasoningEffort(await next()),
+      { prepend: true },
+    );
+    agentCtx.on(
+      "agent/request-error",
+      createReasoningEffortRequestErrorHandler({ retriedAgents, spawnBlockedParents }),
+      { prepend: true },
+    );
+  } catch {
+    // agent/created synchronous throw vetoes child publication
+  }
 }
 
 export function sessionHeaderOf(payload) {
