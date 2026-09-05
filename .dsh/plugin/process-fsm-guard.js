@@ -7,6 +7,12 @@ import {
   isGrillShapedSpawn,
   readAgentsStub,
   createRepoDshSkillProvider,
+  sanitizeReasoningEffort,
+  isReasoningEffortRejection,
+  isDshChildAgent,
+  agentSessionId,
+  childParentSessionKey,
+  spawnCallerSessionId,
 } from "../../scripts/process-fsm/dsh_plugin_lib.js";
 
 export const name = "covenant-flow-process-fsm-guard";
@@ -14,11 +20,39 @@ export const inject = ["systemPrompt", "skills"];
 
 export function apply(ctx) {
   const cwd = process.cwd() || REPO_ROOT;
+  const retriedAgents = new Set();
+  const spawnBlockedParents = new Set();
+  ctx.on("agent/request", async (payload, next) => sanitizeReasoningEffort(await next()));
+  ctx.on("agent/request-error", async (payload, next) => {
+    if (!isReasoningEffortRejection(payload && payload.failure)) {
+      return next();
+    }
+    if (isDshChildAgent(payload)) {
+      const parentKey = childParentSessionKey(payload);
+      if (parentKey) spawnBlockedParents.add(parentKey);
+    }
+    const sessionId = agentSessionId(payload && payload.agent);
+    const retryKey = sessionId || "__missing_session__";
+    if (retriedAgents.has(retryKey)) {
+      return next();
+    }
+    retriedAgents.add(retryKey);
+    return { kind: "retry" };
+  });
   ctx.on("tools/pre-execute", async (exec, next) => {
     const tool = exec && exec.name;
     const args = (exec && exec.arguments) || {};
     if (isGrillShapedSpawn(tool, args)) {
       return { kind: "deny", reason: "process-fsm-guard deny reason=dsh_grill_spawn" };
+    }
+    if (tool === "subagent" || tool === "subagent_fork") {
+      const caller = spawnCallerSessionId(exec);
+      if (caller && spawnBlockedParents.has(caller)) {
+        return {
+          kind: "deny",
+          reason: "process-fsm-guard deny reason=dsh_reasoning_effort_spawn",
+        };
+      }
     }
     if (isCordisRestricted(tool)) {
       return { kind: "deny", reason: "process-fsm-guard deny reason=cordis_restrict" };

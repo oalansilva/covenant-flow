@@ -235,6 +235,146 @@ export function readAgentsStub(root = REPO_ROOT) {
   }
 }
 
+const ACCEPTED_REASONING_EFFORT = new Set(["minimal", "low", "medium", "high"]);
+const REFUSED_REASONING_TOKENS = new Set(["none", "off", "", "null"]);
+const EFFORT_NEEDLE_RE = /reasoning\.effort|reasoningeffort|unsupported_reasoning_effort/i;
+const TOKEN_NEEDLE_RE = /\bnone\b|\boff\b|does not support/i;
+const STATUS_400_RE = /invalid_request|\b400\b/i;
+const RATE_LIMIT_RE = /rate[\s-]?limit|too many requests|\b429\b/i;
+const UNAUTH_RE = /\b401\b|unauthorized/i;
+const GUARD_DENY_RE = /process-fsm-guard deny/i;
+
+function classifyReasoningEffort(value) {
+  if (value === undefined) return { kind: "missing" };
+  if (value === null) return { kind: "refused" };
+  const token = String(value).trim().toLowerCase();
+  if (REFUSED_REASONING_TOKENS.has(token)) return { kind: "refused" };
+  if (ACCEPTED_REASONING_EFFORT.has(token)) return { kind: "accepted", value: token };
+  return { kind: "other" };
+}
+
+export function sanitizeReasoningEffort(config) {
+  const src =
+    config && typeof config === "object" && !Array.isArray(config) ? config : {};
+  const out = { ...src };
+  const top = classifyReasoningEffort(out.reasoningEffort);
+  let nested = { kind: "missing" };
+  if (out.reasoning && typeof out.reasoning === "object" && !Array.isArray(out.reasoning)) {
+    const reasoning = { ...out.reasoning };
+    nested = classifyReasoningEffort(reasoning.effort);
+    if (nested.kind === "refused") {
+      delete reasoning.effort;
+    } else if (nested.kind === "accepted") {
+      reasoning.effort = nested.value;
+    }
+    out.reasoning = reasoning;
+  }
+  if (top.kind === "accepted") {
+    out.reasoningEffort = top.value;
+  } else if (top.kind === "missing" && nested.kind === "accepted") {
+    out.reasoningEffort = nested.value;
+  } else {
+    out.reasoningEffort = "high";
+  }
+  return out;
+}
+
+function collectFailureFacts(value, parts, depth = 0) {
+  if (value == null || depth > 5) return;
+  const kind = typeof value;
+  if (kind === "string" || kind === "number" || kind === "boolean") {
+    parts.push(String(value));
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectFailureFacts(item, parts, depth + 1);
+    return;
+  }
+  if (kind === "object") {
+    for (const key of Object.keys(value)) {
+      collectFailureFacts(value[key], parts, depth + 1);
+    }
+  }
+}
+
+function isGuardDenyFailure(failure) {
+  if (!failure || typeof failure !== "object") return false;
+  if (failure.kind === "deny") return true;
+  const reason = String(failure.reason || failure.agent_message || "");
+  return GUARD_DENY_RE.test(reason);
+}
+
+export function isReasoningEffortRejection(failure) {
+  if (failure == null || failure === false) return false;
+  if (isGuardDenyFailure(failure)) return false;
+  const parts = [];
+  collectFailureFacts(failure, parts);
+  const text = parts.join(" ");
+  const status =
+    failure && typeof failure === "object" && typeof failure.status === "number"
+      ? failure.status
+      : undefined;
+  if (status === 401 || UNAUTH_RE.test(text)) return false;
+  if (status === 429 || RATE_LIMIT_RE.test(text)) return false;
+  const effortNeedle = EFFORT_NEEDLE_RE.test(text);
+  if (!effortNeedle) return false;
+  const tokenNeedle = TOKEN_NEEDLE_RE.test(text);
+  const status400 =
+    status === 400 ||
+    STATUS_400_RE.test(text) ||
+    (failure &&
+      typeof failure === "object" &&
+      String(failure.code || "").toUpperCase() === "INVALID_REQUEST");
+  return tokenNeedle || status400;
+}
+
+export function sessionHeaderOf(payload) {
+  const agent = payload && payload.agent;
+  const session = agent && agent.session;
+  const header =
+    (session && session.header) ||
+    (agent && agent.header) ||
+    {};
+  return header && typeof header === "object" ? header : {};
+}
+
+export function agentSessionId(agent) {
+  if (typeof agent === "string" && agent.trim()) return agent.trim();
+  if (!agent || typeof agent !== "object") return "";
+  if (typeof agent.id === "string" && agent.id.trim()) return agent.id.trim();
+  const session = agent.session;
+  if (typeof session === "string" && session.trim()) return session.trim();
+  if (session && typeof session === "object") {
+    if (typeof session.id === "string" && session.id.trim()) return session.id.trim();
+    const header = session.header;
+    if (header && typeof header.id === "string" && header.id.trim()) {
+      return header.id.trim();
+    }
+  }
+  return "";
+}
+
+export function isDshChildAgent(payload) {
+  const header = sessionHeaderOf(payload);
+  if (Number(header.delegationDepth) >= 1) return true;
+  if (header.origin === "subagent") return true;
+  if (header.parentSession) return true;
+  return false;
+}
+
+export function childParentSessionKey(payload) {
+  const header = sessionHeaderOf(payload);
+  if (header.parentSession) return String(header.parentSession);
+  const fallback =
+    (payload && payload.parentSession) ||
+    (payload && payload.agent && payload.agent.parentSession);
+  return fallback ? String(fallback) : "";
+}
+
+export function spawnCallerSessionId(exec) {
+  return agentSessionId(exec && exec.agent);
+}
+
 export function createRepoDshSkillProvider(root) {
   const skillsRoot = join(root, ".dsh", "skills");
   return {

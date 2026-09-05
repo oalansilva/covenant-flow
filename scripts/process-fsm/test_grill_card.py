@@ -253,7 +253,7 @@ def test_n2_client_labelled_grill_copy() -> None:
 
     if (REPO / "install.sh").is_file():
         adapter = (ROOT / "test_dsh_adapter.py").read_text(encoding="utf-8")
-        assert 'overlay["pin"] == "v1.1.7"' in adapter
+        assert 'overlay["pin"] == "v1.1.8"' in adapter
 
 
 CEILING_DIR = ROOT / "fixtures" / "grill_ceiling"
