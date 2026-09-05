@@ -232,3 +232,76 @@ def test_g11_decide_allows_task_with_grill_card_prompt() -> None:
     src = (ROOT / "guard.py").read_text(encoding="utf-8")
     for needle in ("grill-card", "dsh_grill_spawn", "isGrillShapedSpawn"):
         assert needle not in src, needle
+
+
+def test_g12_design_autor_citation_fronteira_vazia_allows() -> None:
+    data = _apply_pre_execute(
+        "subagent",
+        {
+            "description": "design-autor 818",
+            "prompt": "Closed ritual: grill-card fronteira vazia. Write the OpenSpec.",
+        },
+    )
+    assert data["nextCalled"] is True
+    reason = (data["result"] or {}).get("reason") or ""
+    assert "dsh_grill_spawn" not in reason
+
+
+def test_g12b_apply_citation_dod_allows() -> None:
+    prompts = (
+        "Apply the change. Fact: grill-card dod is already closed.",
+        "Apply the change. Fact: dod grelhado; grill-card is citation only.",
+    )
+    for prompt in prompts:
+        data = _apply_pre_execute(
+            "subagent",
+            {"description": "apply 818", "prompt": prompt},
+        )
+        assert data["nextCalled"] is True, prompt
+        reason = (data["result"] or {}).get("reason") or ""
+        assert "dsh_grill_spawn" not in reason, prompt
+
+
+def test_g12c_diff_reviewer_closed_grill_allows() -> None:
+    data = _apply_pre_execute(
+        "subagent",
+        {
+            "description": "diff-reviewer 818",
+            "prompt": "Review the diff. Fact: closed grill; grill-card already ran on the root.",
+        },
+    )
+    assert data["nextCalled"] is True
+    reason = (data["result"] or {}).get("reason") or ""
+    assert "dsh_grill_spawn" not in reason
+
+
+def test_g12d_nested_non_prompt_field_allows_nested_prompt_still_role() -> None:
+    data = _apply_pre_execute(
+        "subagent",
+        {
+            "description": "design-autor 818",
+            "inner": {"fact": "grill-card fronteira vazia"},
+        },
+    )
+    assert data["nextCalled"] is True
+    reason = (data["result"] or {}).get("reason") or ""
+    assert "dsh_grill_spawn" not in reason
+
+    code = f"""
+import {{ isGrillShapedSpawn }} from {json.dumps(str(PLUGIN_LIB))};
+const cases = {{
+  nestedFact: isGrillShapedSpawn("subagent", {{
+    description: "design-autor 818",
+    inner: {{ fact: "grill-card fronteira vazia" }},
+  }}),
+  nestedPrompt: isGrillShapedSpawn("subagent_fork", {{
+    inner: {{ prompt: "x grill-card y" }},
+  }}),
+}};
+process.stdout.write(JSON.stringify(cases));
+"""
+    proc = _node(code)
+    assert proc.returncode == 0, proc.stderr
+    cases = json.loads(proc.stdout)
+    assert cases["nestedFact"] is False
+    assert cases["nestedPrompt"] is True

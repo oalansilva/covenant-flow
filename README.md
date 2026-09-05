@@ -54,7 +54,7 @@ No repositório **consumidor**:
 ```bash
 /path/to/covenant-flow/install.sh --init --target /path/to/consumer
 # preencha .covenant-flow/overlay.yaml (board, globs, ambientes, overlay_doc)
-/path/to/covenant-flow/install.sh --pin v1.1.6 --target /path/to/consumer
+/path/to/covenant-flow/install.sh --pin v1.1.7 --target /path/to/consumer
 ```
 
 `--init` escreve as chaves obrigatórias **vazias** e não chuta valores do projeto.
@@ -66,7 +66,7 @@ v1 **não** instala via git submodule, ponteiros gitignore, marketplace nem temp
 
 O campo `pin` do overlay é uma tag semver `vMAJOR.MINOR.PATCH`. Mudança que quebra o schema do overlay é tag major (`v2.0.0`). Bump = voltar a correr `--pin` com a tag nova e commitar o diff; as chaves de projeto mantêm-se.
 
-Exemplo deste entregável: `--pin v1.1.6`.
+Exemplo deste entregável: `--pin v1.1.7`.
 
 ## Layout
 

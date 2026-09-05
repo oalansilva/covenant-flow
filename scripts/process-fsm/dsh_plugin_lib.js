@@ -57,39 +57,87 @@ export function isCordisRestricted(tool) {
 }
 
 const GRILL_CARD_NEEDLE = "grill-card";
+const GRILL_CITATION_MARKERS = [
+  "fronteira vazia",
+  "do not re-interview",
+  "não reentrevistar",
+  "do not invoke grill-card",
+  "não invocar grill-card",
+  "closed grill",
+  "grill-card dod",
+  "dod grelhado",
+  "grilled dod",
+];
 
-function grillHaystacks(args) {
-  const out = [];
-  if (args == null) return out;
-  if (typeof args === "string") {
-    out.push(args);
-    try {
-      const parsed = JSON.parse(args);
-      if (parsed && typeof parsed === "object") {
-        out.push(...grillHaystacks(parsed));
+function collectDescriptionAndPrompt(value, seen, descriptionParts, promptParts) {
+  if (value == null || typeof value !== "object") return;
+  try {
+    if (seen.has(value)) return;
+    seen.add(value);
+  } catch {
+    return;
+  }
+  try {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        collectDescriptionAndPrompt(item, seen, descriptionParts, promptParts);
       }
-    } catch {
-      // parse fail → scan the raw string already pushed
+      return;
     }
-    return out;
-  }
-  if (typeof args === "object") {
-    if (typeof args.description === "string") out.push(args.description);
-    if (typeof args.prompt === "string") out.push(args.prompt);
-    try {
-      out.push(JSON.stringify(args));
-    } catch {
-      // ignore cyclic / unserializable
+    if (typeof value.description === "string") descriptionParts.push(value.description);
+    if (typeof value.prompt === "string") promptParts.push(value.prompt);
+    for (const child of Object.values(value)) {
+      collectDescriptionAndPrompt(child, seen, descriptionParts, promptParts);
     }
+  } catch {
+    // cyclic / exotic objects must not throw
   }
-  return out;
+}
+
+function foldHaystack(parts) {
+  return parts.map((part) => String(part).toLowerCase()).join(" ");
+}
+
+function hasCitationMarker(haystack) {
+  for (const marker of GRILL_CITATION_MARKERS) {
+    if (haystack.includes(marker)) return true;
+  }
+  return false;
 }
 
 export function isGrillShapedSpawn(tool, args) {
   if (tool !== "subagent" && tool !== "subagent_fork") return false;
-  return grillHaystacks(args).some((item) =>
-    String(item).toLowerCase().includes(GRILL_CARD_NEEDLE),
-  );
+  const descriptionParts = [];
+  const promptParts = [];
+  try {
+    if (typeof args === "string") {
+      try {
+        const parsed = JSON.parse(args);
+        if (parsed && typeof parsed === "object") {
+          collectDescriptionAndPrompt(
+            parsed,
+            new WeakSet(),
+            descriptionParts,
+            promptParts,
+          );
+        } else {
+          promptParts.push(args);
+        }
+      } catch {
+        promptParts.push(args);
+      }
+    } else {
+      collectDescriptionAndPrompt(args, new WeakSet(), descriptionParts, promptParts);
+    }
+  } catch {
+    return false;
+  }
+  const descriptionHay = foldHaystack(descriptionParts);
+  const promptHay = foldHaystack(promptParts);
+  if (descriptionHay.includes(GRILL_CARD_NEEDLE)) return true;
+  if (!promptHay.includes(GRILL_CARD_NEEDLE)) return false;
+  if (hasCitationMarker(promptHay)) return false;
+  return true;
 }
 
 export function isWriteLike(tool, args = {}) {
