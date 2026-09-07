@@ -285,9 +285,7 @@ export function apply(ctx) {
     const denied = denyFromDecision(decision, tool, args);
     if (denied) return denied;
     if (tool === "job_output" && args && args.wait === true) {
-      if (exec.arguments && typeof exec.arguments === "object") {
-        capJobOutputWaitTimeout(exec.arguments);
-      }
+      capJobOutputWaitTimeout(exec);
     }
     return next();
   });

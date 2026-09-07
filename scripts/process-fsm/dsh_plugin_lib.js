@@ -519,13 +519,17 @@ export function isJobOutputWaitExec(exec) {
   return !!(args && args.wait === true);
 }
 
-export function capJobOutputWaitTimeout(args) {
-  if (!args || typeof args !== "object") return args;
-  const timeout = args.timeout_ms;
-  if (timeout == null || timeout === "" || Number(timeout) > JOB_OUTPUT_WAIT_CAP_MS) {
-    args.timeout_ms = JOB_OUTPUT_WAIT_CAP_MS;
+export function capJobOutputWaitTimeout(exec) {
+  try {
+    const args = exec && exec.arguments;
+    if (!args || typeof args !== "object") return exec;
+    const timeout = args.timeout_ms;
+    if (timeout != null && timeout !== "" && Number(timeout) <= JOB_OUTPUT_WAIT_CAP_MS) return exec;
+    exec.arguments = { ...args, timeout_ms: JOB_OUTPUT_WAIT_CAP_MS };
+  } catch {
+    // frozen exec: fail-open; loop still uses JOB_OUTPUT_WAIT_CAP_MS
   }
-  return args;
+  return exec;
 }
 
 function resultBlobText(result) {
@@ -572,6 +576,20 @@ function mergeBlobWithExtra(blob, extra, line) {
   return `${body}${body.endsWith("\n") ? "" : "\n"}${line}`;
 }
 
+function publicJobView(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return {};
+  const out = {
+    id: snapshot.id,
+    kind: snapshot.kind,
+    label: snapshot.label,
+    status: String(snapshot.status),
+    startedAt: snapshot.startedAt,
+  };
+  if (snapshot.detail !== undefined) out.detail = snapshot.detail;
+  if (snapshot.finishedAt !== undefined) out.finishedAt = snapshot.finishedAt;
+  return out;
+}
+
 function applyJobSnapshotToResult(result, snapshot, extraText) {
   const status = snapshot && snapshot.status ? String(snapshot.status) : "";
   if (!status || !result || typeof result !== "object") return result;
@@ -585,7 +603,7 @@ function applyJobSnapshotToResult(result, snapshot, extraText) {
     out.value = {
       ...out.value,
       text: `${prevText}${extra}`,
-      job: { ...prevJob, ...snapshot, status },
+      job: publicJobView({ ...prevJob, ...snapshot, status }),
     };
   }
   if (typeof out.content === "string") {
@@ -626,9 +644,12 @@ export async function waitJobOutputUntilSettled(ctx, exec, initialResult, option
   while (PENDING_JOB_STATUSES.has(status)) {
     const remaining = JOB_WAIT_LOOP_CEILING_MS - (Date.now() - startedAt);
     if (remaining <= 0) break;
-    const requested =
-      Number(args.timeout_ms) > 0 ? Number(args.timeout_ms) : JOB_OUTPUT_WAIT_CAP_MS;
-    const timeoutMs = Math.min(requested, remaining);
+    const requested = Number(args.timeout_ms);
+    const capped =
+      Number.isFinite(requested) && requested > 0 && requested <= JOB_OUTPUT_WAIT_CAP_MS
+        ? requested
+        : JOB_OUTPUT_WAIT_CAP_MS;
+    const timeoutMs = Math.min(capped, remaining);
     if (timeoutMs <= 0) break;
     try {
       lastSnapshot = await ctx.jobs.wait(id, timeoutMs, caller, signal);

@@ -56,13 +56,33 @@ host.jobs = {{
   async wait(id, timeoutMs, caller, signal) {{
     waits.push({{ id, timeoutMs }});
     if (waits.length === 1) return {{ id, status: "running" }};
-    return {{ id, status: "completed", finishedAt: Date.now() }};
+    return {{
+      id,
+      status: "completed",
+      finishedAt: Date.now(),
+      reported: true,
+      ownerSession: "s",
+      outputLimitBytes: 9,
+      kind: "bash",
+      label: "gh",
+      startedAt: 1,
+    }};
   }},
   read(id, caller) {{
     reads.push({{ id }});
     return {{
       text: "qa-gate FAIL\\n",
-      snapshot: {{ id, status: "completed", detail: "exit code: 1" }},
+      snapshot: {{
+        id,
+        status: "completed",
+        detail: "exit code: 1",
+        reported: true,
+        ownerSession: "s",
+        outputLimitBytes: 9,
+        kind: "bash",
+        label: "gh",
+        startedAt: 1,
+      }},
     }};
   }},
   list() {{ return [{{ id: "job-1", status: "running" }}]; }},
@@ -125,6 +145,13 @@ process.stdout.write(JSON.stringify({{
     )
     # A single host wait of 30s/10min that returns running MUST fail W1.
     assert not (data["waitCount"] == 1 and data["firstTimeout"] in (30000, 600000))
+    assert not (data["result"] or {}).get("isError")
+    assert "reported" not in job
+    assert "ownerSession" not in job
+    assert "outputLimitBytes" not in job
+    assert job.get("kind") == "bash"
+    assert job.get("label") == "gh"
+    assert job.get("startedAt") == 1
 
 
 def test_w1_read_throw_fail_open_keeps_snapshot_detail() -> None:
@@ -312,24 +339,87 @@ import {{ apply }} from {json.dumps(str(PLUGIN_GUARD))};
 const registry = createScopeRegistry();
 const host = mockAppendInnerCtx(registry, "host");
 apply(host);
-const args = {{ job_id: "job-1", wait: true }};
+const frozenArgs = Object.freeze({{ job_id: "job-1", wait: true }});
+const exec = {{
+  name: "job_output",
+  arguments: frozenArgs,
+  agent: rootAgent({json.dumps(ROOT_SESSION)}),
+}};
 let nextCalled = false;
-const result = await host.events["tools/pre-execute"](
-  {{ name: "job_output", arguments: args, agent: rootAgent({json.dumps(ROOT_SESSION)}) }},
-  async () => {{ nextCalled = true; return {{ kind: "allow" }}; }},
-);
+let threw = false;
+let throwName = "";
+try {{
+  await host.events["tools/pre-execute"](
+    exec,
+    async () => {{ nextCalled = true; return {{ kind: "allow" }}; }},
+  );
+}} catch (err) {{
+  threw = true;
+  throwName = err && err.name ? err.name : String(err);
+}}
+let inplaceThrew = false;
+try {{
+  frozenArgs.timeout_ms = 1;
+}} catch {{
+  inplaceThrew = true;
+}}
 const over = {{ job_id: "job-2", wait: true, timeout_ms: 3600000 }};
+const overExec = {{
+  name: "job_output",
+  arguments: over,
+  agent: rootAgent({json.dumps(ROOT_SESSION)}),
+}};
 await host.events["tools/pre-execute"](
-  {{ name: "job_output", arguments: over, agent: rootAgent({json.dumps(ROOT_SESSION)}) }},
+  overExec,
   async () => ({{ kind: "allow" }}),
 );
-process.stdout.write(JSON.stringify({{ args, over, nextCalled, result }}));
+const waits = [];
+host.jobs = {{
+  async wait(id, timeoutMs) {{
+    waits.push(timeoutMs);
+    return {{ id, status: "completed" }};
+  }},
+  list() {{ return [{{ id: "job-1", status: "running" }}]; }},
+}};
+const loopArgs = Object.freeze({{ job_id: "job-1", wait: true }});
+await host.events["tools/execute"](
+  {{
+    name: "job_output",
+    arguments: loopArgs,
+    agent: rootAgent({json.dumps(ROOT_SESSION)}),
+  }},
+  async () => ({{
+    content: "[status: running]",
+    value: {{ job: {{ id: "job-1", status: "running" }} }},
+  }}),
+);
+process.stdout.write(JSON.stringify({{
+  nextCalled,
+  threw,
+  throwName,
+  inplaceThrew,
+  frozenHasTimeout: Object.prototype.hasOwnProperty.call(frozenArgs, "timeout_ms"),
+  execTimeout: exec.arguments && exec.arguments.timeout_ms,
+  replaced: exec.arguments !== frozenArgs,
+  overTimeout: over.timeout_ms,
+  overExecTimeout: overExec.arguments && overExec.arguments.timeout_ms,
+  overReplaced: overExec.arguments !== over,
+  firstWait: waits[0],
+}}));
 """
     data = _node_ok(code)
     assert data["nextCalled"] is True
-    assert data["args"]["timeout_ms"] == WAIT_CAP_MS
-    assert data["args"]["timeout_ms"] != 30000
-    assert data["over"]["timeout_ms"] == WAIT_CAP_MS
+    assert data["threw"] is False
+    assert data["inplaceThrew"] is True
+    assert data["frozenHasTimeout"] is False
+    assert data["execTimeout"] == WAIT_CAP_MS
+    assert data["execTimeout"] != 30000
+    assert data["replaced"] is True
+    assert data["overTimeout"] == 3600000
+    assert data["overExecTimeout"] == WAIT_CAP_MS
+    assert data["overReplaced"] is True
+    assert data["firstWait"] == WAIT_CAP_MS
+    assert data["firstWait"] != 30000
 
 
 def test_w5_w6_dead_turn_retries_once_then_next() -> None:
@@ -459,6 +549,12 @@ def test_w7_patch_wait_cap_without_wake_budget_or_t0() -> None:
     assert "@deepseek-ai/dsh" not in guard
     assert "createDeadTurnRequestErrorHandler" in lib
     assert "waitJobOutputUntilSettled" in lib
+    assert "function publicJobView(snapshot)" in lib
+    assert "job: publicJobView(" in lib
+    assert "job: { ...prevJob, ...snapshot" not in lib
+    assert "args.timeout_ms = JOB_OUTPUT_WAIT_CAP_MS" not in lib
+    assert "capJobOutputWaitTimeout(exec)" in guard
+    assert "capJobOutputWaitTimeout(exec.arguments)" not in guard
     assert '{ global: true }' in guard or "global: true" in guard
     assert "agent/turn-stopping" in guard
     rewritten = []
