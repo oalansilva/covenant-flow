@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+import signal
+import socket
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -28,7 +32,10 @@ PLUGIN_HOOK = REPO / ".dsh" / "plugin" / "impeccable-hook.js"
 PLUGIN_LIB = REPO / "scripts" / "process-fsm" / "dsh_plugin_lib.js"
 OPENCODE_LIB = REPO / "scripts" / "process-fsm" / "opencode_plugin_lib.js"
 BOOT = REPO / "scripts" / "process-fsm" / "dsh_boot.sh"
+RELOAD = REPO / "scripts" / "process-fsm" / "dsh_isolate_reload.sh"
 PATCH = REPO / ".dsh" / "cordis.patch.yml"
+LIVE_LISTEN = "127.0.0.1:3080"
+LIVE_SIDECAR = Path("/tmp/covenant-flow-dsh-isolate.json")
 INSTALLER = REPO / "install.sh"
 _SKIP_NO_INSTALLER = pytest.mark.skipif(
     not INSTALLER.is_file(),
@@ -517,6 +524,11 @@ def test_pin_copies_dsh_without_injecting_clients_dsh(tmp_path: Path):
     assert (target / ".dsh" / "plugin" / "process-fsm-guard.js").is_file()
     assert (target / ".dsh" / "plugin" / "impeccable-hook.js").is_file()
     assert (target / ".dsh" / "cordis.patch.yml").is_file()
+    assert (target / "scripts" / "process-fsm" / "dsh_isolate_reload.sh").is_file()
+    assert (target / "scripts" / "process-fsm" / "dsh_boot.sh").is_file()
+    boot = (target / "scripts" / "process-fsm" / "dsh_boot.sh").read_text(encoding="utf-8")
+    assert "dsh_isolate_reload.sh" in boot
+    assert "--no-open" in boot
     overlay = yaml.safe_load((target / ".covenant-flow" / "overlay.yaml").read_text(encoding="utf-8"))
     assert overlay["pin"] == "v1.1.9"
     assert "dsh" not in overlay["clients"]
@@ -551,9 +563,13 @@ def _boot_tree(tmp_path: Path, *, canonical_dev: str | None) -> Path:
     script_dir.mkdir(parents=True)
     plugin_dir.mkdir(parents=True)
     shutil.copy2(BOOT, script_dir / "dsh_boot.sh")
+    shutil.copy2(RELOAD, script_dir / "dsh_isolate_reload.sh")
+    shutil.copy2(PLUGIN_LIB, script_dir / "dsh_plugin_lib.js")
     shutil.copy2(PLUGIN_GUARD, plugin_dir / "process-fsm-guard.js")
     shutil.copy2(PLUGIN_HOOK, plugin_dir / "impeccable-hook.js")
     shutil.copy2(PATCH, dest / ".dsh" / "cordis.patch.yml")
+    (script_dir / "dsh_boot.sh").chmod(0o755)
+    (script_dir / "dsh_isolate_reload.sh").chmod(0o755)
     (script_dir / "overlay.py").write_text(
         "from pathlib import Path\n"
         "import yaml\n"
@@ -576,19 +592,203 @@ def _boot_tree(tmp_path: Path, *, canonical_dev: str | None) -> Path:
     return dest
 
 
+def _free_listen() -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    assert port != 3080
+    return f"127.0.0.1:{port}"
+
+
+def _isolate_env(bindir: Path, listen: str, sidecar: Path) -> dict[str, str]:
+    return {
+        **os.environ,
+        "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "DSH_ISOLATE_LISTEN": listen,
+        "DSH_ISOLATE_SIDECAR": str(sidecar),
+    }
+
+
+def _live_sidecar_bytes() -> bytes | None:
+    if not LIVE_SIDECAR.is_file():
+        return None
+    return LIVE_SIDECAR.read_bytes()
+
+
+def _listen_pids(addr: str) -> set[int]:
+    host, port_s = addr.rsplit(":", 1)
+    port = int(port_s)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, socket, sys\n"
+            "from pathlib import Path\n"
+            "host, port = sys.argv[1], int(sys.argv[2])\n"
+            "port_hex = f'{port:04X}'\n"
+            "want = socket.inet_aton(host)[::-1].hex().upper()\n"
+            "inodes = set()\n"
+            "try:\n"
+            "    lines = Path('/proc/net/tcp').read_text().splitlines()[1:]\n"
+            "except OSError:\n"
+            "    lines = []\n"
+            "for line in lines:\n"
+            "    parts = line.split()\n"
+            "    if len(parts) < 10:\n"
+            "        continue\n"
+            "    local, state, inode = parts[1], parts[3], parts[9]\n"
+            "    if state != '0A' or inode == '0':\n"
+            "        continue\n"
+            "    lip, lport = local.split(':')\n"
+            "    if lport.upper() == port_hex and lip.upper() in {want, '00000000'}:\n"
+            "        inodes.add(inode)\n"
+            "found = []\n"
+            "for pid_dir in Path('/proc').iterdir():\n"
+            "    if not pid_dir.name.isdigit():\n"
+            "        continue\n"
+            "    try:\n"
+            "        for fd in (pid_dir / 'fd').iterdir():\n"
+            "            try:\n"
+            "                tgt = os.readlink(fd)\n"
+            "            except OSError:\n"
+            "                continue\n"
+            "            if tgt.startswith('socket:[') and tgt[8:-1] in inodes:\n"
+            "                found.append(pid_dir.name)\n"
+            "                break\n"
+            "    except OSError:\n"
+            "        continue\n"
+            "print('\\n'.join(found))\n",
+            host,
+            str(port),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return {int(line) for line in proc.stdout.splitlines() if line.strip().isdigit()}
+
+
+def _wait_tcp(addr: str, timeout: float = 8.0) -> None:
+    host, port_s = addr.rsplit(":", 1)
+    port = int(port_s)
+    deadline = time.time() + timeout
+    last: OSError | None = None
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), 0.2):
+                return
+        except OSError as exc:
+            last = exc
+            time.sleep(0.05)
+    raise AssertionError(f"tcp {addr} never listened: {last}")
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _fake_dsh_bin(tmp_path: Path) -> Path:
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     dsh = bindir / "dsh"
     dsh.write_text(
-        "#!/usr/bin/env bash\n"
-        'echo "DSH_CWD=$(pwd)"\n'
-        'echo "DSH_ARGS=$*"\n'
-        "exit 0\n",
+        "#!/usr/bin/env python3\n"
+        "import os, signal, socket, sys\n"
+        "print(f'DSH_CWD={os.getcwd()}', flush=True)\n"
+        "print(f'DSH_ARGS={\" \".join(sys.argv[1:])}', flush=True)\n"
+        "port = None\n"
+        "args = sys.argv[1:]\n"
+        "for i, a in enumerate(args):\n"
+        "    if a == '--port' and i + 1 < len(args):\n"
+        "        port = int(args[i + 1]); break\n"
+        "    if a.startswith('--port='):\n"
+        "        port = int(a.split('=', 1)[1]); break\n"
+        "if port is None:\n"
+        "    sys.stderr.write('dsh fake: missing --port\\n'); sys.exit(2)\n"
+        "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "sock.bind(('127.0.0.1', port))\n"
+        "sock.listen(8)\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "signal.signal(signal.SIGINT, lambda *_: sys.exit(0))\n"
+        "while True:\n"
+        "    sock.settimeout(0.5)\n"
+        "    try:\n"
+        "        conn, _ = sock.accept()\n"
+        "        conn.close()\n"
+        "    except socket.timeout:\n"
+        "        pass\n",
         encoding="utf-8",
     )
     dsh.chmod(0o755)
     return bindir
+
+
+def _run_boot_until_sidecar(
+    dest: Path, env: dict[str, str], sidecar: Path, timeout: float = 12.0
+) -> subprocess.Popen[str]:
+    boot = dest / "scripts" / "process-fsm" / "dsh_boot.sh"
+    proc = subprocess.Popen(
+        ["bash", str(boot)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if sidecar.is_file() and sidecar.stat().st_size > 0:
+            try:
+                json.loads(sidecar.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                time.sleep(0.05)
+                continue
+            return proc
+        if proc.poll() is not None:
+            stdout, stderr = proc.communicate()
+            raise AssertionError(
+                f"boot exited {proc.returncode} before sidecar\n{stderr}\n{stdout}"
+            )
+        time.sleep(0.05)
+    proc.send_signal(signal.SIGINT)
+    stdout, stderr = proc.communicate(timeout=8)
+    raise AssertionError(f"sidecar not written in time\n{stderr}\n{stdout}")
+
+
+def _stop_boot(proc: subprocess.Popen[str]) -> tuple[str, str]:
+    if proc.poll() is None:
+        proc.send_signal(signal.SIGINT)
+    try:
+        stdout, stderr = proc.communicate(timeout=12)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate(timeout=5)
+    return stdout, stderr
+
+
+def _spawn_node_dsh_web(tmp_path: Path, listen: str, patch: Path) -> subprocess.Popen[str]:
+    js_dir = tmp_path / "nodebin"
+    js_dir.mkdir(parents=True, exist_ok=True)
+    js = js_dir / "dsh"
+    js.write_text(
+        "const net = require('net');\n"
+        "const args = process.argv.slice(2);\n"
+        "let port = null;\n"
+        "for (let i = 0; i < args.length; i++) {\n"
+        "  if (args[i] === '--port') port = Number(args[i + 1]);\n"
+        "}\n"
+        "const s = net.createServer();\n"
+        "s.listen(port, '127.0.0.1');\n",
+        encoding="utf-8",
+    )
+    port = listen.rsplit(":", 1)[1]
+    proc = subprocess.Popen(
+        ["node", str(js), "web", "--patch", str(patch), "--no-open", "--port", port],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _wait_tcp(listen)
+    return proc
 
 
 def test_a1_apply_registers_agents_and_moore_by_name_order():
@@ -750,30 +950,48 @@ def test_a7_boot_exits_when_dev_is_not_a_directory(tmp_path: Path):
     not_dir.write_text("nope\n", encoding="utf-8")
     missing = tmp_path / "does-not-exist"
     cases = (("tree-file", not_dir), ("tree-missing", missing))
+    live_pids = _listen_pids(LIVE_LISTEN)
+    live_sidecar = _live_sidecar_bytes()
     for tree_name, path in cases:
         dest = _boot_tree(tmp_path / tree_name, canonical_dev=str(path))
+        assert (dest / "scripts" / "process-fsm" / "dsh_isolate_reload.sh").is_file()
+        listen = _free_listen()
+        sidecar = tmp_path / tree_name / "sidecar.json"
         proc = subprocess.run(
             ["bash", str(dest / "scripts" / "process-fsm" / "dsh_boot.sh")],
             capture_output=True,
             text=True,
             check=False,
+            env=_isolate_env(tmp_path / "empty-bin", listen, sidecar),
         )
         assert proc.returncode != 0, proc.stdout
         assert str(path) in proc.stderr
+        assert not sidecar.exists()
+    assert _listen_pids(LIVE_LISTEN) == live_pids
+    assert _live_sidecar_bytes() == live_sidecar
 
 
 def test_a8_empty_canonical_dev_launches_repo_root(tmp_path: Path):
     dest = _boot_tree(tmp_path, canonical_dev="")
     bindir = _fake_dsh_bin(tmp_path)
-    proc = subprocess.run(
-        ["bash", str(dest / "scripts" / "process-fsm" / "dsh_boot.sh")],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"},
-    )
-    assert proc.returncode == 0, proc.stderr + proc.stdout
-    assert f"DSH_CWD={dest.resolve()}" in proc.stdout
+    listen = _free_listen()
+    sidecar = tmp_path / "sidecar-a8.json"
+    live_pids = _listen_pids(LIVE_LISTEN)
+    live_sidecar = _live_sidecar_bytes()
+    env = _isolate_env(bindir, listen, sidecar)
+    proc = _run_boot_until_sidecar(dest, env, sidecar)
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        stdout, stderr = _stop_boot(proc)
+        assert f"DSH_CWD={dest.resolve()}" in stdout, stderr
+        assert "web --patch" in stdout
+        port = listen.rsplit(":", 1)[1]
+        assert "--no-open" in stdout
+        assert f"--port {port}" in stdout
+        assert data["listen"] == listen
+    finally:
+        if proc.poll() is None:
+            _stop_boot(proc)
     boot = BOOT.read_text(encoding="utf-8")
     assert "dsh web --patch" in boot
     assert not any(ln.strip().startswith("dsh plugin add") for ln in boot.splitlines())
@@ -781,6 +999,9 @@ def test_a8_empty_canonical_dev_launches_repo_root(tmp_path: Path):
         ln for ln in boot.splitlines() if ln.strip() and not ln.lstrip().startswith("#")
     ]
     assert not any("workspace" in ln.lower() for ln in code_lines)
+    assert _listen_pids(LIVE_LISTEN) == live_pids
+    assert _live_sidecar_bytes() == live_sidecar
+    assert LIVE_SIDECAR != sidecar
 
 
 def test_a9_directory_canonical_dev_still_preferred(tmp_path: Path):
@@ -788,16 +1009,23 @@ def test_a9_directory_canonical_dev_still_preferred(tmp_path: Path):
     launch.mkdir()
     dest = _boot_tree(tmp_path, canonical_dev=str(launch))
     bindir = _fake_dsh_bin(tmp_path)
-    proc = subprocess.run(
-        ["bash", str(dest / "scripts" / "process-fsm" / "dsh_boot.sh")],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"},
-    )
-    assert proc.returncode == 0, proc.stderr + proc.stdout
-    assert f"DSH_CWD={launch.resolve()}" in proc.stdout
-    assert "web --patch" in proc.stdout
+    listen = _free_listen()
+    sidecar = tmp_path / "sidecar-a9.json"
+    live_pids = _listen_pids(LIVE_LISTEN)
+    live_sidecar = _live_sidecar_bytes()
+    env = _isolate_env(bindir, listen, sidecar)
+    proc = _run_boot_until_sidecar(dest, env, sidecar)
+    try:
+        stdout, stderr = _stop_boot(proc)
+        assert f"DSH_CWD={launch.resolve()}" in stdout, stderr
+        assert "web --patch" in stdout
+        port = listen.rsplit(":", 1)[1]
+        assert f"--port {port}" in stdout
+    finally:
+        if proc.poll() is None:
+            _stop_boot(proc)
+    assert _listen_pids(LIVE_LISTEN) == live_pids
+    assert _live_sidecar_bytes() == live_sidecar
 
 
 def test_a10_apply_registered_provider_survives_wait_with_abort():
@@ -834,4 +1062,217 @@ process.stdout.write(JSON.stringify({{
     assert "from 'yaml'" not in lib and 'from "yaml"' not in lib
     assert "@deepseek-ai/dsh-skill" not in lib
     assert "deepseek-harness" not in PLUGIN_GUARD.read_text(encoding="utf-8")
+
+
+def test_r6_boot_invokes_sibling_before_mktemp_and_avoids_cache_bust():
+    boot = BOOT.read_text(encoding="utf-8")
+    reload_at = boot.find("dsh_isolate_reload.sh")
+    mktemp_at = boot.find("mktemp")
+    assert 0 <= reload_at < mktemp_at
+    assert "--no-open" in boot
+    assert "--port" in boot
+    assert "disown" not in boot
+    assert "setsid" not in boot
+    reload = RELOAD.read_text(encoding="utf-8")
+    assert "/comm" not in reload
+    assert "argv0" not in reload
+    assert "cache-bust" not in boot.lower() and "cache-bust" not in reload.lower()
+    assert "?v=" not in boot and "?v=" not in reload
+
+
+def test_r1_r2_r8_node_dsh_web_replaced_cold_start_and_port(
+    tmp_path: Path,
+):
+    live_pids = _listen_pids(LIVE_LISTEN)
+    live_sidecar = _live_sidecar_bytes()
+    dest = _boot_tree(tmp_path, canonical_dev="")
+    bindir = _fake_dsh_bin(tmp_path)
+    listen = _free_listen()
+    sidecar = tmp_path / "sidecar-r1.json"
+    env = _isolate_env(bindir, listen, sidecar)
+    old_patch = tmp_path / "old.patch.yml"
+    old_patch.write_text("old\n", encoding="utf-8")
+
+    occupant = _spawn_node_dsh_web(tmp_path, listen, old_patch)
+    try:
+        occupant_pid = occupant.pid
+        assert occupant_pid in _listen_pids(listen)
+        cmd = Path(f"/proc/{occupant_pid}/cmdline").read_bytes()
+        assert b"dsh" in cmd and b"web" in cmd
+        assert not cmd.startswith(b"dsh")
+        proc = _run_boot_until_sidecar(dest, env, sidecar)
+        try:
+            assert occupant.poll() is not None
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            stdout, stderr = _stop_boot(proc)
+            assert "web --patch" in stdout, stderr
+            port = listen.rsplit(":", 1)[1]
+            assert "--no-open" in stdout
+            assert f"--port {port}" in stdout
+            new_patch = data["patch"]
+            assert new_patch != str(old_patch)
+            assert "covenant-flow-dsh-" in Path(new_patch).name
+        finally:
+            if proc.poll() is None:
+                _stop_boot(proc)
+    finally:
+        if occupant.poll() is None:
+            occupant.send_signal(signal.SIGTERM)
+            occupant.wait(timeout=5)
+
+    listen2 = _free_listen()
+    sidecar2 = tmp_path / "sidecar-r2.json"
+    dest2 = _boot_tree(tmp_path / "cold", canonical_dev="")
+    env2 = _isolate_env(_fake_dsh_bin(tmp_path / "cold-bin"), listen2, sidecar2)
+    assert not _listen_pids(listen2)
+    proc2 = _run_boot_until_sidecar(dest2, env2, sidecar2)
+    try:
+        stdout2, stderr2 = _stop_boot(proc2)
+        assert "web --patch" in stdout2, stderr2
+        assert f"--port {listen2.rsplit(':', 1)[1]}" in stdout2
+    finally:
+        if proc2.poll() is None:
+            _stop_boot(proc2)
+    assert _listen_pids(LIVE_LISTEN) == live_pids
+    assert _live_sidecar_bytes() == live_sidecar
+
+
+def test_r3_r4_r5_sidecar_fields_and_check_fail_closed(tmp_path: Path):
+    live_sidecar = _live_sidecar_bytes()
+    dest = _boot_tree(tmp_path, canonical_dev="")
+    bindir = _fake_dsh_bin(tmp_path)
+    listen = _free_listen()
+    sidecar = tmp_path / "sidecar-r3.json"
+    assert sidecar != LIVE_SIDECAR
+    env = _isolate_env(bindir, listen, sidecar)
+    reload = dest / "scripts" / "process-fsm" / "dsh_isolate_reload.sh"
+    proc = _run_boot_until_sidecar(dest, env, sidecar)
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert "pid" in data and "start_epoch" in data
+        assert data["listen"] == listen
+        guard = dest / ".dsh" / "plugin" / "process-fsm-guard.js"
+        lib = dest / "scripts" / "process-fsm" / "dsh_plugin_lib.js"
+        assert data["guard_sha256"] == _sha256(guard)
+        assert data["lib_sha256"] == _sha256(lib)
+        assert data["pid"] in _listen_pids(listen)
+        check = subprocess.run(
+            ["bash", str(reload), "--check"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        assert check.returncode == 0, check.stderr
+
+        mutated = dict(data)
+        mutated["guard_sha256"] = "0" * 64
+        sidecar.write_text(json.dumps(mutated) + "\n", encoding="utf-8")
+        check_sha = subprocess.run(
+            ["bash", str(reload), "--check"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        assert check_sha.returncode != 0
+        sidecar.write_text(json.dumps(data) + "\n", encoding="utf-8")
+        sidecar.unlink()
+        check_missing = subprocess.run(
+            ["bash", str(reload), "--check"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        assert check_missing.returncode != 0
+        assert "missing sidecar" in check_missing.stderr
+    finally:
+        _stop_boot(proc)
+    assert _live_sidecar_bytes() == live_sidecar
+
+
+def test_r5b_non_dsh_occupant_fail_closed(tmp_path: Path):
+    listen = _free_listen()
+    host, port_s = listen.rsplit(":", 1)
+    occupant = subprocess.Popen(
+        [sys.executable, "-m", "http.server", port_s, "--bind", host],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=str(tmp_path),
+    )
+    try:
+        _wait_tcp(listen)
+        dest = _boot_tree(tmp_path, canonical_dev="")
+        sidecar = tmp_path / "sidecar-r5b.json"
+        env = _isolate_env(_fake_dsh_bin(tmp_path), listen, sidecar)
+        reload = dest / "scripts" / "process-fsm" / "dsh_isolate_reload.sh"
+        stopped = subprocess.run(
+            ["bash", str(reload)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        assert stopped.returncode != 0
+        assert "lacks dsh+web" in stopped.stderr
+        assert occupant.poll() is None
+        assert occupant.pid in _listen_pids(listen)
+        boot = subprocess.run(
+            ["bash", str(dest / "scripts" / "process-fsm" / "dsh_boot.sh")],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            timeout=8,
+        )
+        assert boot.returncode != 0
+        assert occupant.poll() is None
+        assert occupant.pid in _listen_pids(listen)
+    finally:
+        occupant.send_signal(signal.SIGTERM)
+        occupant.wait(timeout=5)
+
+
+def test_r7_sigint_kills_listener_then_removes_tmp_patch(tmp_path: Path):
+    dest = _boot_tree(tmp_path, canonical_dev="")
+    bindir = _fake_dsh_bin(tmp_path)
+    listen = _free_listen()
+    sidecar = tmp_path / "sidecar-r7.json"
+    env = _isolate_env(bindir, listen, sidecar)
+    proc = _run_boot_until_sidecar(dest, env, sidecar)
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    patch = Path(data["patch"])
+    listener = int(data["pid"])
+    assert patch.is_file()
+    assert listener in _listen_pids(listen)
+    stdout, stderr = _stop_boot(proc)
+    deadline = time.time() + 8
+    while time.time() < deadline and _listen_pids(listen):
+        time.sleep(0.05)
+    assert not _listen_pids(listen), stderr
+    assert not Path(f"/proc/{listener}").exists()
+    deadline = time.time() + 8
+    while time.time() < deadline and patch.exists():
+        time.sleep(0.05)
+    assert not patch.exists(), stdout + stderr
+
+
+def test_r9_a8_a9_do_not_sigterm_operator_3080(tmp_path: Path):
+    live_pids = _listen_pids(LIVE_LISTEN)
+    live_sidecar = _live_sidecar_bytes()
+    dest = _boot_tree(tmp_path, canonical_dev="")
+    launch = tmp_path / "dev-root"
+    launch.mkdir()
+    dest9 = _boot_tree(tmp_path / "a9", canonical_dev=str(launch))
+    for label, tree in (("a8", dest), ("a9", dest9)):
+        listen = _free_listen()
+        sidecar = tmp_path / f"sidecar-{label}.json"
+        env = _isolate_env(_fake_dsh_bin(tmp_path / label), listen, sidecar)
+        proc = _run_boot_until_sidecar(tree, env, sidecar)
+        _stop_boot(proc)
+        assert listen != LIVE_LISTEN
+        assert sidecar != LIVE_SIDECAR
+    assert _listen_pids(LIVE_LISTEN) == live_pids
+    assert _live_sidecar_bytes() == live_sidecar
 
