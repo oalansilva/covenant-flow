@@ -112,8 +112,14 @@ Ordem: `/opsx:new` → `/opsx:ff` → publicar Gist → Design → (Alan) Pronto
 
 Só com `Status=Pronto para Dev`. Pai chama `iniciar_apply` **antes** do spawn. Branch `card-<id>-<slug>` ou `change-<id>-<slug>` a partir de `develop`. O **filho** Apply edita o código (loop fatiado); **não** `process_event`, **não** commit/push, **não** spawna reviewers; devolve status ao pai.
 
-Pai: `pedir_review` (Code Review), `diff-reviewer` + `code-reviewer` no diff **não commitado** vs HEAD, commit, `diff-reviewer` vs a branch de integração, push, `aceitar_sha` (QA), filho QA (checks), T14. `/review-bugbot` MUST NOT. `/review-security` MAY se Alan pedir explicitamente; o gate continua os dois reviewers locais.
+Pai: `pedir_review` (Code Review), `diff-reviewer` + `code-reviewer` no diff **não commitado** vs HEAD, commit, `diff-reviewer` vs a branch de integração, push, `aceitar_sha` (QA). `/review-bugbot` MUST NOT. `/review-security` MAY se Alan pedir explicitamente; o gate continua os dois reviewers locais.
 **dsh:** após 400 desta classe (reasoning effort off/none) num filho, MUST NOT spawnar mais o mesmo preset (incl. retry 1/1 #518); registar `ERROR: subagent spawn failed/empty` e continuar no root com residual explícito.
+
+## QA
+
+Cursor/Grok: 1 filho isolado lê checks; MUST NOT `process_event`. Pai `aceitar_sha` só com PR `q_git`→develop; `integrar_develop` no mesmo turno do verde; `qa-gate pending` espera e repete T14; `no_pr` / `sync: dirty` visíveis.
+
+**dsh:** root MUST NOT spawnar filho QA. No mesmo turno: abrir PR antes de T11, esperar `qa-gate` no turno (`job_output wait`, sem `continue`), T14 (Moore/plugin).
 
 Homologado: no **mesmo turno** do arraste/confirmação, `scripts/post-card-evidence-comment.sh --transition homologado` (mesmo sem lote).
 

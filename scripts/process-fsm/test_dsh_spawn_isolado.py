@@ -602,7 +602,7 @@ process.stdout.write(JSON.stringify({{ threw }}));
     assert "@deepseek-ai/dsh" not in lib
     guard = PLUGIN_GUARD.read_text(encoding="utf-8")
     assert "@deepseek-ai/dsh" not in guard
-    assert 'export const inject = ["systemPrompt", "skills"];' in guard
+    assert 'export const inject = ["systemPrompt", "skills", "jobs"];' in guard
     body = guard.split("tools/pre-execute", 1)[1]
     assert body.index("isGrillShapedSpawn") < body.index("dsh_reasoning_effort_spawn")
     assert body.index("dsh_reasoning_effort_spawn") < body.index("isCordisRestricted")

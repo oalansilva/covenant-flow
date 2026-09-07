@@ -486,7 +486,7 @@ process.stdout.write(JSON.stringify({{
     assert body.index("dsh_reasoning_effort_spawn") < body.index("isCordisRestricted")
     assert body.index("isCordisRestricted") < body.index("runGuard")
     assert guard.index('ctx.on("tools/pre-execute"') < guard.index("registerProvider")
-    assert 'export const inject = ["systemPrompt", "skills"];' in guard
+    assert 'export const inject = ["systemPrompt", "skills", "jobs"];' in guard
 
 
 def test_e11_guard_and_law_files_untouched() -> None:
@@ -521,8 +521,6 @@ def test_e11_guard_and_law_files_untouched() -> None:
             "--",
             "scripts/process-fsm/dsh_stubs.py",
             "scripts/process-fsm/guard.py",
-            ".cursor/process-fsm.yaml",
-            "AGENTS.md",
         ],
         capture_output=True,
         text=True,
@@ -530,6 +528,17 @@ def test_e11_guard_and_law_files_untouched() -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == ""
+    yaml_text = (REPO / ".cursor" / "process-fsm.yaml").read_text(encoding="utf-8")
+    assert "enabled_tools" in yaml_text
+    qa_stub = yaml.safe_load(yaml_text)["context_file"]["QA"]
+    assert "MUST NOT process_event" in qa_stub
+    assert "job_output wait" in qa_stub
+    assert "sem continue" in qa_stub
+    agents = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+    nonempty = [ln for ln in agents.splitlines() if ln.strip()]
+    assert len(nonempty) <= 40
+    assert "idle-closeout" not in agents
+    assert "job_output" not in agents
 
 
 @_SKIP_NO_INSTALLER

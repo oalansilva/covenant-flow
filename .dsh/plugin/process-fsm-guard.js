@@ -11,13 +11,18 @@ import {
   isReasoningEffortRejection,
   agentSessionId,
   spawnCallerSessionId,
+  sessionHeaderOf,
   attachAgentEffortGuards,
   createReasoningEffortRequestErrorHandler,
+  createDeadTurnRequestErrorHandler,
   formatChildRunFailure,
+  isJobOutputWaitExec,
+  capJobOutputWaitTimeout,
+  waitJobOutputUntilSettled,
 } from "../../scripts/process-fsm/dsh_plugin_lib.js";
 
 export const name = "covenant-flow-process-fsm-guard";
-export const inject = ["systemPrompt", "skills"];
+export const inject = ["systemPrompt", "skills", "jobs"];
 
 const PLUGIN_NOTICE_SOURCE = {
   kind: "plugin",
@@ -124,14 +129,68 @@ function lookupChildFailure(store, exec) {
   return null;
 }
 
+function hasPendingJobs(ctx, agent) {
+  try {
+    if (!ctx || typeof ctx.jobs?.list !== "function") return false;
+    const list = ctx.jobs.list(agent) || [];
+    return list.some(
+      (snap) => snap && (snap.status === "running" || snap.status === "stopping"),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasLiveIsolatedChild(ctx, owner) {
+  const ownerId = agentSessionId(owner);
+  if (!ownerId) return false;
+  const agents = agentsMapOf(ctx);
+  if (!agents || typeof agents.values !== "function") return false;
+  try {
+    for (const child of agents.values()) {
+      if (!child || child === owner) continue;
+      const header = sessionHeaderOf({ agent: child });
+      if (String(header.parentSession || "") !== ownerId) continue;
+      if (parentLineageClosing(child)) continue;
+      if (child.status === "running") return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+const TURN_STOP_SUMMARY = "Pending job or child; call job_output wait: true";
+const TURN_STOP_TEXT =
+  "A job is still running/stopping or a live isolated child remains. Call job_output with wait: true; do not end the turn.";
+
+function steerPendingTurn(agent) {
+  if (!agent || typeof agent.steer !== "function") return;
+  const summary =
+    TURN_STOP_SUMMARY.length <= 120
+      ? TURN_STOP_SUMMARY
+      : TURN_STOP_SUMMARY.slice(0, 120);
+  agent.steer({
+    content: [{ type: "text", text: TURN_STOP_TEXT }],
+    source: {
+      kind: "plugin",
+      plugin: name,
+      form: "notice",
+      summary,
+    },
+  });
+}
+
 export function apply(ctx) {
   const cwd = process.cwd() || REPO_ROOT;
   const retriedAgents = new Set();
   const spawnBlockedParents = new Set();
-  const effortState = { retriedAgents, spawnBlockedParents };
+  const deadTurnRetried = new Set();
+  const effortState = { retriedAgents, spawnBlockedParents, deadTurnRetried };
   const childTurnEnds = new Map();
   ctx.on("agent/request", async (payload, next) => sanitizeReasoningEffort(await next()));
   ctx.on("agent/request-error", createReasoningEffortRequestErrorHandler(effortState));
+  ctx.on("agent/request-error", createDeadTurnRequestErrorHandler(effortState));
   ctx.on(
     "agent/created",
     (payload) => {
@@ -172,7 +231,27 @@ export function apply(ctx) {
     },
     { global: true },
   );
+  ctx.on(
+    "agent/turn-stopping",
+    (payload) => {
+      try {
+        const agent = payload && payload.agent;
+        if (!agent) return;
+        if (hasPendingJobs(ctx, agent) || hasLiveIsolatedChild(ctx, agent)) {
+          steerPendingTurn(agent);
+        }
+      } catch {
+        // turn-stopping must not throw
+      }
+    },
+    { global: true },
+  );
   ctx.on("tools/execute", async (exec, next) => {
+    if (isJobOutputWaitExec(exec)) {
+      const startedAt = Date.now();
+      const result = await next();
+      return waitJobOutputUntilSettled(ctx, exec, result, { startedAt });
+    }
     if (!isForegroundOneShotSubagent(exec)) return next();
     const result = await next();
     if (!isForegroundSubagentFailureResult(result)) return result;
@@ -205,6 +284,11 @@ export function apply(ctx) {
     const decision = runGuard({ tool, args, cwd });
     const denied = denyFromDecision(decision, tool, args);
     if (denied) return denied;
+    if (tool === "job_output" && args && args.wait === true) {
+      if (exec.arguments && typeof exec.arguments === "object") {
+        capJobOutputWaitTimeout(exec.arguments);
+      }
+    }
     return next();
   });
   ctx.systemPrompt.section({

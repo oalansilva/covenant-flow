@@ -7,3 +7,6 @@
       name: .dsh/plugin/process-fsm-guard.js
     - id: covenant-flow-impeccable-hook
       name: .dsh/plugin/impeccable-hook.js
+- id: tool-jobs
+  config:
+    maxWaitTimeoutMs: 2400000
