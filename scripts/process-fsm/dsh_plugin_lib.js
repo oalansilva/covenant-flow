@@ -552,27 +552,57 @@ export function jobStatusFromOutputResult(result) {
   return match ? match[1].toLowerCase() : "";
 }
 
-function applyJobSnapshotToResult(result, snapshot) {
+function jobStatusLine(snapshot) {
+  const status = snapshot && snapshot.status ? String(snapshot.status) : "";
+  if (!status) return "";
+  return snapshot.detail !== undefined
+    ? `[status: ${status}, ${snapshot.detail}]`
+    : `[status: ${status}]`;
+}
+
+function mergeBlobWithExtra(blob, extra, line) {
+  const raw = typeof blob === "string" ? blob : "";
+  const stripped = JOB_STATUS_LINE_RE.test(raw)
+    ? raw.replace(JOB_STATUS_LINE_RE, "")
+    : raw;
+  const extraStr = typeof extra === "string" ? extra : "";
+  const body = `${stripped}${extraStr}`;
+  if (!line) return body;
+  if (!body) return line;
+  return `${body}${body.endsWith("\n") ? "" : "\n"}${line}`;
+}
+
+function applyJobSnapshotToResult(result, snapshot, extraText) {
   const status = snapshot && snapshot.status ? String(snapshot.status) : "";
   if (!status || !result || typeof result !== "object") return result;
+  const extra = typeof extraText === "string" ? extraText : "";
+  const line = jobStatusLine(snapshot);
   const out = { ...result };
   if (out.value && typeof out.value === "object") {
     const prevJob =
       out.value.job && typeof out.value.job === "object" ? out.value.job : {};
-    out.value = { ...out.value, job: { ...prevJob, ...snapshot, status } };
+    const prevText = typeof out.value.text === "string" ? out.value.text : "";
+    out.value = {
+      ...out.value,
+      text: `${prevText}${extra}`,
+      job: { ...prevJob, ...snapshot, status },
+    };
   }
-  const line = `[status: ${status}]`;
   if (typeof out.content === "string") {
-    out.content = JOB_STATUS_LINE_RE.test(out.content)
-      ? out.content.replace(JOB_STATUS_LINE_RE, line)
-      : `${out.content}${out.content.endsWith("\n") ? "" : "\n"}${line}`;
+    out.content = mergeBlobWithExtra(out.content, extra, line);
   } else if (Array.isArray(out.content)) {
-    out.content = out.content.map((block) => {
+    let extraLeft = extra;
+    let lastTextIdx = -1;
+    for (let i = 0; i < out.content.length; i++) {
+      if (out.content[i] && typeof out.content[i].text === "string") {
+        lastTextIdx = i;
+      }
+    }
+    out.content = out.content.map((block, i) => {
       if (!block || typeof block.text !== "string") return block;
-      const text = JOB_STATUS_LINE_RE.test(block.text)
-        ? block.text.replace(JOB_STATUS_LINE_RE, line)
-        : `${block.text}${block.text.endsWith("\n") ? "" : "\n"}${line}`;
-      return { ...block, text };
+      const piece = i === lastTextIdx ? extraLeft : "";
+      if (i === lastTextIdx) extraLeft = "";
+      return { ...block, text: mergeBlobWithExtra(block.text, piece, line) };
     });
   }
   return out;
@@ -610,16 +640,20 @@ export async function waitJobOutputUntilSettled(ctx, exec, initialResult, option
         ? lastSnapshot.status
         : "";
     if (TERMINAL_JOB_STATUSES.has(status)) {
+      let extra = "";
+      let snap = lastSnapshot;
       if (typeof ctx.jobs.read === "function") {
         try {
           const read = ctx.jobs.read(id, caller);
-          const snap = (read && read.snapshot) || lastSnapshot;
-          return applyJobSnapshotToResult(initialResult, snap);
+          extra = read && typeof read.text === "string" ? read.text : "";
+          if (read && read.snapshot && typeof read.snapshot === "object") {
+            snap = { ...lastSnapshot, ...read.snapshot };
+          }
         } catch {
-          // fall through to snapshot from wait
+          // fail-open: keep wait snapshot + detail; drop extra stream text
         }
       }
-      return applyJobSnapshotToResult(initialResult, lastSnapshot);
+      return applyJobSnapshotToResult(initialResult, snap, extra);
     }
   }
   if (lastSnapshot) return applyJobSnapshotToResult(initialResult, lastSnapshot);

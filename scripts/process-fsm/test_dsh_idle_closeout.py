@@ -51,11 +51,19 @@ import {{ apply }} from {json.dumps(str(PLUGIN_GUARD))};
 const registry = createScopeRegistry();
 const host = mockAppendInnerCtx(registry, "host");
 const waits = [];
+const reads = [];
 host.jobs = {{
   async wait(id, timeoutMs, caller, signal) {{
     waits.push({{ id, timeoutMs }});
     if (waits.length === 1) return {{ id, status: "running" }};
     return {{ id, status: "completed", finishedAt: Date.now() }};
+  }},
+  read(id, caller) {{
+    reads.push({{ id }});
+    return {{
+      text: "qa-gate FAIL\\n",
+      snapshot: {{ id, status: "completed", detail: "exit code: 1" }},
+    }};
   }},
   list() {{ return [{{ id: "job-1", status: "running" }}]; }},
 }};
@@ -71,16 +79,19 @@ const result = await host.events["tools/execute"](
     const snap = await host.jobs.wait("job-1", 30000, rootAgent({json.dumps(ROOT_SESSION)}));
     nextReturnedRunning = snap.status === "running";
     return {{
-      content: `[status: ${{snap.status}}]`,
-      value: {{ text: "", job: snap }},
+      content: [{{ type: "text", text: `running gh pr checks\\n[status: ${{snap.status}}]` }}],
+      value: {{ text: "running gh pr checks\\n", job: snap }},
     }};
   }},
 );
 const blob = typeof result.content === "string"
   ? result.content
-  : JSON.stringify(result);
+  : Array.isArray(result.content)
+    ? result.content.map((b) => (b && b.text) || "").join("\\n")
+    : JSON.stringify(result);
 process.stdout.write(JSON.stringify({{
   waitCount: waits.length,
+  readCount: reads.length,
   nextReturnedRunning,
   result,
   blob,
@@ -97,8 +108,108 @@ process.stdout.write(JSON.stringify({{
         (((data["result"] or {}).get("value") or {}).get("job") or {}).get("status")
     )
     assert status == "completed"
+    # Rest of stream after the host's consuming wait+read MUST appear.
+    assert "qa-gate FAIL" in blob
+    assert "running gh pr checks" in blob
+    assert "exit code: 1" in blob
+    assert "[status: completed, exit code: 1]" in blob
+    job = ((data["result"] or {}).get("value") or {}).get("job") or {}
+    assert job.get("detail") == "exit code: 1"
+    value_text = ((data["result"] or {}).get("value") or {}).get("text") or ""
+    assert "running gh pr checks" in value_text
+    assert "qa-gate FAIL" in value_text
+    # status==completed without the log / detail line MUST fail W1.
+    assert not (status == "completed" and "qa-gate FAIL" not in blob)
+    assert not (
+        status == "completed" and "[status: completed, exit code: 1]" not in blob
+    )
     # A single host wait of 30s/10min that returns running MUST fail W1.
     assert not (data["waitCount"] == 1 and data["firstTimeout"] in (30000, 600000))
+
+
+def test_w1_read_throw_fail_open_keeps_snapshot_detail() -> None:
+    code = f"""
+{_append_inner_ctx_prelude()}
+import {{ apply }} from {json.dumps(str(PLUGIN_GUARD))};
+const registry = createScopeRegistry();
+const host = mockAppendInnerCtx(registry, "host");
+const waits = [];
+host.jobs = {{
+  async wait(id, timeoutMs) {{
+    waits.push({{ id, timeoutMs }});
+    if (waits.length === 1) return {{ id, status: "running" }};
+    return {{ id, status: "completed", detail: "exit code: 1", finishedAt: Date.now() }};
+  }},
+  read() {{ throw new Error("read unavailable"); }},
+  list() {{ return [{{ id: "job-1", status: "running" }}]; }},
+}};
+apply(host);
+const result = await host.events["tools/execute"](
+  {{
+    name: "job_output",
+    arguments: {{ job_id: "job-1", wait: true, timeout_ms: {WAIT_CAP_MS} }},
+    agent: rootAgent({json.dumps(ROOT_SESSION)}),
+  }},
+  async () => {{
+    const snap = await host.jobs.wait("job-1", 30000);
+    return {{
+      content: `running gh pr checks\\n[status: ${{snap.status}}]`,
+      value: {{ text: "running gh pr checks\\n", job: snap }},
+    }};
+  }},
+);
+process.stdout.write(JSON.stringify({{ result, waitCount: waits.length }}));
+"""
+    data = _node_ok(code)
+    assert data["waitCount"] >= 2
+    blob = json.dumps(data["result"])
+    assert "running gh pr checks" in blob
+    assert "qa-gate FAIL" not in blob
+    assert "[status: completed, exit code: 1]" in blob
+    job = ((data["result"] or {}).get("value") or {}).get("job") or {}
+    assert job.get("status") == "completed"
+    assert job.get("detail") == "exit code: 1"
+
+
+def test_w1_read_absent_fail_open_keeps_snapshot_detail() -> None:
+    code = f"""
+{_append_inner_ctx_prelude()}
+import {{ apply }} from {json.dumps(str(PLUGIN_GUARD))};
+const registry = createScopeRegistry();
+const host = mockAppendInnerCtx(registry, "host");
+const waits = [];
+host.jobs = {{
+  async wait(id, timeoutMs) {{
+    waits.push({{ id, timeoutMs }});
+    if (waits.length === 1) return {{ id, status: "running" }};
+    return {{ id, status: "completed", detail: "exit code: 1" }};
+  }},
+  list() {{ return [{{ id: "job-1", status: "running" }}]; }},
+}};
+apply(host);
+const result = await host.events["tools/execute"](
+  {{
+    name: "job_output",
+    arguments: {{ job_id: "job-1", wait: true, timeout_ms: {WAIT_CAP_MS} }},
+    agent: rootAgent({json.dumps(ROOT_SESSION)}),
+  }},
+  async () => {{
+    const snap = await host.jobs.wait("job-1", 30000);
+    return {{
+      content: `running gh pr checks\\n[status: ${{snap.status}}]`,
+      value: {{ text: "running gh pr checks\\n", job: snap }},
+    }};
+  }},
+);
+process.stdout.write(JSON.stringify({{ result, waitCount: waits.length }}));
+"""
+    data = _node_ok(code)
+    assert data["waitCount"] >= 2
+    blob = json.dumps(data["result"])
+    assert "running gh pr checks" in blob
+    assert "[status: completed, exit code: 1]" in blob
+    job = ((data["result"] or {}).get("value") or {}).get("job") or {}
+    assert job.get("detail") == "exit code: 1"
 
 
 def test_w2_turn_stopping_global_steers_pending_jobs() -> None:
