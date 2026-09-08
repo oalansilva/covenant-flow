@@ -6,7 +6,7 @@ PAGING="$ROOT/scripts/process-fsm/paging.py"
 RAW="$(cat)"
 
 fallback() {
-  printf '%s\n' '{"additional_context":"process-fsm page\nq=None bound_card=⊥ q_git=⊥\nenabled_events: (unbound)\n---\nbound_card=⊥. Write produto deny. Não carregue playbook de release.\n---\nResolva (q, bound_card, q_git). Não invente aresta. Chat é wording; NLU ≠ δ. Overlay on-demand (portas, Drive, release).\n"}'
+  printf '%s\n' '{"additional_context":"process-fsm page\nq=None bound_card=⊥ q_git=⊥\nenabled_events: (unbound)\n---\nbound_card=⊥. Write produto deny. Playbook de release não é always-on. Pedido explícito suba a release / fechar release / subir lote: carregue overlay e inicie T16.\n---\nResolva (q, bound_card, q_git). Não invente aresta. Chat é wording; NLU ≠ δ. Overlay on-demand (portas, Drive, release).\n"}'
 }
 
 PY=""

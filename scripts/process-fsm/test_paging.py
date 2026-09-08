@@ -15,7 +15,8 @@ sys.path.insert(0, str(ROOT))
 from fsm import load_fsm  # noqa: E402
 from grok_stubs import stub_errors  # noqa: E402
 from overlay import render_agents  # noqa: E402
-from paging import UNBOUND_PAGE, page, write_grok_page  # noqa: E402
+from graphql_quota import GraphQLQuotaError  # noqa: E402
+from paging import UNBOUND_PAGE, page, unread_page, write_grok_page  # noqa: E402
 from resolve import UNBOUND  # noqa: E402
 from test_overlay_fixtures import filled_overlay_dict  # noqa: E402
 
@@ -24,6 +25,8 @@ pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 TODO_STUB = "Próximo evento = iniciar_design. Não apply. Não /opsx:new ainda."
 HOMOLOGADO_STUB = "T16 = process_event fechar_release com M_lote live. Chat ≠ δ."
 PLAYBOOK = ("release-guard", "subir lote", "deploy PROD")
+UNBOUND_DUMP = ("release-guard", "deploy PROD")
+OLD_PLAYBOOK_ORDER = "Não carregue playbook de release."
 
 
 def _silent(_bound: str | None) -> str | None:
@@ -87,7 +90,15 @@ def test_unbound_does_not_load_homologado():
     ctx = result["additional_context"]
     assert UNBOUND_PAGE in ctx
     assert HOMOLOGADO_STUB not in ctx
-    for needle in PLAYBOOK:
+    assert "Write produto deny" in ctx
+    assert OLD_PLAYBOOK_ORDER not in ctx
+    assert "suba a release" in ctx
+    assert "fechar release" in ctx
+    assert "carregue overlay" in ctx
+    assert "inicie T16" in ctx
+    assert "enabled_events: (unbound)" in ctx
+    assert _line_count(ctx) <= 20
+    for needle in UNBOUND_DUMP:
         assert needle not in ctx
     assert "bound_card=⊥" in ctx
 
@@ -99,8 +110,67 @@ def test_missing_status_is_unbound_stub():
         status_provider=_provider(None),
     )
     ctx = result["additional_context"]
-    assert UNBOUND_PAGE in ctx
+    assert UNBOUND_PAGE not in ctx
+    assert "bound_card=⊥" not in ctx
+    assert "bound_card=613" in ctx
+    assert "Status unread" in ctx
+    assert OLD_PLAYBOOK_ORDER in ctx
     assert HOMOLOGADO_STUB not in ctx
+    for needle in PLAYBOOK:
+        assert needle not in ctx
+    assert _line_count(ctx) <= 20
+    assert result["bound_card"] == "613"
+    assert unread_page("613") in ctx
+
+
+def test_bound_graphql_quota_zero_is_not_unbound():
+    reset = "2026-09-03T02:55:52Z"
+
+    def quota(_bound: str | None) -> str | None:
+        raise GraphQLQuotaError(0, reset)
+
+    result = page(
+        cwd=".",
+        resolve_fn=_resolve("820", "card-820-graphql-quota-rest"),
+        status_provider=quota,
+    )
+    ctx = result["additional_context"]
+    assert UNBOUND_PAGE not in ctx
+    assert "bound_card=⊥" not in ctx
+    assert "bound_card=820" in ctx
+    assert "Status unread" in ctx
+    assert reset in ctx
+    assert HOMOLOGADO_STUB not in ctx
+    for needle in PLAYBOOK:
+        assert needle not in ctx
+    assert _line_count(ctx) <= 20
+    assert result["bound_card"] == "820"
+    assert unread_page("820", reset) in ctx
+    assert OLD_PLAYBOOK_ORDER in ctx
+
+
+def test_unread_page_keeps_old_playbook_order():
+    stub = unread_page("821")
+    assert OLD_PLAYBOOK_ORDER in stub
+    assert stub != UNBOUND_PAGE
+    assert "bound_card=821" in stub
+
+    def unread_821(bound: str | None) -> str | None:
+        assert bound == "821"
+        return None
+
+    result = page(
+        cwd=".",
+        resolve_fn=_resolve("821", "card-821-dsh-unbound-t16-moore"),
+        status_provider=unread_821,
+    )
+    ctx = result["additional_context"]
+    header = ctx.split("---", 1)[0]
+    assert "bound_card=⊥" not in header
+    assert "bound_card=821" in header
+    assert UNBOUND_PAGE not in ctx
+    assert OLD_PLAYBOOK_ORDER in ctx
+    assert unread_page("821") in ctx
 
 
 def test_page_uses_yaml_stubs():
@@ -188,6 +258,12 @@ def test_skill_priority_anchor():
     text = (REPO / ".cursor" / "skills" / "covenant-flow" / "SKILL.md").read_text(encoding="utf-8")
     assert "δ e Guard > overlay > skill > wording" in text
     assert "1. Instrução direta de Alan no chat." not in text
+    release = text.split("## Release", 1)[1].split("## ", 1)[0]
+    assert "bound_card=⊥" in release
+    assert "enabled_events: (unbound)" in release
+    assert "não deny de T16" in release
+    assert "covenant-flow-environments" in release
+    assert "Write de produto continua deny" in release
 
 
 def test_hooks_json_session_start():
@@ -232,6 +308,7 @@ def test_session_start_adapter_fallback(tmp_path: Path):
     data = json.loads(proc.stdout)
     ctx = data["additional_context"]
     assert UNBOUND_PAGE in ctx
+    assert OLD_PLAYBOOK_ORDER not in ctx
     assert "docs/crypto-overlay.md" not in ctx
     assert "release-guard" not in ctx
 

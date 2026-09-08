@@ -13,11 +13,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from fsm import enabled_events, load_fsm  # noqa: E402
+from graphql_quota import GraphQLQuotaError  # noqa: E402
 from guard import github_status_provider  # noqa: E402
 from overlay import try_load_overlay  # noqa: E402
 from resolve import UNBOUND, resolve  # noqa: E402
 
-UNBOUND_PAGE = "bound_card=⊥. Write produto deny. Não carregue playbook de release."
+UNBOUND_PAGE = (
+    "bound_card=⊥. Write produto deny. Playbook de release não é always-on. "
+    "Pedido explícito suba a release / fechar release / subir lote: "
+    "carregue overlay e inicie T16."
+)
 FOOTER = (
     "Resolva (q, bound_card, q_git). Não invente aresta. "
     "Chat é wording; NLU ≠ δ. Overlay on-demand (portas, Drive, release)."
@@ -29,6 +34,18 @@ StatusProvider = Callable[[str | None], str | None]
 
 def _unbound(bound_card: Any) -> bool:
     return bound_card in (None, "", UNBOUND)
+
+
+def unread_page(bound: str, reset_at: str | None = None) -> str:
+    if reset_at:
+        return (
+            f"bound_card={bound}. Status unread. GraphQL reset {reset_at}. "
+            "Write produto deny. Não carregue playbook de release."
+        )
+    return (
+        f"bound_card={bound}. Status unread. "
+        "Write produto deny. Não carregue playbook de release."
+    )
 
 
 def page(
@@ -50,15 +67,25 @@ def page(
     bound = resolved.get("bound_card")
     git = resolved.get("q_git") or UNBOUND
     q: str | None = None
+    reset_at: str | None = None
     if not _unbound(bound) and status_provider is not None:
-        q = status_provider(None if _unbound(bound) else str(bound))
+        try:
+            q = status_provider(None if _unbound(bound) else str(bound))
+        except GraphQLQuotaError as exc:
+            q = None
+            reset_at = exc.reset_at or None
 
     context_files = table.get("context_file") or {}
-    if _unbound(bound) or q is None or q not in context_files:
+    if _unbound(bound):
         stub = UNBOUND_PAGE
         events = "(unbound)"
-        q_display = None if (_unbound(bound) or q is None) else q
-        bound_display = UNBOUND if _unbound(bound) else bound
+        q_display = None
+        bound_display = UNBOUND
+    elif q is None or q not in context_files:
+        stub = unread_page(str(bound), reset_at)
+        events = "(unread)"
+        q_display = None if q is None else q
+        bound_display = bound
     else:
         stub = str(context_files[q]).strip("\n")
         events = ", ".join(str(item) for item in enabled_events(table, q))
