@@ -9,16 +9,19 @@ You are the Kaizen audit skill. Observe how the process is executed, find fricti
 
 ## Sources (read-only)
 
-1. Board: overlay `board.owner` / `board.number` via `gh project view` / `item-list` (do not hardcode a Project).
-2. Git: `git fetch --prune origin` then status, worktrees, stash, branches; `scripts/release-guard audit`.
-3. OpenSpec: `openspec validate --all` and active changes under `openspec/changes/`.
-4. CI: recent PR checks (`qa-gate`, visual, cancelled/failed).
-5. Cursor sessions: read agent transcripts for this workspace. Canonical search order:
+1. Board: overlay `board.owner` / `board.number` (do not hardcode a Project).
+   - `/kaizen card N`: Status pontual `repository.issue(number:N).projectItems`. MUST NOT `gh project item-list` to operate that card. GraphQL remaining=0 / RATE_LIMIT: falha na hora com reset; MUST NOT retry; MUST NOT wait for reset in the same command. REST remaining=5000 MUST NOT authorize GraphQL. Unknown Status MUST NOT mean the card is off the board.
+   - `/kaizen` completo (board inteiro): MAY uma fotografia `item-list`, classe #509, sem retry.
+2. Issue surface: REST `gh api repos/<owner>/<repo>/issues/<n>` e REST comments. MUST NOT `gh issue view` (com ou sem `--json`).
+3. Git: `git fetch --prune origin` then status, worktrees, stash, branches; `scripts/release-guard audit`.
+4. OpenSpec: `openspec validate --all` and active changes under `openspec/changes/`.
+5. CI: recent PR checks (`qa-gate`, visual, cancelled/failed).
+6. Cursor sessions: read agent transcripts for this workspace. Canonical search order:
    - `$CURSOR_TRANSCRIPTS_DIR` if set
    - sibling `agent-transcripts` under the current Cursor project folder
    Correlate with cards via `#<id>` / `card-<id>` in titles or user messages.
    Do **not** query `~/.local/share/opencode/opencode.db` as an active source.
-6. Tech debt when requested: coverage and audit reports.
+7. Tech debt when requested: coverage and audit reports.
 
 If a source is missing, declare the limitation. Do not emit an empty audit as success.
 

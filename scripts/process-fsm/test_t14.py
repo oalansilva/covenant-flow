@@ -14,6 +14,7 @@ from t14 import (  # noqa: E402
     T14Error,
     LiveT14Runner,
     _overlay_health_url,
+    classify_qa_gate,
     measure_checks_green,
 )
 
@@ -97,6 +98,81 @@ def test_measure_checks_green_error_is_false():
     assert measure_checks_green("632", "card-632-x", runner=boom) is False
 
 
+def test_classify_qa_gate_no_pr():
+    empty = Scripted([_ok("[]")])
+    assert classify_qa_gate("801", "card-801-x", runner=empty) == {"ok": False, "reason": "no_pr"}
+    assert classify_qa_gate("801", None, runner=Scripted([])) == {"ok": False, "reason": "no_pr"}
+    no_head = Scripted([_ok(json.dumps([{"number": 1}]))])
+    assert classify_qa_gate("801", "card-801-x", runner=no_head) == {"ok": False, "reason": "no_pr"}
+
+
+def test_classify_qa_gate_pending():
+    scripted = Scripted(
+        [
+            _ok(json.dumps([{"number": 1, "headRefOid": "abc"}])),
+            _ok(_checks_ndjson({"name": "qa-gate", "status": "in_progress", "conclusion": ""})),
+        ]
+    )
+    assert classify_qa_gate("801", "card-801-x", runner=scripted) == {
+        "ok": False,
+        "reason": "qa-gate pending",
+    }
+
+
+def test_classify_qa_gate_failed_missing_skipped_api():
+    missing = Scripted(
+        [
+            _ok(json.dumps([{"number": 1, "headRefOid": "abc"}])),
+            _ok(_checks_ndjson({"name": "lint", "status": "completed", "conclusion": "success"})),
+        ]
+    )
+    assert classify_qa_gate("801", "card-801-x", runner=missing) == {
+        "ok": False,
+        "reason": "qa-gate failed",
+    }
+    skipped = Scripted(
+        [
+            _ok(json.dumps([{"number": 1, "headRefOid": "abc"}])),
+            _ok(_checks_ndjson({"name": "qa-gate", "status": "completed", "conclusion": "skipped"})),
+        ]
+    )
+    assert classify_qa_gate("801", "card-801-x", runner=skipped)["reason"] == "qa-gate failed"
+    cancelled = Scripted(
+        [
+            _ok(json.dumps([{"number": 1, "headRefOid": "abc"}])),
+            _ok(_checks_ndjson({"name": "qa-gate", "status": "completed", "conclusion": "cancelled"})),
+        ]
+    )
+    assert classify_qa_gate("801", "card-801-x", runner=cancelled)["reason"] == "qa-gate failed"
+    api_err = Scripted(
+        [
+            _ok(json.dumps([{"number": 1, "headRefOid": "abc"}])),
+            _ok("", returncode=1),
+        ]
+    )
+    assert classify_qa_gate("801", "card-801-x", runner=api_err) == {
+        "ok": False,
+        "reason": "qa-gate failed",
+    }
+    pr_json = Scripted([_ok("{not-json")])
+    assert classify_qa_gate("801", "card-801-x", runner=pr_json)["reason"] == "qa-gate failed"
+
+
+def test_classify_qa_gate_ok():
+    scripted = Scripted(
+        [
+            _ok(json.dumps([{"number": 99, "headRefOid": "abc"}])),
+            _ok(
+                _checks_ndjson(
+                    {"name": "qa-gate", "status": "completed", "conclusion": "success"},
+                    {"name": "other", "status": "completed", "conclusion": "failure"},
+                )
+            ),
+        ]
+    )
+    assert classify_qa_gate("801", "card-801-x", runner=scripted) == {"ok": True, "reason": None}
+
+
 def test_t14_health_url_uses_dev_not_release(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "t14.try_load_overlay",
@@ -128,8 +204,11 @@ def test_sync_dirty_raises_before_mutate(tmp_path: Path):
         return subprocess.run(args, **kwargs)
 
     runner = LiveT14Runner(source=tmp_path, restart_path=tmp_path / "restart", runner=wrapped)
-    with pytest.raises(T14Error, match="dirty"):
+    with pytest.raises(T14Error, match="dirty") as exc:
         runner.sync_dev_source()
+    text = str(exc.value)
+    assert str(tmp_path) in text
+    assert "dirt.txt" in text
     assert any("--porcelain" in c for c in calls)
     assert not any("reset" in c for c in calls)
     assert not any(len(c) >= 4 and c[3] == "merge" for c in calls)

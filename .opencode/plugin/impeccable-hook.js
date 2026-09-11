@@ -1,17 +1,17 @@
 // 1.18.18 legacy loader instantiates every named export; only default is the plugin.
 import {
-  REPO_ROOT,
   mapAfterPayload,
   mapIdlePayload,
+  resolveRepoCwd,
   runHookMjs,
 } from "../../scripts/process-fsm/opencode_plugin_lib.js";
 
 export default async function impeccableHook(input = {}) {
-  const directory = input.directory || input.worktree || REPO_ROOT;
+  const cwd = resolveRepoCwd(input.directory || input.worktree);
   return {
     "tool.execute.after": async (hookInput) => {
       try {
-        runHookMjs(mapAfterPayload(hookInput || {}), directory);
+        runHookMjs(mapAfterPayload(hookInput || {}), cwd);
       } catch {
         // fail-open: never throw
       }
@@ -20,7 +20,7 @@ export default async function impeccableHook(input = {}) {
       try {
         const type = bus && bus.event && bus.event.type;
         if (type === "session.idle") {
-          runHookMjs(mapIdlePayload(), directory);
+          runHookMjs(mapIdlePayload(), cwd);
         }
       } catch {
         // fail-open: never throw

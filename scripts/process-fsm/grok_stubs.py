@@ -11,8 +11,9 @@ CURSOR_SKILLS = REPO_ROOT / ".cursor" / "skills"
 GROK_SKILLS = REPO_ROOT / ".grok" / "skills"
 
 # Extra Grok stubs whose canonical file lives under .agents/skills (card #673).
+# design-critic went canonical under .cursor/skills in #854 (covered by the
+# canonical loop above, like every other .cursor skill).
 AGENTS_EXTRA_SKILLS: tuple[tuple[str, str], ...] = (
-    ("design-critic", ".agents/skills/design-critic"),
     ("impeccable", ".agents/skills/impeccable"),
 )
 

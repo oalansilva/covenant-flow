@@ -42,7 +42,7 @@ invariants:
   - id: I1
     text: "Write(produto) ⇒ q ∈ {Em desenvolvimento, Code Review} ∧ q_git=card-<id> ∧ bound_card=id ∧ path desse worktree"
   - id: I2
-    text: "T1, T7, T15.ator ⊇ Alan. Agent ⇏ T7. T16.ator ⊇ Agent."
+    text: "T1, T7, T15, T18.ator ⊇ Alan. Agent ⇏ T7. T16.ator ⊇ Agent."
   - id: I3
     text: "Em Pronto para Dev, Write produto = deny. Allow só após Status já ser Em desenvolvimento."
   - id: I4
@@ -81,7 +81,7 @@ enabled_events:
   Em desenvolvimento: [pedir_review, invalidar_aprovacao, cancelar]
   Code Review: [achar_bloqueante, aceitar_sha, cancelar]
   QA: [rerun_infra, falha_codigo, integrar_develop, cancelar]
-  Done: [homologar, cancelar]
+  Done: [homologar, nao_homologar, cancelar]
   Homologado: [fechar_release, cancelar]
   Pronto: []
   Cancelado: []
@@ -92,7 +92,7 @@ context_file:
   Todo: |
     Issue grelhado. Próximo evento = iniciar_design. Não apply. Não /opsx:new ainda.
   Design: |
-    OpenSpec + crítica; sintetizar do issue grelhado, não reentrevistar. Write produto deny.
+    OpenSpec + crítica; sintetizar do issue grelhado, não reentrevistar. OpenSpec/protótipo allow. Write produto deny.
   Aprovação de Design: |
     Espere T7. Read-only. Agent não aprova design.
   Pronto para Dev: |
@@ -104,7 +104,7 @@ context_file:
   QA: |
     Não mexer fonte. Cursor/Grok: filho QA lê checks; MUST NOT process_event. dsh: root MUST NOT spawnar filho QA; espera qa-gate no turno (job_output wait, sem continue). Pai T14 no mesmo turno do verde; pending espera T14; no_pr / sync: dirty visíveis. T13 volta a Em desenvolvimento.
   Done: |
-    Done técnico. Espere T15. Write produto deny.
+    Done técnico. Espere T15/T18. Write produto deny.
   Homologado: |
     T16 = process_event fechar_release com M_lote live. Chat ≠ δ.
   Pronto: |
@@ -129,6 +129,7 @@ transitions:
   - { id: T13, from: QA, event: falha_codigo, actor: [CI, Agent], to: Em desenvolvimento, guard: source_failure, actions: [set_status], exclusive_group: qa-exit }
   - { id: T14, from: QA, event: integrar_develop, actor: Agent, to: Done, guard: checks_green, actions: [squash, restart, comment_done, set_status], exclusive_group: qa-exit }
   - { id: T15, from: Done, event: homologar, actor: Alan, to: Homologado, actions: [comment_homologado] }
+  - { id: T18, from: Done, event: nao_homologar, actor: Alan, guard: motivo_visivel, to: Em desenvolvimento, actions: [set_status] }
   - { id: T16, from: Homologado, event: fechar_release, actor: Agent, guard: M_lote, to: Pronto, actions: [release_guard, deploy_prod, set_status] }
   - { id: T17a, from: Pronto para Dev, event: invalidar_aprovacao, actor: Guard, to: Design, guard: digest_changed, actions: [set_status] }
   - { id: T17b, from: Em desenvolvimento, event: invalidar_aprovacao, actor: Guard, to: Design, guard: digest_changed, actions: [set_status] }

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./process-fsm-guard.sh",
+            "command": "test -f .grok/hooks/process-fsm-guard.sh && exec .grok/hooks/process-fsm-guard.sh; test -f ./process-fsm-guard.sh && exec ./process-fsm-guard.sh; root=`git rev-parse --show-toplevel 2>/dev/null`; test -f \"$root/.grok/hooks/process-fsm-guard.sh\" && exec \"$root/.grok/hooks/process-fsm-guard.sh\"; exit 127",
             "timeout": 30
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./process-fsm-guard.sh",
+            "command": "test -f .grok/hooks/process-fsm-guard.sh && exec .grok/hooks/process-fsm-guard.sh; test -f ./process-fsm-guard.sh && exec ./process-fsm-guard.sh; root=`git rev-parse --show-toplevel 2>/dev/null`; test -f \"$root/.grok/hooks/process-fsm-guard.sh\" && exec \"$root/.grok/hooks/process-fsm-guard.sh\"; exit 127",
             "timeout": 30
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./process-fsm-session-start.sh",
+            "command": "test -f .grok/hooks/process-fsm-session-start.sh && exec .grok/hooks/process-fsm-session-start.sh; test -f ./process-fsm-session-start.sh && exec ./process-fsm-session-start.sh; root=`git rev-parse --show-toplevel 2>/dev/null`; test -f \"$root/.grok/hooks/process-fsm-session-start.sh\" && exec \"$root/.grok/hooks/process-fsm-session-start.sh\"; exit 127",
             "timeout": 30
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./impeccable.sh PostToolUse",
+            "command": "test -f .grok/hooks/impeccable.sh && exec .grok/hooks/impeccable.sh PostToolUse; test -f ./impeccable.sh && exec ./impeccable.sh PostToolUse; root=`git rev-parse --show-toplevel 2>/dev/null`; test -f \"$root/.grok/hooks/impeccable.sh\" && exec \"$root/.grok/hooks/impeccable.sh\" PostToolUse; exit 127",
             "timeout": 30
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./impeccable.sh Stop",
+            "command": "test -f .grok/hooks/impeccable.sh && exec .grok/hooks/impeccable.sh Stop; test -f ./impeccable.sh && exec ./impeccable.sh Stop; root=`git rev-parse --show-toplevel 2>/dev/null`; test -f \"$root/.grok/hooks/impeccable.sh\" && exec \"$root/.grok/hooks/impeccable.sh\" Stop; exit 127",
             "timeout": 30
           }
         ]

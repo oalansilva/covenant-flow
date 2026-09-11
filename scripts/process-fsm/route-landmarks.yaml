@@ -1,0 +1,22 @@
+version: 1
+/monitor:
+  selectors: ["table.signals"]
+  texts: ["Status", "Preço", "Distância", "7d", "Risco até stop", "Tags", "Operar", "Par / Estratégia"]
+/favorites:
+  selectors: ["table.fav-strategies"]
+  texts: ["Estratégias favoritas", "Symbol", "Estratégia", "Ações"]
+/combo/discovery:
+  selectors: []
+  texts: ["Descoberta de estratégias swing", "Preflight", "Rascunho de varredura"]
+/combo/select:
+  selectors: [".combo-page"]
+  texts: ["Available Templates"]
+landing:
+  kind: public
+  live_url: https://criptofarol.com.br/
+  source: frontend/public/prototypes/cripto-farol-landing-v4/index.html
+  selectors: [".faq-section", ".button-primary"]
+  texts:
+    - "Comprar ou vender cripto? O Cripto Farol responde."
+    - "FAQ"
+    - "Quero meus 6 meses grátis"

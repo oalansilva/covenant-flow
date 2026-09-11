@@ -81,17 +81,23 @@ fi
 # --- Remote snapshots (card #509): single authoritative snapshot per run ---
 BOARD_JSON=""
 BOARD_STATE="unloaded"
+BOARD_SNAPSHOT_CAPTURE=""
 PRS_JSON=""
 PRS_STATE="unloaded"
 RATE_LIMIT_DIAGNOSED=0
+PROCESS_FSM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/process-fsm"
 
 snapshot_fail_diagnose() {
   if [[ "$RATE_LIMIT_DIAGNOSED" -eq 0 ]]; then
     RATE_LIMIT_DIAGNOSED=1
-    local rl
-    rl="$(gh api rate_limit --jq '.resources.graphql | "graphql: \(.remaining)/\(.limit) reset=\(.reset)"' 2>/dev/null || true)"
-    if [[ -n "$rl" ]]; then
-      printf '  rate-limit diagnostic: %s\n' "$rl"
+    local diag=""
+    if [[ -f "${PROCESS_FSM_DIR}/graphql_quota.py" ]]; then
+      diag="$(printf '%s' "$BOARD_SNAPSHOT_CAPTURE" | python3 "${PROCESS_FSM_DIR}/graphql_quota.py" --diagnose 2>/dev/null || true)"
+    fi
+    if [[ -n "$diag" ]]; then
+      printf '  graphql quota diagnostic: %s\n' "$diag"
+    else
+      printf '  graphql quota diagnostic: cota GraphQL desconhecida\n'
     fi
   fi
 }
@@ -113,9 +119,14 @@ ensure_board_snapshot() {
   if [[ "$BOARD_STATE" == "failed" ]]; then
     return 1
   fi
-  local raw exit_code total_count items_count
-  raw="$(gh project item-list 1 --owner oalansilva --limit 500 --format json 2>/dev/null)"
+  local raw exit_code total_count items_count hdr
+  hdr="$(mktemp)"
+  # Same #509 photograph (one item-list). GH_DEBUG=api dumps GraphQL headers on
+  # stderr of that call — item-list itself does not print X-RateLimit-*.
+  raw="$(GH_DEBUG=api gh project item-list 1 --owner oalansilva --limit 500 --format json 2>"$hdr")"
   exit_code=$?
+  BOARD_SNAPSHOT_CAPTURE="$(cat "$hdr" 2>/dev/null)"$'\n'"$raw"
+  rm -f "$hdr"
   BOARD_STATE="failed"
   if [[ $exit_code -eq 0 ]] && printf '%s' "$raw" | jq -e '.items | type == "array"' >/dev/null 2>&1; then
     total_count="$(printf '%s' "$raw" | jq -r '.totalCount // empty' 2>/dev/null)"

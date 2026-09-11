@@ -168,6 +168,33 @@ if path is None and command:
                     path = path[2:]
 if path and path not in paths:
     paths.append(path)
+def _overlay_dev_source(root):
+    ov_path = os.path.join(root, ".covenant-flow", "overlay.yaml")
+    if not os.path.isfile(ov_path):
+        return ""
+    text = open(ov_path, encoding="utf-8").read()
+    m = re.search(
+        r"(?ms)^environments:\s*\n.*?^[ \t]+dev:\s*\n[ \t]+source:\s*[\"']?([^\s\"']+)",
+        text,
+    )
+    return m.group(1) if m else ""
+def _canonical_card_branch(command, cwd, source):
+    if not command or not source:
+        return False
+    m = re.search(
+        r"\bgit(?:\s+-C\s+(\S+))?\s+(?:checkout(?:\s+--track)?\s+-b|switch\s+-c)\s+card-\d+",
+        command,
+    )
+    if not m:
+        return False
+    raw = (m.group(1) or cwd).strip().strip("'\"")
+    target = raw if os.path.isabs(raw) else os.path.join(cwd, raw)
+    return os.path.realpath(target) == os.path.realpath(source)
+ov_source = _overlay_dev_source(os.environ.get("PROCESS_FSM_ROOT") or cwd)
+if _canonical_card_branch(command, cwd, ov_source):
+    msg = "process-fsm-guard deny reason=canonical_card_branch"
+    print(json.dumps({"permission": "deny", "decision": "deny", "agent_message": msg, "user_message": msg, "reason": msg}))
+    sys.exit(0)
 if not paths:
     if tool in ("write", "edit", "apply_patch"):
         msg = "process-fsm-guard deny reason=empty_path. write/edit/apply_patch (file_path or filePath) and str_replace_editor mutate (create/str_replace/insert path) require an extractable path."

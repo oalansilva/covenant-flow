@@ -94,7 +94,6 @@ def stub_errors() -> list[str]:
             errors.append(f"runbook copy {dest.relative_to(REPO_ROOT)}")
     extras = {
         "impeccable",
-        "design-critic",
         "playwright-cli",
     }
     for name in extras:

@@ -34,7 +34,7 @@ Dedup normalization:
   - "PR N (sha)" and "Commit/merge: <ref>" forms
   - Ref-less legacy comments of the same transition also block posting
 
-Fail-closed: if `gh` fails to list comments, the script exits with an error
+Fail-closed: if REST `GET /repos/<owner>/<repo>/issues/<n>/comments` fails, the script exits with an error
 and does NOT post, preventing duplicates.
 USAGE
 }
@@ -126,14 +126,19 @@ transition_marker() {
 marker="$(transition_marker)"
 
 comments_json=""
-if ! comments_json="$(gh issue view "$card" --repo "$repo" --json comments 2>/dev/null)"; then
-  error "could not fetch comments for card $card (gh issue view failed); refusing to post (fail-closed)"
+comments_raw=""
+if ! comments_raw="$(gh api --paginate "repos/${repo}/issues/${card}/comments" 2>/dev/null)"; then
+  error "could not fetch comments for card $card (REST GET /issues/${card}/comments failed); refusing to post (fail-closed)"
 fi
-if [[ -z "$comments_json" ]] || ! printf '%s' "$comments_json" | jq -e '
-  (.comments | type == "array") and
-  (.comments | all(.[]; type == "object" and (.body | type == "string") and (.url | type == "string")))
+# --paginate may emit one JSON array per page concatenated; slurp+add merges them.
+if [[ -z "$comments_raw" ]] || ! comments_json="$(printf '%s' "$comments_raw" | jq -se 'if length == 0 then empty elif all(.[]; type == "array") then add else empty end' 2>/dev/null)" || [[ -z "$comments_json" ]]; then
+  error "could not fetch comments for card $card (REST comments failed or returned invalid JSON); refusing to post (fail-closed)"
+fi
+if ! printf '%s' "$comments_json" | jq -e '
+  (type == "array") and
+  (all(.[]; type == "object" and (.body | type == "string") and (.url | type == "string")))
 ' >/dev/null 2>&1; then
-  error "could not fetch comments for card $card (gh issue view failed or returned invalid JSON); refusing to post (fail-closed)"
+  error "could not fetch comments for card $card (REST comments failed or returned invalid JSON); refusing to post (fail-closed)"
 fi
 
 sha_matches() {
@@ -157,7 +162,7 @@ while IFS=$'\t' read -r body url; do
       break
     fi
   fi
-done < <(printf '%s' "$comments_json" | jq -r '.comments[] | [.body, .url] | @tsv')
+done < <(printf '%s' "$comments_json" | jq -r '.[] | [.body, .url] | @tsv')
 
 if [[ -n "$duplicate" ]]; then
   printf 'DEDUPE: card #%s already has a %s evidence comment with commit ref %s.\n' "$card" "$transition" "$commit_norm"

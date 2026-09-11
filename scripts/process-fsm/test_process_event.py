@@ -10,15 +10,17 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from test_overlay_fixtures import FIELD_ID, filled_overlay_dict, write_overlay  # noqa: E402
+import design_clone_gate  # noqa: E402
 from fsm import load_fsm  # noqa: E402
 from guard import decide  # noqa: E402
 from process_event import (  # noqa: E402
+    HUMAN_EVENTS,
     FakeMover,
     files_g_design,
     process_event,
     sidecar_path,
 )
-from t14 import RecordingT14Runner  # noqa: E402
+from t14 import RecordingT14Runner, T14Error  # noqa: E402
 from resolve import UNBOUND  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -62,9 +64,14 @@ def test_aprovar_design_rejected():
     assert out["state"] == "Aprovação de Design"
 
 
-@pytest.mark.parametrize("event", ["priorizar", "homologar", "fechar_release"])
+@pytest.mark.parametrize("event", ["priorizar", "homologar", "nao_homologar", "fechar_release"])
 def test_human_gates_rejected(event: str):
-    state = {"priorizar": "Em Refinamento", "homologar": "Done", "fechar_release": "Homologado"}[event]
+    state = {
+        "priorizar": "Em Refinamento",
+        "homologar": "Done",
+        "nao_homologar": "Done",
+        "fechar_release": "Homologado",
+    }[event]
     mover = FakeMover()
     out = process_event(
         event,
@@ -73,6 +80,7 @@ def test_human_gates_rejected(event: str):
         bound_card="612",
         mover=mover,
         m_lote=False,
+        status_provider=SILENT,
     )
     assert out["result"] == "reject"
     assert mover.calls == []
@@ -248,6 +256,116 @@ def test_card_mismatch_rejects():
     assert out["reason"] == "card_mismatch"
 
 
+R1_GALLERY = ROOT / "fixtures" / "792-r1-gallery.html"
+
+
+def test_t5_default_g_design_refuses_r1_gallery_monitor(tmp_path: Path):
+    change = _change_tree(tmp_path)
+    (change / "design.md").write_text(
+        "UI impact: affected\nlive_route: /monitor\n",
+        encoding="utf-8",
+    )
+    proto = tmp_path / "proto"
+    proto.mkdir()
+    (proto / "index.html").write_bytes(R1_GALLERY.read_bytes())
+    mover = FakeMover()
+    out = process_event(
+        "submeter_design",
+        status="Design",
+        q_git="card-799-prototype-clone-rota",
+        bound_card="799",
+        mover=mover,
+        change_dir=change,
+        prototype_dir=proto,
+        digest_changed=False,
+    )
+    assert out["result"] == "reject"
+    assert str(out["reason"]).startswith("guard:")
+    assert mover.calls == []
+
+
+def test_t5_default_g_design_ui_none_transitions(tmp_path: Path):
+    change = _change_tree(tmp_path)
+    (change / "design.md").write_text(
+        "UI impact: none\nlive_route: N/A harness-only; no product route\nsurface: new\n",
+        encoding="utf-8",
+    )
+    mover = FakeMover()
+    out = process_event(
+        "submeter_design",
+        status="Design",
+        q_git="card-612-process-event",
+        bound_card="612",
+        mover=mover,
+        change_dir=change,
+        digest_changed=False,
+    )
+    assert out["result"] == "transition"
+    assert out["to"] == "Aprovação de Design"
+    assert mover.calls == [(612, "Aprovação de Design")]
+
+
+def _seeded_head_catalog(_repo: Path) -> dict:
+    return design_clone_gate.parse_catalog(
+        design_clone_gate.default_catalog_path().read_text(encoding="utf-8")
+    )
+
+
+def test_t5_refuses_panel_plus_sibling_landing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(design_clone_gate, "load_head_catalog", _seeded_head_catalog)
+    change = _change_tree(tmp_path)
+    (change / "design.md").write_text(
+        "UI impact: affected\nlive_route: landing\nsurface: existing\n",
+        encoding="utf-8",
+    )
+    proto = tmp_path / "proto"
+    proto.mkdir()
+    (proto / "index.html").write_text(
+        (ROOT / "fixtures" / "790-panel-index.html").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (proto / "landing.html").write_text(
+        (ROOT / "fixtures" / "790-sibling-landing-clone.html").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    mover = FakeMover()
+    out = process_event(
+        "submeter_design",
+        status="Design",
+        q_git="card-819-clone-pagina-viva",
+        bound_card="819",
+        mover=mover,
+        change_dir=change,
+        prototype_dir=proto,
+        digest_changed=False,
+    )
+    assert out["result"] == "reject"
+    assert str(out["reason"]).startswith("guard:")
+    assert mover.calls == []
+
+
+def test_t5_refuses_existing_without_proto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(design_clone_gate, "load_head_catalog", _seeded_head_catalog)
+    change = _change_tree(tmp_path)
+    (change / "design.md").write_text(
+        "UI impact: none\nlive_route: landing\nsurface: existing\n",
+        encoding="utf-8",
+    )
+    mover = FakeMover()
+    out = process_event(
+        "submeter_design",
+        status="Design",
+        q_git="card-819-clone-pagina-viva",
+        bound_card="819",
+        mover=mover,
+        change_dir=change,
+        digest_changed=False,
+    )
+    assert out["result"] == "reject"
+    assert str(out["reason"]).startswith("guard:")
+    assert mover.calls == []
+
+
 def test_t5_writes_sidecar_dry_run_does_not(tmp_path: Path):
     change = _change_tree(tmp_path)
     assert files_g_design(change)
@@ -291,9 +409,50 @@ def test_aceitar_sha_moves_qa():
         bound_card="612",
         mover=mover,
         digest_changed=False,
+        pr_lister=lambda q_git: [{"number": 99, "headRefOid": "abc"}],
     )
     assert out["to"] == "QA"
     assert mover.calls == [(612, "QA")]
+
+
+def test_aceitar_sha_without_pr_is_no_pr():
+    """#792: push sem PR MUST reject no_pr; Status stays Code Review; no PR created."""
+    mover = FakeMover()
+    created: list[str] = []
+
+    def empty_lister(q_git):
+        assert q_git == "card-792-x"
+        return []
+
+    out = process_event(
+        "aceitar_sha",
+        status="Code Review",
+        q_git="card-792-x",
+        bound_card="792",
+        mover=mover,
+        digest_changed=False,
+        pr_lister=empty_lister,
+    )
+    assert out["result"] == "reject"
+    assert out["reason"] == "no_pr"
+    assert out["state"] == "Code Review"
+    assert mover.calls == []
+    assert created == []
+
+
+def test_aceitar_sha_omitted_lister_is_no_pr():
+    mover = FakeMover()
+    out = process_event(
+        "aceitar_sha",
+        status="Code Review",
+        q_git="card-792-x",
+        bound_card="792",
+        mover=mover,
+        digest_changed=False,
+    )
+    assert out["result"] == "reject"
+    assert out["reason"] == "no_pr"
+    assert mover.calls == []
 
 
 def test_integrar_develop_rejects_without_checks_green():
@@ -520,6 +679,7 @@ def test_integrar_develop_sync_failure_is_i8():
     )
     assert out["result"] == "reject"
     assert out["reason"] == "I8"
+    assert out.get("message")
     assert mover.calls == []
     assert runner.calls == ["squash", "sync_dev_source"]
 
@@ -535,6 +695,7 @@ def test_integrar_develop_restart_failure_is_i8():
     )
     assert out["result"] == "reject"
     assert out["reason"] == "I8"
+    assert out.get("message")
     assert mover.calls == []
     assert runner.calls == ["squash", "sync_dev_source", "restart"]
 
@@ -550,9 +711,99 @@ def test_integrar_develop_comment_done_failure_is_i8():
     )
     assert out["result"] == "reject"
     assert out["reason"] == "I8"
+    assert out.get("message")
     assert mover.calls == []
     assert "comment_done" in runner.calls
     assert mover.calls == []
+
+
+def test_integrar_develop_classifier_no_pr():
+    mover = FakeMover()
+    runner = RecordingT14Runner()
+    out = process_event(
+        "integrar_develop",
+        mover=mover,
+        t14_runner=runner,
+        checks_green=None,
+        checks_green_classifier=lambda *a, **k: {"ok": False, "reason": "no_pr"},
+        **{k: v for k, v in _t14_kwargs().items() if k != "checks_green"},
+    )
+    assert out["result"] == "reject"
+    assert out["reason"] == "no_pr"
+    assert mover.calls == []
+    assert runner.calls == []
+
+
+def test_integrar_develop_classifier_pending():
+    mover = FakeMover()
+    runner = RecordingT14Runner()
+    out = process_event(
+        "integrar_develop",
+        mover=mover,
+        t14_runner=runner,
+        checks_green=None,
+        checks_green_classifier=lambda *a, **k: {"ok": False, "reason": "qa-gate pending"},
+        **{k: v for k, v in _t14_kwargs().items() if k != "checks_green"},
+    )
+    assert out["reason"] == "qa-gate pending"
+    assert mover.calls == []
+    assert runner.calls == []
+
+
+def test_integrar_develop_classifier_failed():
+    mover = FakeMover()
+    runner = RecordingT14Runner()
+    out = process_event(
+        "integrar_develop",
+        mover=mover,
+        t14_runner=runner,
+        checks_green=None,
+        checks_green_classifier=lambda *a, **k: {"ok": False, "reason": "qa-gate failed"},
+        **{k: v for k, v in _t14_kwargs().items() if k != "checks_green"},
+    )
+    assert out["reason"] == "qa-gate failed"
+    assert mover.calls == []
+    assert runner.calls == []
+
+
+def test_integrar_develop_classifier_ok_moves_done():
+    mover = FakeMover()
+    runner = RecordingT14Runner()
+    out = process_event(
+        "integrar_develop",
+        mover=mover,
+        t14_runner=runner,
+        checks_green=None,
+        checks_green_classifier=lambda *a, **k: {"ok": True, "reason": None},
+        **{k: v for k, v in _t14_kwargs().items() if k != "checks_green"},
+    )
+    assert out["result"] == "transition"
+    assert out["to"] == "Done"
+    assert runner.calls == ["squash", "sync_dev_source", "restart", "comment_done"]
+    assert mover.calls == [(612, "Done")]
+
+
+def test_integrar_develop_dirty_is_visible():
+    """#798: dirty ⇒ reason=sync: dirty + path + porcelain; no move."""
+    class Dirty(RecordingT14Runner):
+        def sync_dev_source(self) -> None:
+            self.calls.append("sync_dev_source")
+            raise T14Error("sync: dirty /tmp/canonical-dev\n?? dirt.txt")
+
+    mover = FakeMover()
+    runner = Dirty()
+    out = process_event(
+        "integrar_develop",
+        mover=mover,
+        t14_runner=runner,
+        **_t14_kwargs(),
+    )
+    assert out["result"] == "reject"
+    assert out["reason"] == "sync: dirty"
+    assert "/tmp/canonical-dev" in (out.get("message") or "")
+    assert "dirt.txt" in (out.get("message") or "")
+    assert mover.calls == []
+    assert runner.calls == ["squash", "sync_dev_source"]
 
 
 def test_integrar_develop_missing_runner_never_moves():
@@ -598,6 +849,7 @@ def test_integrar_develop_oserror_is_i8():
     )
     assert out["result"] == "reject"
     assert out["reason"] == "I8"
+    assert out.get("message")
     assert mover.calls == []
 
 
@@ -820,8 +1072,26 @@ def test_homologar_still_rejected():
         q_git="card-612-process-event",
         bound_card="612",
         mover=mover,
+        status_provider=SILENT,
     )
     assert out["result"] == "reject"
+    assert mover.calls == []
+
+
+def test_nao_homologar_rejected_mover_empty():
+    assert "nao_homologar" in HUMAN_EVENTS
+    mover = FakeMover()
+    out = process_event(
+        "nao_homologar",
+        status="Done",
+        q_git="card-859-devolver-homologacao",
+        bound_card="859",
+        mover=mover,
+        status_provider=SILENT,
+    )
+    assert out["result"] == "reject"
+    assert out["state"] == "Done"
+    assert out.get("to") is None
     assert mover.calls == []
 
 
@@ -854,3 +1124,143 @@ def test_cli_has_no_m_lote_flag():
     with pytest.raises(SystemExit) as exc:
         main(["fechar_release", "--m-lote"])
     assert exc.value.code != 0
+
+
+G1_INCLUDE = """HTTP/2 200
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 2026-09-03T02:55:52Z
+X-RateLimit-Resource: graphql
+
+{"data":null,"errors":[{"type":"RATE_LIMIT","message":"API rate limit exceeded"}]}
+"""
+
+
+def test_g11_item_id_rate_limit_is_not_not_on_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess as sp
+
+    from graphql_quota import GraphQLQuotaError
+    from process_event import _item_id_for_issue
+
+    cache = tmp_path / "quota.json"
+    monkeypatch.setenv("PROCESS_FSM_GRAPHQL_QUOTA_CACHE", str(cache))
+    monkeypatch.setattr("process_event.load_overlay", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr("process_event.repo_owner_name", lambda o: ("oalansilva", "crypto"))
+    monkeypatch.setattr("process_event.board_owner_number", lambda o: ("oalansilva", 1))
+
+    def fake_run(argv, **kwargs):
+        return sp.CompletedProcess(argv, 0, stdout=G1_INCLUDE, stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    with pytest.raises(GraphQLQuotaError) as excinfo:
+        _item_id_for_issue(820)
+    assert excinfo.value.remaining == 0
+    assert "not on Project" not in str(excinfo.value)
+
+
+def test_g11_process_event_quota_is_not_unbound(tmp_path: Path) -> None:
+    from graphql_quota import GraphQLQuotaError
+
+    mover = FakeMover()
+
+    def quota(_bound: str | None) -> str | None:
+        raise GraphQLQuotaError(0, "2026-09-03T02:55:52Z")
+
+    out = process_event(
+        "aceitar_sha",
+        card="820",
+        q_git="card-820-graphql-quota-rest",
+        bound_card="820",
+        mover=mover,
+        status_provider=quota,
+        pr_lister=lambda q_git: [{"number": 1, "headRefOid": "abc"}],
+    )
+    assert out["result"] == "reject"
+    assert out["reason"] == "graphql_quota"
+    assert out["reason"] != "unbound"
+    assert "not on Project" not in (out.get("message") or "")
+    assert "2026-09-03T02:55:52Z" in (out.get("message") or "")
+    assert mover.calls == []
+
+
+def test_g12_aceitar_sha_second_invocation_skips_graphql(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from graphql_quota import parse_include_output, write_cache
+
+    import subprocess as sp
+
+    cache = tmp_path / "quota.json"
+    monkeypatch.setenv("PROCESS_FSM_GRAPHQL_QUOTA_CACHE", str(cache))
+    write_cache(parse_include_output(G1_INCLUDE))
+    monkeypatch.setenv("PROCESS_FSM_GRAPHQL_QUOTA_NOW", "2026-09-03T01:00:00Z")
+    real_run = sp.run
+
+    def wrapped(argv, *args, **kwargs):
+        cmd0 = str(argv[0]) if argv else ""
+        if cmd0 == "gh" or cmd0.endswith("/gh"):
+            raise AssertionError(f"graphql called: {argv}")
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", wrapped)
+    mover = FakeMover()
+    first = process_event(
+        "aceitar_sha",
+        card="820",
+        q_git="card-820-graphql-quota-rest",
+        bound_card="820",
+        mover=mover,
+        pr_lister=lambda q_git: [{"number": 1, "headRefOid": "abc"}],
+    )
+    second = process_event(
+        "aceitar_sha",
+        card="820",
+        q_git="card-820-graphql-quota-rest",
+        bound_card="820",
+        mover=mover,
+        pr_lister=lambda q_git: [{"number": 1, "headRefOid": "abc"}],
+    )
+    assert first["reason"] == "graphql_quota"
+    assert second["reason"] == "graphql_quota"
+    assert mover.calls == []
+
+
+def test_item_edit_rate_limit_updates_cache_not_move_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess as sp
+
+    from graphql_quota import GraphQLQuotaError, load_cache
+    from process_event import GhBoardMover
+
+    cache = tmp_path / "quota.json"
+    monkeypatch.setenv("PROCESS_FSM_GRAPHQL_QUOTA_CACHE", str(cache))
+    monkeypatch.setattr("process_event.load_overlay", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr("process_event.repo_owner_name", lambda o: ("oalansilva", "crypto"))
+    monkeypatch.setattr("process_event.board_owner_number", lambda o: ("oalansilva", 1))
+    monkeypatch.setattr("process_event.status_options", lambda o: {"QA": "opt"})
+    monkeypatch.setattr("process_event.status_field_id", lambda o: "field")
+    monkeypatch.setattr("process_event.board_project_id", lambda o: "proj")
+    monkeypatch.setattr("process_event._item_id_for_issue", lambda n: "ITEM")
+
+    debug = (
+        "* Response from https://api.github.com/graphql\n"
+        "< HTTP/2.0 200 OK\n"
+        "< X-RateLimit-Remaining: 0\n"
+        "< X-RateLimit-Reset: 2026-09-03T02:55:52Z\n"
+        "< X-RateLimit-Resource: graphql\n"
+    )
+
+    def fake_run(argv, **kwargs):
+        return sp.CompletedProcess(argv, 1, stdout="", stderr=debug)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    mover = GhBoardMover()
+    with pytest.raises(GraphQLQuotaError) as excinfo:
+        mover.set_status(820, "QA")
+    assert excinfo.value.remaining == 0
+    stored = load_cache()
+    assert stored is not None
+    assert stored["remaining"] == 0
+    assert stored["source"] == "graphql-headers"

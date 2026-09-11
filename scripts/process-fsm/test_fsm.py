@@ -13,8 +13,10 @@ sys.path.insert(0, str(ROOT))
 from fsm import (  # noqa: E402
     YAML_PATH,
     EvalContext,
+    NAMED_GUARDS,
     ValidationError,
     evaluate,
+    expand_transitions,
     load_fsm,
     validate_fsm,
 )
@@ -57,6 +59,8 @@ def _legal_ctx(state, event, actor) -> EvalContext:
         kwargs.update(m_lote=True)
     elif event == "invalidar_aprovacao":
         kwargs.update(digest_changed=True)
+    elif event == "nao_homologar":
+        kwargs.update(motivo_visivel=True)
     return EvalContext(**kwargs)
 
 
@@ -79,6 +83,7 @@ def _legal_ctx(state, event, actor) -> EvalContext:
         ("T13", "QA", "falha_codigo", "CI", "Em desenvolvimento"),
         ("T14", "QA", "integrar_develop", "Agent", "Done"),
         ("T15", "Done", "homologar", "Alan", "Homologado"),
+        ("T18", "Done", "nao_homologar", "Alan", "Em desenvolvimento"),
         ("T16", "Homologado", "fechar_release", "Agent", "Pronto"),
         ("T17a", "Pronto para Dev", "invalidar_aprovacao", "Guard", "Design"),
         ("T17b", "Em desenvolvimento", "invalidar_aprovacao", "Guard", "Design"),
@@ -178,7 +183,7 @@ def test_missing_t7_alan_fails(tmp_path, fsm):
         validate_fsm(load_fsm(path))
 
 
-@pytest.mark.parametrize("tid", ["T1", "T15"])
+@pytest.mark.parametrize("tid", ["T1", "T15", "T18"])
 def test_missing_alan_on_human_gates_fails(tmp_path, fsm, tid):
     data = copy.deepcopy(fsm)
     for row in data["transitions"]:
@@ -331,3 +336,61 @@ def test_t17b_from_em_desenvolvimento(fsm):
     assert result.result == "transition"
     assert result.to == "Design"
     assert result.reason == "T17b"
+
+
+@pytest.mark.parametrize("motivo", [False, None])
+def test_t18_without_visible_reason_stays_done(fsm, motivo):
+    result = evaluate(
+        fsm,
+        EvalContext(
+            state="Done",
+            event="nao_homologar",
+            actor="Alan",
+            motivo_visivel=motivo,
+        ),
+    )
+    assert result.result == "reject"
+    assert result.to is None
+    assert result.state == "Done"
+    assert (result.reason or "").startswith("guard:")
+
+
+def test_t18_agent_rejected(fsm):
+    result = evaluate(
+        fsm,
+        EvalContext(
+            state="Done",
+            event="nao_homologar",
+            actor="Agent",
+            motivo_visivel=True,
+        ),
+    )
+    assert result.result == "reject"
+    assert result.reason == "actor"
+    assert result.to is None
+    assert result.state == "Done"
+
+
+def test_t15_t6_t7_unchanged_homologado_has_no_inverse(fsm):
+    by_id = {row["id"]: row for row in fsm["transitions"]}
+    t15 = by_id["T15"]
+    assert t15["from"] == "Done" and t15["event"] == "homologar" and t15["to"] == "Homologado"
+    assert t15["actor"] == "Alan"
+    t6 = by_id["T6"]
+    assert t6["from"] == "Aprovação de Design" and t6["event"] == "devolver_design" and t6["to"] == "Design"
+    t7 = by_id["T7"]
+    assert t7["from"] == "Aprovação de Design" and t7["event"] == "aprovar_design" and t7["to"] == "Pronto para Dev"
+    for row in expand_transitions(fsm):
+        if row.get("from") == "Homologado":
+            assert row.get("to") in {"Pronto", "Cancelado"}
+        assert row.get("event") != "devolver_homologacao"
+    t18 = by_id["T18"]
+    assert t18["from"] == "Done"
+    assert t18["event"] == "nao_homologar"
+    assert t18["to"] == "Em desenvolvimento"
+    assert t18["to"] not in {"Cancelado", "QA", "Design", "Homologado"}
+    assert fsm["enabled_tools"]["Done"] == []
+    assert fsm["enabled_events"]["Done"] == ["homologar", "nao_homologar", "cancelar"]
+    i2 = next(item for item in fsm["invariants"] if item["id"] == "I2")
+    assert "T18" in i2["text"]
+    assert NAMED_GUARDS["motivo_visivel"] == "motivo_visivel"

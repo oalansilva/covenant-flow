@@ -236,6 +236,34 @@ def test_n2_client_labelled_grill_copy() -> None:
     assert "O **pai** spawna" in cf
     assert "todas as options" in cf
     assert "não colapsa" in cf
+    assert "Cliente dsh: dsh não spawna filho grill." in cf
+
+
+def test_design_cliente_dsh_spawns_author_and_grill_line_stays() -> None:
+    text = ALAN_WORKFLOW.read_text(encoding="utf-8")
+    design_line = (
+        "Cliente dsh: em Design, root spawna 1 Design-autor; "
+        "o pai não escreve OpenSpec no próprio turno; "
+        "a excepção grill não se aplica."
+    )
+    assert design_line in text
+    filhos = _heading_section(text, "## Um chat por card")
+    assert design_line in filhos
+    grill = _heading_section(text, "## Grill-card")
+    assert "Cliente dsh: dsh não spawna filho grill." in grill
+    assert design_line not in grill
+    agents = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+    nonempty = [ln for ln in agents.splitlines() if ln.strip()]
+    assert len(nonempty) <= 40
+    for rel in (
+        (".dsh", "skills", "covenant-flow", "SKILL.md"),
+        (".grok", "skills", "covenant-flow", "SKILL.md"),
+        (".opencode", "skills", "covenant-flow", "SKILL.md"),
+    ):
+        stub = REPO.joinpath(*rel).read_text(encoding="utf-8")
+        body = stub.split("---", 2)[2]
+        assert len([ln for ln in body.splitlines() if ln.strip()]) <= 8
+        assert "MUST Read" in stub
 
     guard_src = (ROOT / "guard.py").read_text(encoding="utf-8")
     for needle in ("grill-card", "dsh_grill_spawn", "isGrillShapedSpawn"):

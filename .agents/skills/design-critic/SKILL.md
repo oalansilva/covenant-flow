@@ -13,7 +13,7 @@ Conduzir a entrega de design sem substituir a aprovação humana de Alan.
 2. `UI impact: none` **não** autoriza pular colunas. Só reduz o peso da evidência (Prototype pode ser N/A explícito).
 3. Pedidos como `implemente`, `pode codar` ou equivalentes **não** autorizam pular este gate.
 4. OpenSpec `design.md` ≠ coluna Kanban `Design`: o artefato pode existir cedo, mas o card ainda precisa visitar as colunas e aguardar Alan em `Aprovação de Design`.
-5. **Fidelidade ao sistema atual (quando a tela já existir):** o protótipo MUST partir da UI real em DEV/produção (shell, nav, tokens, densidade, componentes) e redesenhar só o delta do card. Proibido inventar layout paralelo. Se a tela ainda não existir, desenhar a nova superfície alinhada a `DESIGN.md`, à folha de tokens e ao shell autenticado do app.
+5. **Clone da página viva:** em superfície já existente — rota autenticada no catálogo (`/monitor`, `/favorites`, `/combo/discovery`, `/combo/select`) **ou** HTML público vigente (chave `landing` = landing v4 em `https://criptofarol.com.br/`) — o URL canónico do proto (`…/prototypes/<slug>/` → `index.html`) MUST clonar essa página viva e aplicar só o delta do card. Nunca «6 estados» / painel ANTES/DEPOIS como URL canónico, mesmo com clone noutro ficheiro da pasta. Copy visível (landing / Ajuda / Perfil) = a página mudou; Prototype N/A é recusado. N superfícies existentes: URL principal = página primária clonada; as outras com copy visível têm URLs extra de clone — nunca um painel das N no index. Fidelidade bloqueante = landmarks da chave (catálogo `scripts/process-fsm/route-landmarks.yaml`), não sidebar 224px nem tokens `--bg-*`. Folha de tokens = chrome; **não** substitui o clone da página. Se a tela ainda não existir, desenhar a nova superfície alinhada a `DESIGN.md`, à folha de tokens e ao shell autenticado do app.
 6. **Um chat `#<id>`.** Recusar executar Apply/Review/Release neste transcript (sem spawn Apply até `Pronto para Dev`). Sem pedir outro chat. Sem evento FSM. Sem dual-write da lei em `.grok/`.
 
 ## Avaliação vs emissão
@@ -29,7 +29,7 @@ Conduzir a entrega de design sem substituir a aprovação humana de Alan.
 2. Confirmar `Status=Design`. Declarar `UI impact: affected` ou `UI impact: none` com justificativa não vazia.
 3. O **pai** spawna um filho Design-autor (mesmo modelo, prompt autocontido, sem transcript) para criar o scaffold OpenSpec e os artifacts. O pai **não** escreve `design.md`/protótipo, salvo depois de A/B: **somente** `## Design Critique`. Não editar código de produção enquanto `Status=Design`.
 4. A crítica usa `Task` / `spawn_subagent` isolada com inherit de **modelo**, prompt autocontido, **sem inherit de transcript**, disparada pelo **pai** após os artefatos (não nested no filho autor). Critics MAY escrever **apenas** `.impeccable/critique/**`. MUST NOT editar `design.md`, HTML de protótipo ou produto. P0/P1 abertos → pai re-despacha o filho autor com os achados no prompt; o pai não faz polish. `process_event submeter_design` é só o pai.
-5. Se a superfície já existir, clonar a tela atual (folha de tokens + rota); não mandar HTML fonte no prompt dos critics.
+5. Se a superfície já existir, clonar a página viva autenticada **ou** o HTML público `landing` (URL canónico = `index.html`; nunca painel ANTES/DEPOIS), não só a folha de tokens; não mandar HTML fonte no prompt dos critics.
 
 ## Integração Impeccable no Cursor
 
@@ -41,7 +41,7 @@ Antes do `PASS`, o **filho autor** executa shape/protótipo/polish e o **pai** d
 
 - Executar `node .agents/skills/impeccable/scripts/context.mjs --target <surface>` uma vez por sessão. Conservar `PRODUCT.md`. Usar a folha de tokens para clone+delta. `DESIGN.md` permanece a autoridade visual canônica e **não pode ser reescrito**.
 - Usar a skill Impeccable `shape` para brief, direção, escopo, estados, interação e restrições **antes** de editar a direção visual. O brief **integral** vai para o snapshot; `design.md` guarda só recorte (audience, outcome, direction, scope).
-- O **pai** dispara Assessment A e B em Tasks distintas (não o filho autor), mesmo modelo, prompt autocontido (URL, digest, screenshot, folha, rubrica, contrato de saída). Sem transcript do pai. Detector/browser de B; o filho autor não nested-spawna A/B.
+- O **pai** dispara Assessment A e B em Tasks distintas (não o filho autor), mesmo modelo, prompt autocontido (URL viva da rota + URL do proto quando houver sessão, digest, screenshot, folha, rubrica, contrato de saída). Sem transcript do pai. Detector/browser de B; o filho autor não nested-spawna A/B. Com sessão, Playwright (ou equivalente) abre a URL viva da rota **e** a URL do proto; P0 se faltar landmark da listagem. Sem sessão, `/login` **não** é a rota — chrome de login não é evidência de clone nem autoriza PASS. Toggle Antes/Depois MUST mudar a vista (Antes = clone, Depois = clone+delta); `aria-pressed` sem mudança de markup = P0 se for a única “prova” de clone. T5 não verifica o toggle (offline).
 - Executar audit e aplicar somente `harden`, `adapt` ou `clarify` quando houver achado correspondente. Polish = **patch** no arquivo do protótipo (`StrReplace`); proibido reemitir o HTML inteiro na LLM.
 - Repetir o gate de navegador real desktop/mobile e os asserts depois do polish. O hook Cursor pode alertar durante a edição, mas não substitui a crítica, o audit nem a validação final.
 
@@ -60,12 +60,13 @@ Estas etapas são do **filho autor**. O pai não as executa.
 1. Explicitar no `design.md` o problema, o usuário afetado, a hipótese de produto, o resultado esperado e `## Apply contract`.
 2. Shape confirma direção antes do protótipo. Brief integral no snapshot, não no `design.md`.
 3. **Base do protótipo (clone+delta):**
-   - Tela já existente: copiar shell atual (sidebar 224px, header workspace, tokens `--bg-*`/`--accent-primary`/`--text-*`/`--border-default`, Inter, nav autenticada real) e aplicar só a mudança do card.
-   - Tela nova: shell autenticado + folha de tokens; não usar landing genérica.
+   - Tela já existente: **Clone da página viva:** em superfície já existente — rota autenticada no catálogo (`/monitor`, `/favorites`, `/combo/discovery`, `/combo/select`) **ou** HTML público vigente (chave `landing` = landing v4 em `https://criptofarol.com.br/`) — o URL canónico do proto (`…/prototypes/<slug>/` → `index.html`) MUST clonar essa página viva e aplicar só o delta do card. Nunca «6 estados» / painel ANTES/DEPOIS como URL canónico, mesmo com clone noutro ficheiro da pasta. Copy visível (landing / Ajuda / Perfil) = a página mudou; Prototype N/A é recusado. N superfícies existentes: URL principal = página primária clonada; as outras com copy visível têm URLs extra de clone — nunca um painel das N no index. Landmarks do catálogo são a prova bloqueante de clone. Sidebar 224px, tokens `--bg-*`/`--accent-primary`/`--text-*`/`--border-default`, Inter e nav autenticada são chrome — **não** bastam (e não substituem landmarks de `landing`).
+   - Anti-padrão P0 (produto lista+detalhe): “N estados ⇒ N cards numa grelha” (galeria de estados no lugar da listagem+detalhe). Combo `/combo/select` é grelha de templates ao vivo — não é esse anti-padrão se os landmarks do catálogo (`Available Templates`, `.combo-page`) estiverem presentes. Painel ANTES/DEPOIS como `index.html` é o mesmo P0 para qualquer superfície existente, incluindo landing pública, mesmo com clone-irmão.
+   - Tela nova: shell autenticado + folha de tokens; não usar landing genérica. Isenta de catálogo/`copied` só com `surface: new` ou `live_route: N/A` justificado.
    - Remoção de UI existente: mostrar a tela/shell atual **sem** o elemento removido (delta negativo), não um mock abstrato.
 4. **HTML nunca fica no Gist, no chat, nem no `design.md`.** Design/critics usam URL + screenshot + digest. Apply continua lendo o arquivo do disco (`frontend/public/prototypes/<slug>/`) como spec de layout (#530). Para protótipo HTML neste repo:
    - publicar em `frontend/public/prototypes/<change-or-card-slug>/` (entrada preferencial `index.html`);
-   - servir na URL DEV navegável `https://dev.criptofarol.com.br/prototypes/<change-or-card-slug>/`. No host Cripto, `/prototypes*` não passa pelo preview SPA: o unit `criptofarol-dev-prototypes` serve o HTML do worktree/`public`/`dist`. Não copiar para `source` nem rebuild do frontend DEV só para o link público;
+   - servir na URL DEV navegável do consumidor (overlay `environments.dev.url` + path de protótipos). Não copiar para o source canónico nem rebuild só para o link público;
    - no comentário do card: bloco OpenSpec = só Markdown do Gist; bloco **Protótipo navegável** = link HTTP; bloco **Snapshot Impeccable** = path (e blob URL da branch quando existir);
    - usar `publish-openspec-card-artifacts.sh --prototype-url <url> --snapshot-path <path>` (o script não envia `prototype/**` nem `.impeccable/critique/` ao Gist).
 5. Registrar em `## Prototype`: URL HTTP, caminho versionado, digest, desktop/mobile, base usada, fluxos/estados, delta. Sem fonte HTML.
@@ -98,7 +99,7 @@ Depois da primeira entrega de design, A avalia com a rubrica; B corre detector +
 
 Com UI, cobrir:
 
-- **Fidelidade (se tela já existir):** o protótipo ainda parece o produto atual? Shell/nav/tokens batem com DEV? O delta é óbvio?
+- **Fidelidade (se tela já existir):** o protótipo clona a rota autenticada **ou** o HTML público `landing` no `index.html` (landmarks de listagem/cabeçalhos/ações/FAQ/CTA), não só shell 224px / `--bg-*`? Galeria de estados em lista+detalhe **ou** painel ANTES/DEPOIS como URL canónico é P0, mesmo com clone-irmão. Com sessão, A/B abriu URL viva **e** proto? `/login` não conta como a rota. Toggle Antes/Depois muda a vista? O delta é óbvio?
 - **Produto:** problema, usuário, hipótese, valor e aderência ao escopo.
 - **UX:** hierarquia, fluxo, carga cognitiva, clareza de ações e prevenção/recuperação de erro.
 - **Acessibilidade:** teclado, foco, nomes acessíveis, contraste, semântica e equivalência ao drag-and-drop.

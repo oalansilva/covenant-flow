@@ -24,6 +24,7 @@ pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 TODO_STUB = "Próximo evento = iniciar_design. Não apply. Não /opsx:new ainda."
 HOMOLOGADO_STUB = "T16 = process_event fechar_release com M_lote live. Chat ≠ δ."
+QA_STUB = "MUST NOT process_event"
 PLAYBOOK = ("release-guard", "subir lote", "deploy PROD")
 UNBOUND_DUMP = ("release-guard", "deploy PROD")
 OLD_PLAYBOOK_ORDER = "Não carregue playbook de release."
@@ -179,6 +180,59 @@ def test_page_uses_yaml_stubs():
     assert HOMOLOGADO_STUB in str(fsm["context_file"]["Homologado"])
     assert "grill-card" in str(fsm["context_file"]["Em Refinamento"])
     assert "sintetizar" in str(fsm["context_file"]["Design"])
+    qa = str(fsm["context_file"]["QA"])
+    assert QA_STUB in qa
+    assert "T14" in qa
+    assert "no_pr" in qa
+    assert "sync: dirty" in qa
+
+
+def test_design_stub_names_openspec_prototype_allow():
+    fsm = load_fsm()
+    stub = str(fsm["context_file"]["Design"])
+    assert "sintetizar" in stub
+    assert "não reentrevistar" in stub
+    assert "OpenSpec/protótipo allow" in stub
+    assert "Write produto deny" in stub
+    assert stub.strip() != "Write produto deny"
+    assert list(fsm["enabled_tools"]["Design"]) == [
+        "write_openspec",
+        "write_prototype",
+        "gist",
+        "task_critique",
+    ]
+
+
+def test_design_page_carries_openspec_allow_carveout():
+    result = page(
+        cwd=".",
+        resolve_fn=_resolve("613", "card-899-dsh-design-moore-stub"),
+        status_provider=_provider("Design"),
+    )
+    ctx = result["additional_context"]
+    assert "sintetizar" in ctx
+    assert "não reentrevistar" in ctx
+    assert "OpenSpec/protótipo allow" in ctx
+    assert "Write produto deny" in ctx
+    assert "q=Design" in ctx
+    assert "enabled_events" in ctx
+    assert "enabled_tools" not in ctx
+    assert _line_count(ctx) <= 20
+
+
+def test_qa_page_has_closeout_stub():
+    result = page(
+        cwd=".",
+        resolve_fn=_resolve("613", "card-613-process-fsm-paging"),
+        status_provider=_provider("QA"),
+    )
+    ctx = result["additional_context"]
+    assert QA_STUB in ctx
+    assert "T14" in ctx
+    assert "no_pr" in ctx
+    assert "sync: dirty" in ctx
+    assert "pending" in ctx
+    assert _line_count(ctx) <= 20
 
 
 def _harness_body_lines() -> list[str]:
@@ -266,6 +320,26 @@ def test_skill_priority_anchor():
     assert "Write de produto continua deny" in release
 
 
+def test_qa_closeout_skill_is_client_labeled():
+    text = (REPO / ".cursor" / "skills" / "covenant-flow" / "SKILL.md").read_text(encoding="utf-8")
+    assert "Cursor" in text
+    assert "dsh" in text
+    assert "MUST NOT" in text and "process_event" in text
+    assert "mesmo turno" in text
+    assert "qa-gate" in text
+    assert "no_pr" in text
+    assert "sync: dirty" in text
+    dsh = (REPO / ".dsh" / "skills" / "covenant-flow" / "SKILL.md").read_text(encoding="utf-8")
+    grok = (REPO / ".grok" / "skills" / "covenant-flow" / "SKILL.md").read_text(encoding="utf-8")
+    for stub in (dsh, grok):
+        body = stub.split("---", 2)[2]
+        assert len([ln for ln in body.splitlines() if ln.strip()]) <= 8
+        assert "Em Refinamento → Todo → Design" not in stub
+    plugin = (REPO / ".dsh" / "plugin" / "process-fsm-guard.js").read_text(encoding="utf-8")
+    assert "covenant-flow:moore" in plugin
+    assert "T0–T17" not in plugin and "T0-T17" not in plugin
+
+
 def test_hooks_json_session_start():
     hooks = json.loads((REPO / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
     start = hooks["hooks"]["sessionStart"]
@@ -275,12 +349,31 @@ def test_hooks_json_session_start():
     assert pre[0]["command"] == ".cursor/hooks/process-fsm-guard.sh"
     assert pre[0]["failClosed"] is True
     assert hooks["hooks"]["beforeShellExecution"][0]["command"] == ".cursor/hooks/process-fsm-guard.sh"
-    assert hooks["hooks"]["afterFileEdit"][0]["command"].endswith("impeccable.sh afterFileEdit")
-    assert hooks["hooks"]["stop"][0]["command"].endswith("impeccable.sh stop")
+    after = hooks["hooks"]["afterFileEdit"][0]["command"]
+    stop = hooks["hooks"]["stop"][0]["command"]
+    assert ".cursor/hooks/impeccable.sh" in after
+    assert "afterFileEdit" in after
+    assert ".cursor/hooks/impeccable.sh" in stop
+    assert " stop" in f" {stop}"
+    assert start[0]["command"] == ".cursor/hooks/process-fsm-session-start.sh"
+    assert pre[0]["command"] == ".cursor/hooks/process-fsm-guard.sh"
+    assert hooks["hooks"]["beforeShellExecution"][0]["command"] == ".cursor/hooks/process-fsm-guard.sh"
     assert (REPO / ".cursor" / "hooks" / "impeccable.sh").is_file()
     adapter = REPO / ".cursor" / "hooks" / "process-fsm-session-start.sh"
     assert adapter.is_file()
     assert adapter.stat().st_mode & stat.S_IXUSR
+    destape = hooks["hooks"]["subagentStop"]
+    assert destape[0]["command"] == ".cursor/hooks/process-fsm-subagent-stop.sh"
+    matcher = destape[0]["matcher"]
+    assert "generalPurpose" in matcher
+    assert "diff-reviewer" in matcher
+    assert "code-reviewer" in matcher
+    assert destape[0]["loop_limit"] == 32
+    assert destape[0].get("failClosed") is not True
+    assert "subagentStart" not in hooks["hooks"]
+    stop_adapter = REPO / ".cursor" / "hooks" / "process-fsm-subagent-stop.sh"
+    assert stop_adapter.is_file()
+    assert stop_adapter.stat().st_mode & stat.S_IXUSR
 
 
 def test_session_start_adapter_prefers_venv():
@@ -364,8 +457,8 @@ def test_agents_extra_grok_stubs_point_at_agents_skills():
     errors = stub_errors()
     assert errors == []
     critic = (REPO / ".grok" / "skills" / "design-critic" / "SKILL.md").read_text(encoding="utf-8")
-    assert ".agents/skills/design-critic/SKILL.md" in critic
-    assert ".cursor/skills/design-critic" not in critic
+    assert ".cursor/skills/design-critic/SKILL.md" in critic
+    assert ".agents/skills/design-critic" not in critic
     body = critic.split("---", 2)[2]
     assert len([ln for ln in body.splitlines() if ln.strip()]) <= 8
     assert "Em Refinamento → Todo → Design" not in critic

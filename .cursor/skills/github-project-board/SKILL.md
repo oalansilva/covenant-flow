@@ -39,12 +39,26 @@ done
 ## Convenção de status (este projeto)
 
 - O campo `Status` e a fonte principal das colunas visuais.
-- No **Project 1 / Cripto**, o caminho obrigatório e `Em Refinamento -> Todo -> Design -> Aprovação de Design -> Pronto para Dev -> Em desenvolvimento -> Code Review -> QA -> Done -> Homologado -> Pronto`. **Nao existe bypass** dessas colunas; `UI impact: none` e pedidos `implemente` nao autorizam pular. So Alan move `Aprovação de Design -> Pronto para Dev` e `Done -> Homologado`. Homologado -> Pronto e `process_event fechar_release` (T16). `Todo` nao e codigo.
+- No **Project 1 / Cripto**, o caminho obrigatório e `Em Refinamento -> Todo -> Design -> Aprovação de Design -> Pronto para Dev -> Em desenvolvimento -> Code Review -> QA -> Done -> Homologado -> Pronto`. **Nao existe bypass** dessas colunas; `UI impact: none` e pedidos `implemente` nao autorizam pular. So Alan move `Aprovação de Design -> Pronto para Dev` e, em Done, o par `homologar` (`Done -> Homologado`) / `nao_homologar` (`Done -> Em desenvolvimento`, T18). Homologado nao tem aresta inversa. Homologado -> Pronto e `process_event fechar_release` (T16). `Todo` nao e codigo. Arraste Done→Em desenvolvimento sem comentário `Não homologar:` + texto e fora-de-δ: restaurar Done e exigir o motivo; nao inventar UI no board.
 - `Em Refinamento` e a entrada de todo card novo **e** a grelha da história (`grill-card` no body do issue). Alan escolhe/prioriza/cancela. O agente **nao** arrasta T1 (`Em Refinamento -> Todo`). Sem `CONTEXT.md`.
 - `Done` e fechamento tecnico; fechamento final e `Pronto` (exige deploy PROD no cripto).
 - `Cancelado` e terminal, inclusive a partir de `Em Refinamento`.
 - Se o Project tiver campo `Fluxo`, trate-o como substatus/legado. `Status` prevalece.
 - Nao misture cards entre boards de repos diferentes.
+
+## Superfície issue (REST)
+
+Body, comentários e labels: `gh api repos/<owner>/<repo>/issues/<n>` GET/PATCH (ou `gh issue edit`). MUST NOT `gh issue view`.
+
+## Status de um card (pontual)
+
+Status / item id de **um** card N: query GraphQL pontual `repository.issue(number:N).projectItems` (a mesma família de `github_status_provider` / `_item_id_for_issue`). MUST NOT `gh project item-list` to operate one card. GraphQL remaining=0 ou `errors[].type=RATE_LIMIT` (HTTP 200 inclusive): falha na hora com o reset dos cabeçalhos. MUST NOT esperar o reset no mesmo comando. MUST NOT retry. MUST NOT inventar REST de coluna do Project. REST `GET /rate_limit` remaining=5000 MUST NOT autorizar GraphQL.
+
+```bash
+gh api graphql --include -f query='query($n:Int!){repository(owner:"OWNER",name:"REPO"){issue(number:$n){projectItems(first:20){nodes{id project{number owner{...on User{login}}} fieldValueByName(name:"Status"){...on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}' -F n=N
+```
+
+Fotografia completa do board (`gh project item-list`) fica só para o fecho de lote (#509, uma por run) e `/kaizen` completo — não para operar um card.
 
 ## Quick start
 
@@ -93,13 +107,15 @@ gh project view "$PROJECT_NUMBER" --owner "$OWNER" --web
 gh project field-list "$PROJECT_NUMBER" --owner "$OWNER"
 ```
 
-- Listar itens:
+- Listar itens (fotografia completa do board; MUST NOT para operar um card N):
 
 ```bash
 gh project item-list "$PROJECT_NUMBER" --owner "$OWNER" --limit 200
 ```
 
-- Filtrar itens por título no JSON:
+- Status ou ITEM_ID de **um** card: query pontual acima. MUST NOT `gh project item-list` to operate one card.
+
+- Filtrar o board inteiro por título (não é o caminho para um card N):
 
 ```bash
 gh project item-list "$PROJECT_NUMBER" --owner "$OWNER" --format json \
@@ -114,14 +130,9 @@ gh project item-add "$PROJECT_NUMBER" --owner "$OWNER" --url "https://github.com
 
 - Atualizar campo (ex.: Status):
 
-1. Descubra IDs do projeto e do campo:
-
-```bash
-gh project view "$PROJECT_NUMBER" --owner "$OWNER" --format json
-gh project field-list "$PROJECT_NUMBER" --owner "$OWNER" --format json
-```
-
-2. Edite o item:
+1. Descubra IDs do projeto e do campo (`gh project view` / `field-list`).
+2. Descubra o ITEM_ID do card N com a query GraphQL **pontual** (acima). MUST NOT `gh project item-list` to operate one card.
+3. Edite o item:
 
 ```bash
 gh project item-edit \

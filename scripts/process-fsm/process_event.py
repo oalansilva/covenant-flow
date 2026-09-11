@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from design_clone_gate import clone_gate_ok  # noqa: E402
 from overlay import (  # noqa: E402
     board_owner_number,
     board_project_id,
@@ -30,9 +31,24 @@ from fsm import (  # noqa: E402
     evaluate,
     load_fsm,
 )
+from graphql_quota import (  # noqa: E402
+    GraphQLQuotaError,
+    enforce_graphql_quota,
+    parse_include_output,
+    raise_if_cached_exhausted,
+    write_cache,
+)
 from guard import github_status_provider  # noqa: E402
 from resolve import UNBOUND, resolve  # noqa: E402
-from t14 import LiveT14Runner, T14Error, T14Runner, measure_checks_green, run_t14  # noqa: E402
+from t14 import (  # noqa: E402
+    LiveT14Runner,
+    T14Error,
+    T14Runner,
+    _pr_list_json,
+    classify_qa_gate,
+    measure_checks_green,
+    run_t14,
+)
 from t16 import (  # noqa: E402
     LiveT16Closer,
     T16Closer,
@@ -46,7 +62,9 @@ from t16 import (  # noqa: E402
 REPO_ROOT = ROOT.parents[1]
 AMBIENTES = "covenant-flow-environments"
 RELEASE_GUARD = "release-guard"
-HUMAN_EVENTS = frozenset({"priorizar", "aprovar_design", "homologar", "devolver_design", "cancelar"})
+HUMAN_EVENTS = frozenset(
+    {"priorizar", "aprovar_design", "homologar", "nao_homologar", "devolver_design", "cancelar"}
+)
 I4_EVENTS = frozenset({"iniciar_apply", "pedir_review"})
 CHANGE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 EVENT_GUARDS = {
@@ -75,6 +93,7 @@ class GhBoardMover:
     def set_status(self, issue_number: int, to: str) -> None:
         import subprocess
 
+        raise_if_cached_exhausted()
         overlay = load_overlay(REPO_ROOT)
         option = status_options(overlay).get(to)
         field = status_field_id(overlay)
@@ -82,6 +101,8 @@ class GhBoardMover:
         if option is None or not field or not project_id:
             raise ValueError(f"unknown Status {to!r} or overlay board ids missing")
         item_id = _item_id_for_issue(issue_number)
+        env = os.environ.copy()
+        env["GH_DEBUG"] = "api"
         try:
             proc = subprocess.run(
                 [
@@ -101,17 +122,22 @@ class GhBoardMover:
                 text=True,
                 check=False,
                 timeout=20,
+                env=env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError(str(exc)) from exc
+        captured = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        quota = parse_include_output(captured)
+        write_cache(quota)
+        enforce_graphql_quota(quota)
         if proc.returncode != 0:
             raise RuntimeError((proc.stderr or proc.stdout or "item-edit failed").strip())
 
 
 def _item_id_for_issue(issue_number: int) -> str:
-    import json as json_mod
     import subprocess
 
+    raise_if_cached_exhausted()
     overlay = load_overlay(REPO_ROOT)
     owner, repo_name = repo_owner_name(overlay)
     board_owner, board_number = board_owner_number(overlay)
@@ -123,7 +149,16 @@ def _item_id_for_issue(issue_number: int) -> str:
     )
     try:
         proc = subprocess.run(
-            ["gh", "api", "graphql", "-f", f"query={query}", "-F", f"n={issue_number}"],
+            [
+                "gh",
+                "api",
+                "graphql",
+                "--include",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"n={issue_number}",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -131,12 +166,11 @@ def _item_id_for_issue(issue_number: int) -> str:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(str(exc)) from exc
-    if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or "graphql failed").strip())
-    try:
-        data = json_mod.loads(proc.stdout or "{}")
-    except json_mod.JSONDecodeError as exc:
-        raise RuntimeError("graphql json") from exc
+    captured = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    quota = parse_include_output(captured)
+    write_cache(quota)
+    enforce_graphql_quota(quota)
+    data = quota.body or {}
     nodes = (
         (((data.get("data") or {}).get("repository") or {}).get("issue") or {}).get("projectItems") or {}
     ).get("nodes") or []
@@ -147,6 +181,8 @@ def _item_id_for_issue(issue_number: int) -> str:
             item_id = node.get("id")
             if isinstance(item_id, str) and item_id:
                 return item_id
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or "graphql failed").strip())
     raise RuntimeError(f"issue {issue_number} not on Project {board_number}")
 
 
@@ -154,20 +190,38 @@ def _unbound(bound: Any) -> bool:
     return bound in (None, "", UNBOUND)
 
 
+def _quota_reject(exc: GraphQLQuotaError, state: str | None = None) -> dict[str, Any]:
+    return _payload(
+        result="reject",
+        state=state,
+        to=None,
+        reason="graphql_quota",
+        message=str(exc),
+    )
+
+
 def _safe_move(mover: BoardMover, issue_number: int, to: str) -> dict[str, Any] | None:
     try:
         mover.set_status(issue_number, to)
+    except GraphQLQuotaError as exc:
+        return _quota_reject(exc)
     except (RuntimeError, ValueError, OSError) as exc:
         return _payload(result="reject", state=None, to=None, reason="move_failed", message=str(exc))
     return None
 
 
-def files_g_design(change_dir: Path) -> bool:
+def files_g_design(
+    change_dir: Path,
+    prototype_dir: Path | None = None,
+    repo: Path | None = None,
+) -> bool:
     needed = [change_dir / "proposal.md", change_dir / "design.md", change_dir / "tasks.md"]
     if not all(path.is_file() for path in needed):
         return False
     specs = change_dir / "specs"
-    return bool(specs.is_dir() and any(specs.rglob("*.md")))
+    if not (specs.is_dir() and any(specs.rglob("*.md"))):
+        return False
+    return clone_gate_ok(change_dir, prototype_dir, repo or REPO_ROOT)
 
 
 def compute_digest(change_dir: Path, prototype_dir: Path | None) -> str:
@@ -247,6 +301,8 @@ def process_event(
     m_lote_measurer: Callable[[], bool] | None = None,
     checks_green: bool | None = None,
     checks_green_measurer: Callable[..., bool] | None = None,
+    checks_green_classifier: Callable[..., dict[str, Any]] | None = None,
+    pr_lister: Callable[..., list] | None = None,
     t14_runner: T14Runner | None = None,
     t16_closer: T16Closer | None = None,
     status_provider: Callable[[str | None], str | None] | None = None,
@@ -274,8 +330,14 @@ def process_event(
     q = status if status is not None else resolved.get("q")
     git = q_git if q_git is not None else resolved.get("q_git")
     bound = bound_card if bound_card is not None else resolved.get("bound_card")
+    if event in HUMAN_EVENTS:
+        return _payload(result="reject", state=q, to=None, reason="actor")
+    provider = status_provider if status_provider is not None else github_status_provider
     if q is None:
-        q = github_status_provider(None if _unbound(bound) else str(bound))
+        try:
+            q = provider(None if _unbound(bound) else str(bound))
+        except GraphQLQuotaError as exc:
+            return _quota_reject(exc)
     match = CARD_GIT_RE.match(str(git or ""))
     parsed_package: list[int] | None
     if package_cards is not None:
@@ -320,7 +382,11 @@ def process_event(
         resolved_proto = proto if proto.is_dir() else None
 
     if g_design is None:
-        g_design = files_g_design(resolved_change_dir) if resolved_change_dir else False
+        g_design = (
+            files_g_design(resolved_change_dir, resolved_proto)
+            if resolved_change_dir
+            else False
+        )
     if digest_changed is None:
         digest_changed = measure_digest_changed(resolved_change_dir, resolved_proto, q)
     if event == "fechar_release" and m_lote is None:
@@ -333,8 +399,30 @@ def process_event(
                 m_lote = False
     elif m_lote is None:
         m_lote = False
+    classified_reason: str | None = None
+    if event == "aceitar_sha":
+        rows: list = []
+        if pr_lister is not None:
+            try:
+                rows = list(pr_lister(git) or [])
+            except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
+                rows = []
+        if not rows:
+            return _payload(result="reject", state=q, to=None, reason="no_pr")
     if event == "integrar_develop" and checks_green is None:
-        if checks_green_measurer is None:
+        if checks_green_classifier is not None:
+            try:
+                classified = checks_green_classifier(bound, git)
+            except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
+                classified = {"ok": False, "reason": "qa-gate failed"}
+            if isinstance(classified, dict):
+                checks_green = bool(classified.get("ok"))
+                token = classified.get("reason")
+                classified_reason = str(token) if token else None
+            else:
+                checks_green = False
+                classified_reason = "qa-gate failed"
+        elif checks_green_measurer is None:
             checks_green = False
         else:
             try:
@@ -347,6 +435,8 @@ def process_event(
         provider = status_provider if status_provider is not None else github_status_provider
         try:
             homologado_ids, _pronto_ids = classify_package(parsed_package or [], provider)
+        except GraphQLQuotaError as exc:
+            return _quota_reject(exc, state=q)
         except T16Error:
             return _payload(result="reject", state=q, to=None, reason="I9")
 
@@ -407,11 +497,14 @@ def process_event(
         } else None
         if event == "request_implement":
             extra = enabled
+        reason = result.reason
+        if event == "integrar_develop" and reason == "guard:checks_green" and classified_reason:
+            reason = classified_reason
         return _payload(
             result="reject",
             state=q,
             to=None,
-            reason=result.reason,
+            reason=reason,
             enabled=extra,
             message=message,
         )
@@ -422,8 +515,13 @@ def process_event(
             return _payload(result="reject", state=q, to=None, reason="I8")
         try:
             run_t14(t14_runner, q_git=str(git), bound_card=str(bound))
-        except T14Error:
-            return _payload(result="reject", state=q, to=None, reason="I8")
+        except T14Error as exc:
+            text = str(exc)
+            if "sync: dirty" in text:
+                return _payload(result="reject", state=q, to=None, reason="sync: dirty", message=text)
+            if "squash: no PR" in text:
+                return _payload(result="reject", state=q, to=None, reason="no_pr", message=text)
+            return _payload(result="reject", state=q, to=None, reason="I8", message=text)
         if mover is None or issue_number is None:
             return _payload(result="transition", state=q, to=result.to, reason=result.reason, message=message)
         failed = _safe_move(mover, issue_number, result.to or "")
@@ -481,6 +579,8 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         mover=None if args.dry_run else GhBoardMover(),
         checks_green_measurer=measure_checks_green,
+        checks_green_classifier=classify_qa_gate,
+        pr_lister=lambda q_git: _pr_list_json(str(q_git or ""), fields="number,headRefOid"),
         t14_runner=None if args.dry_run else LiveT14Runner(),
         m_lote_measurer=measure_m_lote,
         t16_closer=None if args.dry_run else LiveT16Closer(),

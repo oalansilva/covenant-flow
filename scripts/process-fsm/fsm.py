@@ -30,6 +30,7 @@ LEGAL_SIGMA = (
     "falha_codigo",
     "integrar_develop",
     "homologar",
+    "nao_homologar",
     "fechar_release",
     "invalidar_aprovacao",
 )
@@ -53,12 +54,13 @@ EXPECTED_MATRIX = (
     ("T13", "QA", "falha_codigo", "Em desenvolvimento"),
     ("T14", "QA", "integrar_develop", "Done"),
     ("T15", "Done", "homologar", "Homologado"),
+    ("T18", "Done", "nao_homologar", "Em desenvolvimento"),
     ("T16", "Homologado", "fechar_release", "Pronto"),
     ("T17a", "Pronto para Dev", "invalidar_aprovacao", "Design"),
     ("T17b", "Em desenvolvimento", "invalidar_aprovacao", "Design"),
 )
 
-ALAN_GATES = {"T1": "priorizar", "T7": "aprovar_design", "T15": "homologar"}
+ALAN_GATES = {"T1": "priorizar", "T7": "aprovar_design", "T15": "homologar", "T18": "nao_homologar"}
 AGENT_GATES = {"T16": "fechar_release"}
 
 CARD_GIT_RE = re.compile(r"^card-(\d+)(?:-.*)?$")
@@ -245,6 +247,7 @@ class EvalContext:
     reviewers_ok: bool | None = None
     flaky_infra: bool | None = None
     source_failure: bool | None = None
+    motivo_visivel: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -264,6 +267,7 @@ NAMED_GUARDS = {
     "reviewers_ok": "reviewers_ok",
     "flaky_infra": "flaky_infra",
     "source_failure": "source_failure",
+    "motivo_visivel": "motivo_visivel",
 }
 
 I4_EVENTS = frozenset({"iniciar_apply", "pedir_review"})

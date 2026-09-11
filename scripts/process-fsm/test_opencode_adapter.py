@@ -158,6 +158,48 @@ process.stdout.write(JSON.stringify(decision));
     assert data["decision"] == "allow"
 
 
+def test_opencode_impeccable_resolves_directory_when_session_is_homedir():
+    hook = PLUGIN_HOOK.read_text(encoding="utf-8")
+    lib = PLUGIN_LIB.read_text(encoding="utf-8")
+    assert "resolveRepoCwd" in hook
+    assert "resolveRepoCwd" in lib
+    assert "dsh_plugin_lib" not in hook
+    assert "dsh_plugin_lib" not in lib
+    assert "input.directory || input.worktree || REPO_ROOT" not in hook
+    assert "process.cwd() || REPO_ROOT" not in hook
+    code = f"""
+import {{ existsSync }} from "node:fs";
+import {{ homedir }} from "node:os";
+import {{ join }} from "node:path";
+import {{ resolveRepoCwd, REPO_ROOT, runHookMjs }} from {json.dumps(str(PLUGIN_LIB))};
+import plugin from {json.dumps(str(PLUGIN_HOOK))};
+const home = homedir();
+const resolved = resolveRepoCwd(home);
+const repo = resolveRepoCwd({json.dumps(str(REPO))});
+const hookPath = join(resolved, ".agents", "skills", "impeccable", "scripts", "hook.mjs");
+const hooks = await plugin({{ directory: home }});
+await hooks["tool.execute.after"]({{ tool: "edit", args: {{ filePath: "frontend/src/x.tsx" }} }});
+await hooks.event({{ event: {{ type: "session.idle", properties: {{ sessionID: "s" }} }} }});
+const status = runHookMjs({{ hook_event_name: "PostToolUse", file_path: "frontend/src/x.tsx" }}, resolved);
+process.stdout.write(JSON.stringify({{
+  home,
+  resolved,
+  repo,
+  root: REPO_ROOT,
+  hookExists: existsSync(hookPath),
+  status,
+}}));
+"""
+    proc = _node(code, cwd=Path.home())
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["resolved"] == data["root"]
+    assert data["repo"] == data["root"]
+    assert data["resolved"] != data["home"]
+    assert data["hookExists"] is True
+    assert data["status"] == 0
+
+
 def test_detector_plugin_never_throws():
     code = f"""
 import plugin from {json.dumps(str(PLUGIN_HOOK))};
@@ -220,7 +262,10 @@ def test_opencode_stubs_match_cursor_skills():
     body = stub.split("---", 2)[2]
     assert len([ln for ln in body.splitlines() if ln.strip()]) <= 8
     assert not (REPO / ".opencode" / "skills" / "impeccable" / "SKILL.md").exists()
-    assert not (REPO / ".opencode" / "skills" / "design-critic" / "SKILL.md").exists()
+    critic = (REPO / ".opencode" / "skills" / "design-critic" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert ".cursor/skills/design-critic/SKILL.md" in critic
 
 
 def test_grok_impeccable_adapter_is_executable():

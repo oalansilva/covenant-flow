@@ -6,6 +6,22 @@ import { fileURLToPath } from "node:url";
 const LIB_DIR = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = join(LIB_DIR, "..", "..");
 const WRITEISH = new Set(["write", "edit", "apply_patch", "bash"]);
+
+export function resolveRepoCwd(cwd) {
+  const start = typeof cwd === "string" && cwd.trim() ? cwd : REPO_ROOT;
+  try {
+    const proc = spawnSync("git", ["-C", start, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    const top = (proc.stdout || "").trim();
+    if (proc.status === 0 && top) return top;
+  } catch {
+    // session cwd is not a git work tree (e.g. $HOME)
+  }
+  return REPO_ROOT;
+}
+
 const PATCH_MARKERS = [
   "*** Add File:",
   "*** Update File:",

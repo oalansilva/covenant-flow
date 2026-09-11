@@ -38,11 +38,25 @@ Fronteira vazia **deste** adapter = as 6 seções do DoD **e** nenhuma decisão 
 
 Vendor `.cursor/skills/grilling/SKILL.md` intocado. Contrato N≥2, recomendada primeiro, ramos Cursor-Grok vs dsh intactos.
 
+## Superfície issue (REST)
+
+Body, comentários e labels: REST. MUST NOT `gh issue view` (com ou sem `--json`). PATCH do body funciona com GraphQL remaining=0.
+
+```bash
+gh api repos/<owner>/<repo>/issues/<n>
+gh api --paginate repos/<owner>/<repo>/issues/<n>/comments
+gh api -X PATCH repos/<owner>/<repo>/issues/<n> -f body='...'
+# ou:
+gh issue edit <n> --body-file -
+```
+
+Status / mover coluna do Project 1 continua GraphQL: cota 0 = falha na hora com reset. Sem REST de coluna.
+
 ## Como
 
 1. Ler `.cursor/skills/grilling/SKILL.md` e aplicar o loop (árvore, fronteira, uma rodada, recomendação).
-2. Fatos (código, specs, board): buscar com tools. Decisões: Alan responde. Uma rodada por turno; esperar.
-3. Despejar no **body** do issue bound (PT-BR), via `gh issue edit`, as 6 seções do DoD:
+2. Fatos (código, specs, board): buscar com tools. Decisões: Alan responde. Uma rodada por turno; esperar. Ler o body da issue N com REST `gh api repos/<owner>/<repo>/issues/<n>` — MUST NOT `gh issue view`.
+3. Despejar no **body** do issue bound (PT-BR), via `gh issue edit` ou `gh api -X PATCH repos/<owner>/<repo>/issues/<n>`, as 6 seções do DoD:
 
    1. **Problema** — uma frase, quem sofre.
    2. **História** — Como / quero / para.

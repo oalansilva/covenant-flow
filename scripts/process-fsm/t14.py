@@ -162,22 +162,49 @@ def _pr_list_json(
     return rows if isinstance(rows, list) else []
 
 
-def measure_checks_green(
+def classify_qa_gate(
     bound_card: str | int | None,
     q_git: str | None,
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> bool:
+) -> dict[str, bool | str | None]:
+    """Classify qa-gate on the PR q_git→develop. Tokens: no_pr | qa-gate pending | qa-gate failed."""
     del bound_card
     if not q_git:
-        return False
+        return {"ok": False, "reason": "no_pr"}
     try:
-        rows = _pr_list_json(str(q_git), fields="number,headRefOid", runner=runner)
-        if not rows:
-            return False
-        head = rows[0].get("headRefOid")
+        listed = _run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                _overlay_repo(),
+                "--head",
+                str(q_git),
+                "--base",
+                "develop",
+                "--state",
+                "all",
+                "--limit",
+                "1",
+                "--json",
+                "number,headRefOid",
+            ],
+            timeout=20,
+            runner=runner,
+        )
+        if listed.returncode != 0:
+            return {"ok": False, "reason": "qa-gate failed"}
+        try:
+            rows = json.loads(listed.stdout or "[]")
+        except json.JSONDecodeError:
+            return {"ok": False, "reason": "qa-gate failed"}
+        if not isinstance(rows, list) or not rows:
+            return {"ok": False, "reason": "no_pr"}
+        head = rows[0].get("headRefOid") if isinstance(rows[0], dict) else None
         if not head:
-            return False
+            return {"ok": False, "reason": "no_pr"}
         # gh 2.45 has no `pr checks --json`; use Checks API on the head SHA.
         checks = _run(
             [
@@ -192,10 +219,10 @@ def measure_checks_green(
             runner=runner,
         )
         if checks.returncode != 0:
-            return False
+            return {"ok": False, "reason": "qa-gate failed"}
         text = (checks.stdout or "").strip()
         if not text:
-            return False
+            return {"ok": False, "reason": "qa-gate failed"}
         for line in text.splitlines():
             line = line.strip()
             if not line:
@@ -208,10 +235,23 @@ def measure_checks_green(
                 continue
             status = str(item.get("status") or "").lower()
             conclusion = str(item.get("conclusion") or "").lower()
-            return status == "completed" and conclusion == "success"
-        return False
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, TypeError, ValueError):
-        return False
+            if status != "completed":
+                return {"ok": False, "reason": "qa-gate pending"}
+            if conclusion == "success":
+                return {"ok": True, "reason": None}
+            return {"ok": False, "reason": "qa-gate failed"}
+        return {"ok": False, "reason": "qa-gate failed"}
+    except (OSError, subprocess.TimeoutExpired, TypeError, ValueError):
+        return {"ok": False, "reason": "qa-gate failed"}
+
+
+def measure_checks_green(
+    bound_card: str | int | None,
+    q_git: str | None,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> bool:
+    return bool(classify_qa_gate(bound_card, q_git, runner=runner).get("ok"))
 
 
 class LiveT14Runner:
@@ -294,8 +334,9 @@ class LiveT14Runner:
         )
         if porcelain.returncode != 0:
             raise T14Error("sync: status failed")
-        if (porcelain.stdout or "").strip():
-            raise T14Error("sync: dirty")
+        dirty = (porcelain.stdout or "").strip()
+        if dirty:
+            raise T14Error(f"sync: dirty {self.source}\n{dirty}")
         for args, label in (
             (["git", "-C", str(self.source), "fetch", "origin"], "fetch"),
             (["git", "-C", str(self.source), "checkout", "develop"], "checkout"),

@@ -5,5 +5,5 @@ description: "Crítica de Design com teto de rodadas: sem-tela fecha em 1 autor 
 
 # design-critic
 
-Cliente: Grok Build. MUST Read `.cursor/skills/design-critic/SKILL.md` and follow it as the runbook.
-Map Cursor Task `inherit` to `spawn_subagent` inherit. Do not copy the runbook here.
+Cliente: dsh. MUST Read `.cursor/skills/design-critic/SKILL.md` and follow it as the runbook.
+Do not copy the runbook here.
