@@ -285,6 +285,7 @@ def test_design_cliente_dsh_spawns_author_and_grill_line_stays() -> None:
 
 
 CEILING_DIR = ROOT / "fixtures" / "grill_ceiling"
+LEAN_DIR = ROOT / "fixtures" / "grill_lean"
 D5_CEILING = (
     "Tecto: Qs e options em português de operador em todo card em Em Refinamento; "
     "identificador do git é facto no body ou *como* no Design, não option no host; "
@@ -421,8 +422,117 @@ def test_alan_workflow_d5_ceiling_sentence() -> None:
     assert "não percebi" in section
     assert "todas as options" in section
     assert "não colapsa" in section
-    assert "6 seções do DoD" in section
+    assert "3 seções" in section
+    assert "card nítido; sem grill" in section
+    assert "6 seções do DoD" not in section
     assert "Cliente dsh:" in section
+
+
+def _section_body(body: str, heading: str) -> str | None:
+    start = body.find(heading)
+    if start < 0:
+        return None
+    rest = body[start + len(heading) :].lstrip("\n")
+    nxt = re.search(r"\n## [^#]", rest)
+    chunk = rest if not nxt else rest[: nxt.start()]
+    return chunk.strip()
+
+
+def body_is_nitido(body: str) -> bool:
+    prob = _section_body(body, "## Problema")
+    entra = _section_body(body, "## Entra") or _section_body(body, "## Não entra")
+    return bool(prob) and bool(entra)
+
+
+def proposal_grilled_story_ok(text: str) -> bool:
+    if "## Problema" not in text or "## História" not in text:
+        return False
+    if "## Entra" not in text and "## Não entra" not in text:
+        return False
+    return True
+
+
+def dump_product_question_count(text: str) -> int:
+    return len(re.findall(r"^## Q\d", text, re.M))
+
+
+def dump_has_second_pass(text: str) -> bool:
+    low = text.lower()
+    return "segunda passagem" in low or "second pass" in low
+
+
+def dump_delta_rewrites_unchanged(text: str) -> bool:
+    if "unchanged_section_violation:" not in text:
+        return False
+    match = re.search(r"unchanged_section_violation:\s*(\S+)", text)
+    if not match:
+        return False
+    section = match.group(1)
+    before = _section_body(text.split("## body_before", 1)[-1], f"## {section}")
+    after = _section_body(text.split("## body_after", 1)[-1], f"## {section}")
+    if before is None or after is None:
+        return True
+    return before != after
+
+
+def test_grill_card_lean_adapter_needles() -> None:
+    text = GRILL_CARD.read_text(encoding="utf-8")
+    for needle in (
+        "uma passagem",
+        "no máximo 5 perguntas de produto",
+        "sem segunda passagem",
+        "PATCH só das seções que mudaram",
+        "handoff lista o delta",
+        "3 seções",
+        "MUST NOT exigir",
+        "Vocabulário",
+        "Riscos",
+    ):
+        assert needle in text, needle
+    assert "6 seções do DoD" not in text
+
+
+def test_lean_grill_runbook_needles() -> None:
+    section = _heading_section(ALAN_WORKFLOW.read_text(encoding="utf-8"), "## Grill-card")
+    assert "card nítido; sem grill" in section
+    assert "3 seções" in section
+    assert "6 seções do DoD" not in section
+    card_first = _heading_section(
+        ALAN_WORKFLOW.read_text(encoding="utf-8"), "## Card primeiro, OpenSpec mais completo"
+    )
+    assert "superset" in card_first
+    assert "história copiada" in card_first
+
+
+def test_nitido_body_fixtures() -> None:
+    nitido = (LEAN_DIR / "nitido_body.md").read_text(encoding="utf-8")
+    hollow = (LEAN_DIR / "hollow_body.md").read_text(encoding="utf-8")
+    assert body_is_nitido(nitido)
+    assert not body_is_nitido(hollow)
+
+
+def test_proposal_gist_superset_fixtures() -> None:
+    fail = (LEAN_DIR / "proposal_fail_no_story.md").read_text(encoding="utf-8")
+    ok = (LEAN_DIR / "proposal_pass_copied.md").read_text(encoding="utf-8")
+    assert not proposal_grilled_story_ok(fail)
+    assert proposal_grilled_story_ok(ok)
+
+
+def test_lean_dump_fail_fixtures() -> None:
+    six = (LEAN_DIR / "fail_six_questions.md").read_text(encoding="utf-8")
+    assert dump_product_question_count(six) > 5
+    second = (LEAN_DIR / "fail_second_pass.md").read_text(encoding="utf-8")
+    assert dump_has_second_pass(second)
+    delta = (LEAN_DIR / "fail_delta_rewrite.md").read_text(encoding="utf-8")
+    assert dump_delta_rewrites_unchanged(delta)
+
+
+def test_lean_dump_pass_delta_handoff() -> None:
+    text = (LEAN_DIR / "pass_delta_handoff.md").read_text(encoding="utf-8")
+    assert dump_product_question_count(text) <= 5
+    assert not dump_has_second_pass(text)
+    assert "handoff lista o delta" in text
+    assert "delta_sections: Entra" in text
 
 
 def test_grill_card_skins_stay_thin() -> None:

@@ -23,18 +23,19 @@ Senão: recusar (id ausente, N ≠ `#<id>` do pai, ou Status ≠ Em Refinamento)
 
 ## Quando disparar
 
-- **Sim:** Alan pede grelhar/afiar, **ou** Status de N é Em Refinamento **e** o body não tem as 6 seções do DoD. Oferecer; não arrastar coluna. Vale em `develop` se N e Status baterem.
-- **Não:** automático em todo T0; não em Todo/Design; cards já nítidos (DoD completo) podem T1 sem grill. O tecto de linguagem MUST NOT obrigar a re-grelhar um DoD já escrito.
+- **Sim:** Alan pede grelhar/afiar, **ou** Status de N é Em Refinamento **e** o body **ainda não** diz quem sofre e o que entra/não entra. Oferecer; não arrastar coluna. Vale em `develop` se N e Status baterem.
+- **Não:** automático em todo T0; não em Todo/Design. **Card nítido** (body já diz quem sofre e entra/não entra): o **pai** não spawna este filho; posta ou mantém exactamente `card nítido; sem grill` (idempotente). Pedido explícito grelhar/afiar continua a spawnar. O tecto de linguagem MUST NOT obrigar a re-grelhar um cartão já nítido ou já grelhado.
+- **Uma passagem:** uma passagem, no máximo 5 perguntas de produto nesta rodada; sem segunda passagem. O que não fechar segue em bullets em Entra e/ou dump para o pai (Design levanta o resto).
 
 ## Tecto de linguagem (operador)
 
 Vale em **todo card** em Project 1 `Status=Em Refinamento` (história de produto, p.ex. Monitor, e card de harness). Qs fechadas e as options no host em português de operador: quem sofre, o que passa/falha, o que não entra neste card. Entra descreve comportamento observável, não o mecanismo.
 
-Identificador do git (nome de função, path, flag yaml, evento de fluxo, hash) **não** aparece no cartão do host. Esse conteúdo é **facto** no body do issue ou *como* (mecanismo) em Riscos para Design — nunca option. Se a Q só é inteligível com esse identificador, reclassificar: facto no body ou *como* no Design.
+Identificador do git (nome de função, path, flag yaml, evento de fluxo, hash) **não** aparece no cartão do host. Esse conteúdo é **facto** no body do issue ou *como* (mecanismo) no pacote de **Design** — nunca option e MUST NOT virar `## Riscos` no issue. Se a Q só é inteligível com esse identificador, reclassificar: facto no body ou *como* no Design.
 
 Other vazio, silêncio (sem resposta) e «não percebi» / «isto é técnico» (via Other do host ou texto livre) **reclassificam**; MUST NOT gravar a option recomendada como aceite. Other do host é linha automática, não option listada e não conta no N. Outras Qs da mesma rodada continuam à espera. Other vazio, silêncio e «não percebi» / «isto é técnico» nunca são aceite da recomendada.
 
-Fronteira vazia **deste** adapter = as 6 seções do DoD **e** nenhuma decisão de operador em aberto. A árvore Matt MAY continuar no Design e MUST NOT ser exigida em Em Refinamento. Comentário canónico = a linha pinada (texto exacto; só muda o *quando*). Porta de entrada permanece este adapter; MUST NOT promover `/opsx:explore`, schema `grill-driven`, `grill-with-docs`, `to-spec` nem skill de marketplace.
+Fronteira vazia **deste** adapter = as **3 seções** do DoD (`## Problema`, `## História`, `## Entra`; `## Não entra` MAY como irmão; critérios observáveis **dentro** de Entra) **e** nenhuma decisão de operador em aberto. MUST NOT exigir `## Vocabulário`, `## Critérios de aceite` nem `## Riscos` no body em Em Refinamento. A árvore Matt MAY continuar no Design e MUST NOT ser exigida em Em Refinamento. Comentário canónico = a linha pinada (texto exacto; só muda o *quando*). Porta de entrada permanece este adapter; MUST NOT promover `/opsx:explore`, schema `grill-driven`, `grill-with-docs`, `to-spec` nem skill de marketplace.
 
 Vendor `.cursor/skills/grilling/SKILL.md` intocado. Contrato N≥2, recomendada primeiro, ramos Cursor-Grok vs dsh intactos.
 
@@ -56,17 +57,16 @@ Status / mover coluna do Project 1 continua GraphQL: cota 0 = falha na hora com 
 
 1. Ler `.cursor/skills/grilling/SKILL.md` e aplicar o loop (árvore, fronteira, uma rodada, recomendação).
 2. Fatos (código, specs, board): buscar com tools. Decisões: Alan responde. Uma rodada por turno; esperar. Ler o body da issue N com REST `gh api repos/<owner>/<repo>/issues/<n>` — MUST NOT `gh issue view`.
-3. Despejar no **body** do issue bound (PT-BR), via `gh issue edit` ou `gh api -X PATCH repos/<owner>/<repo>/issues/<n>`, as 6 seções do DoD:
+3. Despejar no **body** do issue bound (PT-BR), via `gh issue edit` ou `gh api -X PATCH repos/<owner>/<repo>/issues/<n>`, as **3 seções** do DoD (headings exactos `## Problema`, `## História`, `## Entra`; `## Não entra` MAY como irmão):
 
    1. **Problema** — uma frase, quem sofre.
    2. **História** — Como / quero / para.
-   3. **Entra** / **não entra**.
-   4. **Vocabulário** — `Termo`: definição curta; `_Avoid:` sinônimos.
-   5. **Critérios de aceite** — observáveis (Given/When/Then ou lista comportamental).
-   6. **Riscos / perguntas abertas**.
+   3. **Entra** / **não entra** — inclui critérios observáveis (Given/When/Then ou lista comportamental) **dentro** de Entra.
+
+   **Delta do body:** GitHub REST PATCH substitui o body inteiro. Ler o body actual, reconstruir com o texto das seções **inalteradas byte-idêntico**, e só reescrever as seções que mudaram nesta passagem. **PATCH só das seções que mudaram** (via reconstrução). O dump para o pai: **handoff lista o delta** (nomes das seções tocadas). MUST NOT reescrever seções que não mudaram.
 
 4. Se a fronteira **não** zerou (faltam seções do DoD **ou** há decisão de operador em aberto): o card **fica** em Em Refinamento. Não comentar o handoff T1 (não postar segunda cópia do canônico). Não ir para Todo com furo bloqueante.
-5. Se o body tem as 6 seções **e** nenhuma decisão de operador está em aberto: exatamente um comentário canônico (texto exato):
+5. Se o body tem as **3 seções** **e** nenhuma decisão de operador está em aberto: exatamente um comentário canônico (texto exato):
 
    `grill-card: fronteira vazia; história no body; à espera de T1 (Alan).`
 

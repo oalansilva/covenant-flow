@@ -15,7 +15,7 @@ Fast-forward through artifact creation - generate everything needed to start imp
 
 **Input**: The user's request should include a change name (kebab-case) OR a description of what they want to build.
 
-**Bound grilled issue (this repo):** If the session is bound to a card in `Status=Design` and that GitHub issue body already has the `grill-card` DoD sections (Problema, História, Entra/não entra, Vocabulário, critérios, Riscos), use the issue as the briefing. Do **not** AskUser "what to build". Do **not** invoke `grill-card` or `grill-with-docs` to generate `proposal.md`. If any DoD section is missing: do **not** `/opsx:ff` and do **not** invent story text; comment the gaps on the issue; remain in Design. `/opsx:explore` MAY run only for technical holes in the codebase, never to rewrite product scope. `grill-card` is Em Refinamento only — not a step of this skill.
+**Bound grilled issue (this repo):** If the session is bound to a card in `Status=Design` and that GitHub issue body already has the lean `grill-card` briefing (**Problema, História, Entra/não entra** — 3 seções; critérios dentro de Entra), use the issue as the briefing. Do **not** AskUser "what to build". Do **not** invoke `grill-card` or `grill-with-docs` to generate `proposal.md`. When creating `proposal.md`, MUST **copy** `## Problema`, `## História`, and `## Entra` / `## Não entra` from the issue body (MUST NOT invent story text). If any of those sections is missing: do **not** `/opsx:ff` and do **not** invent story text; comment the gaps on the issue; remain in Design. `/opsx:explore` MAY run only for technical holes in the codebase, never to rewrite product scope. `grill-card` is Em Refinamento only — not a step of this skill.
 
 **Steps**
 

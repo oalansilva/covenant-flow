@@ -409,7 +409,7 @@ def test_skill_s1_parent_materializes_diff() -> None:
     assert "git ls-files --others --exclude-standard" in text
     assert "git diff origin/develop...HEAD" in text
     assert "MUST NOT pedir git ao filho" in text
-    assert "v1.1.14" in text
+    assert "v1.1.16" in text
 
 
 def test_skill_s2_sidecar_and_order() -> None:
