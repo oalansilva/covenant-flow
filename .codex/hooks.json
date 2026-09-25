@@ -1,0 +1,59 @@
+{
+  "description": "Covenant Flow local adapter hooks. Project hooks require trust review in Codex.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/process-fsm/codex_adapter.py\" session-start",
+            "commandWindows": "powershell -NoProfile -NonInteractive -Command \"$root = (& git rev-parse --show-toplevel).Trim(); & python (Join-Path $root 'scripts/process-fsm/codex_adapter.py') session-start\"",
+            "timeout": 30,
+            "statusMessage": "Loading Covenant Flow status"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|exec_command|apply_patch|Edit|Write|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/process-fsm/codex_adapter.py\" pre-tool-use",
+            "commandWindows": "powershell -NoProfile -NonInteractive -Command \"$root = (& git rev-parse --show-toplevel).Trim(); & python (Join-Path $root 'scripts/process-fsm/codex_adapter.py') pre-tool-use\"",
+            "timeout": 30,
+            "statusMessage": "Checking Covenant Flow write/model policy"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|exec_command|apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/process-fsm/codex_adapter.py\" post-tool-use",
+            "commandWindows": "powershell -NoProfile -NonInteractive -Command \"$root = (& git rev-parse --show-toplevel).Trim(); & python (Join-Path $root 'scripts/process-fsm/codex_adapter.py') post-tool-use\"",
+            "timeout": 30,
+            "statusMessage": "Checking edited UI files"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/process-fsm/codex_adapter.py\" stop",
+            "commandWindows": "powershell -NoProfile -NonInteractive -Command \"$root = (& git rev-parse --show-toplevel).Trim(); & python (Join-Path $root 'scripts/process-fsm/codex_adapter.py') stop\"",
+            "timeout": 30,
+            "statusMessage": "Running the advisory UI deep pass"
+          }
+        ]
+      }
+    ]
+  }
+}

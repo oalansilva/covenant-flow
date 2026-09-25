@@ -162,9 +162,13 @@ def _tool_input(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def normalize(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Canonical envelope: Cursor, Grok, OpenCode, and dsh `{ tool, args }` all work."""
+    """Canonical envelope for the existing clients and Codex local hooks."""
     src = payload if isinstance(payload, Mapping) else {}
     tool = _first_str(src, "tool_name", "toolName", "tool") or ""
+    if tool in {"exec_command", "exec-command"}:
+        # Codex local hooks report the unified execution tool as Bash today;
+        # accept the raw tool name too for recorded/future event envelopes.
+        tool = "Bash"
     cwd = (
         _first_str(src, "cwd")
         or _first_str(src, "workspaceRoot")
@@ -172,7 +176,7 @@ def normalize(payload: Mapping[str, Any]) -> dict[str, Any]:
         or _first_str(src, "worktree")
         or os.getcwd()
     )
-    data = _tool_input(src)
+    data = dict(_tool_input(src))
     command = src.get("command") if isinstance(src.get("command"), str) else ""
     if not str(command).strip():
         # str_replace_editor.args.command is view|create|str_replace|insert, not a shell.
@@ -181,6 +185,15 @@ def normalize(payload: Mapping[str, Any]) -> dict[str, Any]:
         else:
             nested = data.get("command")
             command = nested.strip() if isinstance(nested, str) and nested.strip() else ""
+    if tool == "apply_patch":
+        # Codex sends an OpenAI patch in tool_input.command. The shared Guard
+        # extracts its file markers from patchText, matching the other clients.
+        patch = data.get("patchText") or data.get("patch_text") or data.get("patch")
+        if not isinstance(patch, str) or not patch.strip():
+            patch = command
+        if isinstance(patch, str) and patch.strip():
+            data["patchText"] = patch
+        command = ""
     out: dict[str, Any] = {
         "tool_name": tool,
         "tool_input": data,

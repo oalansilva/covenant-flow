@@ -23,7 +23,7 @@ LIVE_ROUTE_RE = re.compile(
     re.MULTILINE,
 )
 SURFACE_RE = re.compile(
-    r"^\s*(?:\*{0,2})surface:(?:\*{0,2})\s+(existing|new)\s*$",
+    r"^\s*(?:\*{0,2})surface:(?:\*{0,2})\s+(existing|new|none)\s*$",
     re.MULTILINE,
 )
 COPIED_START = "COPIED:start"
