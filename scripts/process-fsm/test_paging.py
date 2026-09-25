@@ -295,11 +295,11 @@ def test_agents_md_is_stub():
     generated = render_agents(filled_overlay_dict())
     assert filled_overlay_dict()["clients"]["cursor"]["auto"] is True
     assert (
-        "Clientes: Cursor Agent (cooperativo); Grok Build, OpenCode e dsh "
-        "(cooperativos até ensaio deny na branch de integração)."
+        "Clientes: Cursor Agent (cooperativo); Codex CLI (cooperativo; hooks só após trust review); "
+        "Grok Build, OpenCode e dsh (cooperativos até ensaio deny na branch de integração)."
     ) in generated
     assert (
-        "Não reivindique modo Auto no Cursor, no Grok, no OpenCode nem no dsh."
+        "Não reivindique modo Auto no Cursor, no Codex, no Grok, no OpenCode nem no dsh."
     ) in generated
     assert "Auto permitido" not in generated
     assert "Auto Grok" not in generated
@@ -505,7 +505,7 @@ def test_apply_skill_does_not_dump_every_context_file():
 
 
 def test_design_critic_forbids_nielsen_table_and_full_brief_in_design_md():
-    text = (REPO / ".agents" / "skills" / "design-critic" / "SKILL.md").read_text(encoding="utf-8")
+    text = (REPO / ".cursor" / "skills" / "design-critic" / "SKILL.md").read_text(encoding="utf-8")
     assert "Nielsen" in text
     assert "design.md" in text
     assert "Proibido tabela Nielsen" in text

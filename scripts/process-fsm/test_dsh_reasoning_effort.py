@@ -19,7 +19,7 @@ from test_dsh_adapter import (  # noqa: E402
     _init_repo,
     _node,
 )
-from test_overlay_fixtures import write_overlay  # noqa: E402
+from test_overlay_fixtures import write_model_map, write_overlay  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -527,7 +527,9 @@ def test_e11_guard_and_law_files_untouched() -> None:
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == ""
+    assert "dsh_stubs.py" not in proc.stdout
+    assert "exec_command" in proc.stdout and "patchText" in proc.stdout
+    assert "dsh_reasoning_effort" not in proc.stdout
     yaml_text = (REPO / ".cursor" / "process-fsm.yaml").read_text(encoding="utf-8")
     assert "enabled_tools" in yaml_text
     qa_stub = yaml.safe_load(yaml_text)["context_file"]["QA"]
@@ -550,6 +552,7 @@ def test_e12_pin_expects_free_patch_and_dsh_auto_false(tmp_path: Path) -> None:
         "opencode": {"auto": False},
         "dsh": {"auto": False},
     })
+    write_model_map(target)
     proc = subprocess.run(
         [
             str(INSTALLER),

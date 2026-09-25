@@ -59,6 +59,15 @@ copy_tree() {
   rsync -a --delete "$from" "$to"
 }
 
+copy_tree_if_missing() {
+  local from="$1" to="$2"
+  if [[ -e "$to" ]]; then
+    echo "preserving existing path: $to"
+    return
+  fi
+  copy_tree "$from" "$to"
+}
+
 if [[ "$MODE" == "init" ]]; then
   refuse_bad_channels
   mkdir -p "$TARGET/.covenant-flow"
@@ -103,6 +112,14 @@ except OverlayError as exc:
     raise SystemExit(f"overlay invalid: {exc}")
 PY
 
+# All Codex collisions are checked before any part of the pin is written. The
+# hook preflight also refuses an active [hooks] table in config.toml; the bridge
+# preflight refuses operator-edited skills without touching vendor paths.
+python_overlay "$SOURCE/scripts/process-fsm/codex_hooks.py" preflight --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/codex_skills.py" preflight --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/codex_agents.py" preflight --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/codex_models.py" --root "$TARGET" --preflight-pin-codex-map
+
 copy_tree "$SOURCE/.cursor/process-fsm.yaml" "$TARGET/.cursor/process-fsm.yaml"
 copy_tree "$SOURCE/.cursor/hooks.json" "$TARGET/.cursor/hooks.json"
 copy_tree "$SOURCE/.cursor/hooks/" "$TARGET/.cursor/hooks/"
@@ -125,15 +142,19 @@ copy_tree "$SOURCE/.dsh/plugin/" "$TARGET/.dsh/plugin/"
 copy_tree "$SOURCE/.dsh/skills/" "$TARGET/.dsh/skills/"
 copy_tree "$SOURCE/.dsh/cordis.patch.yml" "$TARGET/.dsh/cordis.patch.yml"
 
-copy_tree "$SOURCE/.agents/skills/impeccable/" "$TARGET/.agents/skills/impeccable/"
-copy_tree "$SOURCE/.agents/skills/design-critic/" "$TARGET/.agents/skills/design-critic/"
-copy_tree "$SOURCE/.agents/skills/playwright-cli/" "$TARGET/.agents/skills/playwright-cli/"
+copy_tree_if_missing "$SOURCE/.agents/skills/impeccable/" "$TARGET/.agents/skills/impeccable/"
+copy_tree_if_missing "$SOURCE/.agents/skills/playwright-cli/" "$TARGET/.agents/skills/playwright-cli/"
 
 copy_tree "$SOURCE/scripts/process-fsm/" "$TARGET/scripts/process-fsm/"
 copy_tree "$SOURCE/scripts/release-guard" "$TARGET/scripts/release-guard"
 if [[ -f "$SOURCE/scripts/post-card-evidence-comment.sh" ]]; then
   copy_tree "$SOURCE/scripts/post-card-evidence-comment.sh" "$TARGET/scripts/post-card-evidence-comment.sh"
 fi
+
+python_overlay "$TARGET/scripts/process-fsm/codex_skills.py" install --source "$TARGET" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/codex_hooks.py" install --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/codex_agents.py" install --source "$SOURCE" --target "$TARGET"
+python_overlay "$TARGET/scripts/process-fsm/codex_models.py" --root "$TARGET" --pin-codex-map
 
 python_overlay - <<PY
 from pathlib import Path

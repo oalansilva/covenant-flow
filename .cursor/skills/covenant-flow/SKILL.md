@@ -14,7 +14,7 @@ Prioridade (δ e Guard > overlay > skill > wording):
 3. **Esta skill** (runbook).
 4. **Wording** do chat (`implemente`, `autorizo`, `gostaria sempre`).
 
-Cliente: **Cursor Agent**. Task/subagent usa `inherit` salvo pedido explícito no chat. **Exceção — lista fechada isolada** (inherit de modelo, **sem** transcript do pai): `grill-card`, Design-autor, Apply-coluna, QA checks, Assessment A/B, `diff-reviewer`, `code-reviewer`. Review = diff **exato** (não “Codex review”).
+Clientes: **Cursor Agent e Codex CLI** (cooperativo). Cursor conserva o spawn `inherit` descrito neste runbook. **Exceção — lista fechada isolada** (inherit de modelo, **sem** transcript do pai): `grill-card`, Design-autor, Apply-coluna, QA checks, Assessment A/B, `diff-reviewer`, `code-reviewer`. Review continua sendo o diff **exato**, não “Codex review”.
 
 Overlay humano: `Read` o path `overlay_doc` de `.covenant-flow/overlay.yaml` quando a tarefa precisar de portas/Drive/banco/release.
 
@@ -41,6 +41,18 @@ Cliente dsh: em Design, root spawna 1 Design-autor; o pai não escreve OpenSpec 
 T7: Alan abre o **Snapshot Impeccable** linkado no comentário do card (path / blob). O Gist OpenSpec **não** é a crítica.
 
 Handoff de Design/Apply/Review registra **proxies**: palavras de `design.md`, bytes de HTML gerado vs copiado (`cp`/clone = copied; delta = generated; sem protótipo = `N/A`), número de spawns. Sem parser de usage Cursor/Grok e sem dashboard.
+
+## Codex CLI local (cooperativo; sem Auto)
+
+Skills são descobertas pelas pontes `.agents/skills/<nome>/SKILL.md`, que mandam ler o canônico completo em `.cursor/skills/<nome>/SKILL.md`; a ponte não concede autorização nem define estado. AGENTS.md permanece curto; a FSM (`.cursor/process-fsm.yaml` + `process_event`) define estado e transições, e `.cursor/model-map.yaml` define os pares. O adapter usa `.codex/hooks.json` e scripts `scripts/process-fsm/codex_*.py`; detalhes de comandos, proxy, captura e verificação ficam nos scripts. `.codex/` não é fonte de estado nem de modelos.
+
+Hooks do projeto são **não gerenciados** e só operam depois que Alan/operador revisar e confiar explicitamente na definição atual no host local. Nunca use `--dangerously-bypass-hook-trust`, atribua confiança ao pin ou trate hook ausente/não confiado como proteção. `SessionStart` injeta a página compartilhada e, sem Status, mantém `Write produto deny`. `PreToolUse` declara matcher `Bash|exec_command|apply_patch|Edit|Write|Agent`, mas spawn nativo `Agent`, hosted tools e rotas especializadas podem não dispará-lo. `PostToolUse` e `Stop` são advisory e não revertem efeitos; permissões nativas continuam ativas. Codex é cooperativo, sem modo Auto.
+
+Protocolo por filho: leia o Status vinculado e confira a ação permitida pela FSM; classifique `juizo` (grill, Design-autor, crítica e avaliações) ou `execucao` (Apply, QA, reviewers e demais execução); leia de novo o mapa vigente na raiz do consumidor a cada spawn e passe literalmente o par de modelo/esforço da faixa. Quando disparado, `PreToolUse` confere faixa/modelo/esforço com o mapa; valores ausentes, inválidos, proibidos ou divergentes recebem deny visível. Não fixe pares em `.codex/config.toml` ou `.codex/agents/*.toml`, nem use fallback; mapa ausente/inválido ou recusa do host falha visivelmente.
+
+Cada prompt é autocontido: `#<id>`, Status, branch/worktree e paths, ação autorizada, escopo, contexto necessário, skill canônica e contrato exato de saída. Não herde nem solicite transcript do pai. Registre pelo proxy script o par pedido e o par **observado pelo runtime/trace** (nunca inferido do pedido), host/versão, status e payload. `unavailable` deve ficar visível e é falha, sem fallback. Sucesso exige `completed`, payload retornado e par observado igual ao mapa; `completed` sem payload não basta. Só o pai move estado, pelo `process_event` permitido na FSM.
+
+No Code Review, o pai materializa e verifica uma vez o diff; no mesmo turno, `diff-reviewer` e `code-reviewer` recebem o mesmo path + SHA-256, prompts próprios, par vigente de `execucao` e sandbox `read-only`. Cada reviewer lê só o artefato verificado e não escreve; a verificação pelos scripts exige dois papéis e filhos distintos, mesmo digest/sandbox, `completed` com payload e par observado válido. Falha ou dado indisponível reprova a onda. Esse limite é cooperativo: Codex não transforma instruções em isolamento de leitura.
 
 ## Modos Cursor (terminal vs Desktop+SSH)
 
@@ -80,7 +92,7 @@ Rubrica prova viva (1.5):
 
 ### Prompts autocontidos (grill / Design-autor / Apply / review / QA)
 
-O pai cola o bloco no spawn isolado (`inherit`, sem transcript). `working_directory` = worktree quando a árvore existir. Filho MUST NOT `move_agent_to_root`. Neste par Desktop+SSH: Shell do fluxo com `required_permissions: ["all"]` no primeiro attempt. MUST NOT `workspace_readwrite` + clique. Sucesso = host `completed`. `Task was interrupted by the user` sem Stop visível = kill do host. MUST NOT retomar cadáver. Título `#<id>` (não `#<id> Apply`).
+O pai cola o bloco autocontido no spawn. Cursor usa `inherit` conforme o contrato existente; Codex segue o protocolo acima, sem transcript. `working_directory` = worktree quando a árvore existir. Filho MUST NOT `move_agent_to_root`. Neste par Desktop+SSH: Shell do fluxo com `required_permissions: ["all"]` no primeiro attempt. MUST NOT `workspace_readwrite` + clique. Sucesso = host `completed` **e payload**. `Task was interrupted by the user` sem Stop visível = kill do host. MUST NOT retomar cadáver. Título `#<id>` (não `#<id> Apply`).
 
 **Apply-coluna** (único filho da coluna / não devolvas entre tasks): és o único filho Apply desta entrada em Em desenvolvimento. Loop interno até todas as tasks feitas ou um P0 visível. Não devolvas o turno entre tasks. Não spawnes reviewers. Não `process_event` / commit / push. Recusa visível no pai se devolveres cedo sem P0 (não abre review nem segundo Apply).
 
@@ -173,6 +185,8 @@ Só com `Status=Pronto para Dev`. Pai chama `iniciar_apply` **antes** do spawn. 
 Pós-T18 (`nao_homologar`): q já é Em desenvolvimento no mesmo card. Reabrir ou criar `card-<id>-*` a partir do `develop` actual (squash T14 já está lá). Write só com I1 (não develop/main). **Não** chamar `iniciar_apply` (T8 é de Pronto para Dev). Segue `pedir_review` → … → T14 → Done; o par homologar / não homologar reaparece.
 
 Pai: `pedir_review` (Code Review), materializa o intervalo em `.cursor/tmp/review-diff.patch` e spawna os **dois** Task (`diff-reviewer` + `code-reviewer`) **no mesmo turno** com `review_diff_path:` (MUST NOT pedir git ao filho). Fila do host não falha; destape do primeiro MUST NOT nascer o segundo (já spawnado). MAY spawnar esses reviewers como `generalPurpose` cujo prompt é o corpo do agent file **ou** como `subagent_type` nomeado; o matcher do destape cobre os dois. Continua a exigir `review_diff_path:` e a string exacta do `description` do Task no sidecar. O pai **copia** schema do dump (`gravidade`, `classe`); MUST NOT reclassificar; MUST NOT inflar gravidade. `bloqueia_merge: sim` num nit ≠ terceiro ciclo. P0 continua a parar a coluna. Mecânicos juntos num único Apply de correção (prompt = a lista) **sem Ask**; juízo vai a residual e **não** ocupa o slot. Após 1 correção + 1 onda, P1/P2 restante **ou P1/P2 novo** = residual no handoff de Done **e** no comentário do card; o card **segue** (commit, PR, QA). MUST NOT terceiro ciclo. MUST NOT perguntar «autorizar extra / aceitar residual». Pai MUST NOT corrigir no próprio transcript. Fecho vs `develop` cola `## Residual já no card`; residual já no comentário **não** reabre e **não** sobe; só defeito novo (ou reuse SHA). Fecho pós-commit continua **uma** onda. Depois da onda, correr `scripts/process-fsm/review_process_checklist.py` **antes** do commit (`--wave-same-turn yes` se os dois nasceram neste turno). Falha = `ERROR: process-checklist failed:` + item (bloqueio visível, não commita, não prosa de LLM). Depois: commit, closing vs develop, push. `aceitar_sha` só com PR `q_git`→develop (`no_pr` ⇒ abrir PR e repetir no mesmo turno). Depois: filho QA (checks), T14. `/review-bugbot` MUST NOT. `/review-security` MAY se Alan pedir explicitamente; o gate continua os dois reviewers locais.
+Checklist de review: se o OpenSpec estiver noutro checkout, passe `--change-root <consumer-root>`. O padrão `strict` continua exigindo todas as tasks marcadas. Antes do commit, use `--phase precommit`: tasks de implementação pendentes bloqueiam; só tarefas com a anotação explícita `<!-- covenant-flow:after-commit -->`, `<!-- covenant-flow:after-pin -->` ou `<!-- covenant-flow:after-qa -->` podem aguardar, vencendo respectivamente em `postcommit`, `postpin` e `postqa`. Depois do pin/QA, rode novamente com `--phase postqa` para revalidar todas as tasks.
+
 **dsh:** após 400 desta classe (reasoning effort off/none) num filho, MUST NOT spawnar mais o mesmo preset (incl. retry 1/1 #518); registar `ERROR: subagent spawn failed/empty` e continuar no root com residual explícito.
 
 ## Code Review — cola do diff (S1)

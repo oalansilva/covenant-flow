@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "files": {
+    "covenant-flow/SKILL.md": "bf35254e9a3762dad99795817f4e5a87eb295472cffb79e332e7894be4d44112",
+    "covenant-flow-environments/SKILL.md": "1854692bd5dd7a482c10f696e9a2f3382b63332280ce396c3e6a190b2f53a59c",
+    "design-critic/SKILL.md": "fabc0d456c237c1ff665b9f3ec6c5e3eac46dd6519d626525d4c1dbad91e1e99",
+    "github-project-board/SKILL.md": "367fba52489111cce40dc554a4dc2bfefe85e3f3e59d37fcdd5987c5130a9c0a",
+    "grill-card/SKILL.md": "d657d299d560add2acd853a69c79c130202796dc031b75bba8688206aec873e6",
+    "grilling/SKILL.md": "5215df8f56a83b88047c0679cc895b8803c40a60fae003550f112cf288f59f3c",
+    "implantar/SKILL.md": "7c0996e235fe88f4799925b716bcacee7532017aa346c5136a3e9b9ee9c47152",
+    "kaizen/SKILL.md": "f43ef9e96e896655814732f0c4796fb65a63a2aa61e84e7841dfd2f7c985816a",
+    "openspec-apply-change/SKILL.md": "6712a568ff4b364ba28978ad5a60409b21a473bb470abeb6c4b4359921db0254",
+    "openspec-archive-change/SKILL.md": "a7b04b676edbd1c56be54c31d31d4334b741d8b330a6f67480b26b7604dc176b",
+    "openspec-bulk-archive-change/SKILL.md": "1ac87e3eccd986f200138fae203853575f3548aeb9ed815a8ac208c9710c05c1",
+    "openspec-continue-change/SKILL.md": "892cf9399e87ed4b48378ac4520b6fa2942d2b4c6886a1b695594fee28ecf856",
+    "openspec-explore/SKILL.md": "c339713786cf51b7ffced3e377c83767d674a0cdf7862c2c6807061cd09dd820",
+    "openspec-ff-change/SKILL.md": "2accbdb67e6e66031f80c5ed6dceaf32b048b88ecbcb3eafef062fb60cd2d699",
+    "openspec-new-change/SKILL.md": "050451fdea3f6ca9a8df3a0aef4994be3ea3f60e0defde629462c4fc58a761b3",
+    "openspec-onboard/SKILL.md": "f13450dbfce98ff90554a0a25481bd9670ce51027d98884ee3bc173651e986a1",
+    "openspec-sync-specs/SKILL.md": "a06db3ea8d294b71fd23ae4653749953d3163eed8daaed694d7e74e61d1c863e",
+    "openspec-verify-change/SKILL.md": "eea83ea11f90340e59a17c0f3e55c4eea392e641e6a2c0a2d4280d9657e44e6b"
+  }
+}

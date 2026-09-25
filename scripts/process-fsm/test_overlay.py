@@ -157,13 +157,13 @@ def test_grok_opencode_have_no_law_table():
 
 
 D5_CLIENTS = (
-    "Clientes: Cursor Agent (cooperativo); Grok Build, OpenCode e dsh "
-    "(cooperativos até ensaio deny na branch de integração)."
+    "Clientes: Cursor Agent (cooperativo); Codex CLI (cooperativo; hooks só após trust review); "
+    "Grok Build, OpenCode e dsh (cooperativos até ensaio deny na branch de integração)."
 )
-D5_NO_AUTO = "Não reivindique modo Auto no Cursor, no Grok, no OpenCode nem no dsh."
+D5_NO_AUTO = "Não reivindique modo Auto no Cursor, no Codex, no Grok, no OpenCode nem no dsh."
 
 
-def test_render_agents_hardcodes_four_cooperative_clients():
+def test_render_agents_lists_codex_as_cooperative_only_after_hook_trust_review():
     data = filled_overlay_dict()
     assert data["clients"]["cursor"]["auto"] is True
     text = render_agents(data)
@@ -172,7 +172,8 @@ def test_render_agents_hardcodes_four_cooperative_clients():
     assert D5_CLIENTS in text
     assert D5_NO_AUTO in text
     assert text.index(D5_CLIENTS) < text.index(D5_NO_AUTO)
-    assert "Cursor Agent" in text and "Grok Build" in text and "OpenCode" in text
+    assert "Cursor Agent" in text and "Codex CLI" in text and "Grok Build" in text and "OpenCode" in text
+    assert "hooks só após trust review" in text
     assert "dsh" in text
     assert "Auto permitido" not in text
     assert "Grok Auto" not in text
