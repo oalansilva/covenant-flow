@@ -27,12 +27,14 @@ class ReviewDiffError(ValueError):
 
 
 def _git(root: Path, *args: str, allow_diff: bool = False) -> bytes:
+    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
     try:
         result = subprocess.run(
             ["git", "-C", str(root), *args],
             check=False,
             capture_output=True,
             timeout=30,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ReviewDiffError(f"git command failed: {exc}") from exc
@@ -54,22 +56,37 @@ def _tracked_diff(root: Path, base: str, *, exclude: Path) -> bytes:
     relative = exclude.relative_to(root).as_posix()
     if not isinstance(base, str) or not base.strip():
         raise ReviewDiffError("Git diff base must be a non-empty commit or ref")
-    try:
-        revision = _git(
-            root, "rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}"
-        ).decode("ascii").strip()
-    except ReviewDiffError as exc:
-        raise ReviewDiffError(f"invalid Git diff base {base!r}: {exc}") from exc
-    if not revision:
-        raise ReviewDiffError(f"invalid Git diff base {base!r}: no commit resolved")
+    def resolve_commit(ref: str) -> str:
+        try:
+            revision = _git(
+                root, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"
+            ).decode("ascii").strip()
+        except ReviewDiffError as exc:
+            raise ReviewDiffError(f"invalid Git diff base {base!r}: {exc}") from exc
+        if not revision:
+            raise ReviewDiffError(f"invalid Git diff base {base!r}: no commit resolved")
+        return revision
+
+    if "..." in base:
+        if base.count("...") != 1:
+            raise ReviewDiffError(f"invalid Git diff base {base!r}: expected one three-dot range")
+        left_ref, right_ref = base.split("...", 1)
+        if not left_ref.strip() or not right_ref.strip():
+            raise ReviewDiffError(f"invalid Git diff base {base!r}: both range refs are required")
+        left = resolve_commit(left_ref.strip())
+        right = resolve_commit(right_ref.strip())
+        revision_args = ("--merge-base", left, right)
+    else:
+        revision_args = (resolve_commit(base),)
     return _git(
         root,
         "diff",
         "--binary",
-        revision,
+        *revision_args,
         "--",
         ".",
         f":(top,exclude,literal){relative}",
+        ":(top,exclude,glob).impeccable/critique/**",
         allow_diff=True,
     )
 
@@ -92,6 +109,8 @@ def _untracked_diff(root: Path, *, exclude: Path) -> bytes:
             continue
         relative = Path(os.fsdecode(raw_path))
         if relative == excluded:
+            continue
+        if relative.parts[:2] == (".impeccable", "critique"):
             continue
         if _is_review_proxy_artifact(relative):
             continue
