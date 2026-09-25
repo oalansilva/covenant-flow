@@ -124,6 +124,68 @@ def test_capture_rejects_option_like_base_without_writing_option_output(tmp_path
     assert victim.read_bytes() == b"protected bytes\n"
 
 
+def test_capture_excludes_impeccable_critique_tree_for_tracked_and_untracked_files(tmp_path: Path):
+    repo = _repo(tmp_path / "repo")
+    critique = repo / ".impeccable" / "critique"
+    critique.mkdir(parents=True)
+    tracked_critique = critique / "notes.md"
+    tracked_critique.write_text("initial critique\n", encoding="utf-8")
+    _git(repo, "add", ".impeccable/critique/notes.md")
+    _git(repo, "commit", "-m", "add critique fixture")
+
+    tracked_critique.write_text("private changed critique\n", encoding="utf-8")
+    (critique / "untracked.md").write_text("private untracked critique\n", encoding="utf-8")
+    (repo / "tracked.txt").write_text("backend change\n", encoding="utf-8")
+
+    path, _digest, _size = capture(repo)
+    body = path.read_bytes()
+
+    assert b"backend change" in body
+    assert b".impeccable/critique" not in body
+    assert b"private changed critique" not in body
+    assert b"private untracked critique" not in body
+
+
+def test_capture_resolves_three_dot_base_and_ignores_inherited_git_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo = _repo(tmp_path / "repo")
+    outsider = _repo(tmp_path / "outsider")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/remotes/origin/develop", base)
+    (repo / "tracked.txt").write_text("range commit change\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "change after develop")
+    (repo / "tracked.txt").write_text("working tree change outside range\n", encoding="utf-8")
+
+    monkeypatch.setenv("GIT_DIR", str(outsider / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(outsider))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(outsider / ".git" / "index"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(outsider / ".git"))
+    monkeypatch.setenv("GIT_NAMESPACE", "missing-namespace")
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(outsider / ".git" / "objects"))
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", str(outsider / ".git" / "objects"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.worktree")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(outsider))
+
+    original_run = codex_review.subprocess.run
+
+    def run_with_clean_git_environment(*args, **kwargs):
+        env = kwargs.get("env")
+        assert isinstance(env, dict)
+        assert not any(name.startswith("GIT_") for name in env)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(codex_review.subprocess, "run", run_with_clean_git_environment)
+
+    path, _digest, _size = capture(repo, base="origin/develop...HEAD")
+
+    body = path.read_bytes()
+    assert b"range commit change" in body
+    assert b"working tree change outside range" not in body
+
+
 def test_capture_repeat_excludes_review_and_proxy_artifacts_from_untracked_diff(tmp_path: Path):
     repo = _repo(tmp_path / "repo")
     (repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
