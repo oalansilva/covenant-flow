@@ -4,6 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from test_overlay_fixtures import filled_overlay_dict
@@ -11,6 +12,9 @@ from test_overlay_fixtures import filled_overlay_dict
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL = ROOT / "install.sh"
+pytestmark = pytest.mark.skipif(
+    not INSTALL.is_file(), reason="installer integration tests require the product install.sh"
+)
 
 
 def _target(root: Path) -> tuple[Path, bytes]:
