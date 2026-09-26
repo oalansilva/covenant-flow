@@ -158,7 +158,7 @@ def session_start(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     cwd = _cwd(payload)
     try:
-        result = page(cwd=cwd, path=cwd)
+        result = page(cwd=cwd, path=cwd, client="codex")
         context = str(result.get("additional_context") or "")
         if not context:
             raise RuntimeError("paging.page returned no additional_context")
