@@ -201,12 +201,33 @@ def test_codex_page_routes_reviewers_to_codex_without_changing_cursor_page():
     )["additional_context"]
 
     assert "Cliente ativo: Codex CLI" in codex
-    assert "Agent nativo do Codex" in codex
+    assert "Agents nativos do Codex" in codex
     assert "`diff-reviewer` e `code-reviewer`" in codex
     assert "ambos `sandbox_mode=read-only` recebem o mesmo" in codex
-    assert "`review_diff_path` e o SHA-256 desse diff verificado pelo pai" in codex
-    assert "`execucao.codex` de `.cursor/model-map.yaml`" in codex
+    assert "prova por sinal/trace autoritativo do runtime" in codex
+    assert "o turno que fará os spawns está `read-only`" in codex
+    assert "Sem prova, modo diferente ou trace indisponível, recuse visivelmente antes de qualquer spawn" in codex
+    assert "O `sandbox_mode` do Agent configura só o filho e não prova nem altera o sandbox do turno pai" in codex
+    assert "`/permissions` → `Read Only`" in codex
+    assert "`codex exec --sandbox read-only`" in codex
+    assert "até ambos retornarem `completed` com payload" in codex
+    assert "registra proxies via `codex_proxy.py`" in codex
+    assert "metadados observados de runtime/trace e retorno, nunca inferidos" in codex
+    assert "use o `.cursor/model-map.yaml` compartilhado, sem fallback" in codex
+    assert "scripts/process-fsm/review_process_checklist.py" in codex
+    assert "`review_diff_path` e SHA-256" in codex
+    assert "`execucao.codex` do mapa compartilhado" in codex
     assert "Cursor Task, `cursor-agent` ou Composer" in codex
+    codex_order = [
+        codex.index("o pai/orquestrador gravável primeiro materializa"),
+        codex.index("Depois inicia uma sessão Codex CLI dedicada"),
+        codex.index("Nessa sessão, no mesmo turno"),
+        codex.index("Mantenha essa sessão `read-only`"),
+        codex.index("Após os dois retornos, o pai/orquestrador gravável registra proxies"),
+        codex.index("Então executa `verify-wave`"),
+        codex.index("Faça commit apenas depois de `verify-wave`"),
+    ]
+    assert codex_order == sorted(codex_order)
     assert "Cliente ativo: Codex CLI" not in cursor
     assert "Agent nativo do Codex" not in cursor
 
@@ -214,9 +235,34 @@ def test_codex_page_routes_reviewers_to_codex_without_changing_cursor_page():
         encoding="utf-8"
     )
     codex_protocol = skill.split("Protocolo por filho:", 1)[1].split("\n\n", 1)[0]
-    assert "verifica seu SHA-256" in codex_protocol
-    assert "recebem o mesmo `review_diff_path` e hash" in codex_protocol
-    assert "ambos com `sandbox_mode=read-only`" in codex_protocol
+    review_contract = (
+        skill.split("No Code Review, preserve esta ordem:", 1)[1]
+        .lstrip("\n")
+        .split("\n\n", 1)[0]
+    )
+    assert "ordem de preparação gravável, onda nativa `read-only` e persistência gravável" in codex_protocol
+    assert "`sandbox_mode=read-only` em `.codex/agents/*.toml` configura apenas cada filho" in codex_protocol
+    assert "sessão Codex CLI dedicada" in review_contract
+    assert "recuse visivelmente antes de qualquer spawn" in review_contract
+    assert "recebem o mesmo path + SHA-256" in review_contract
+    assert "par vigente de `execucao.codex` do mapa compartilhado" in review_contract
+    assert "`sandbox_mode=read-only`" in review_contract
+    assert "A sessão permanece `read-only` até ambos retornarem `completed` com payload" in review_contract
+    assert "não grave proxies nem faça follow-up sob escrita nessa sessão" in review_contract
+    assert "Só depois dos dois retornos, o pai/orquestrador gravável registra um proxy" in review_contract
+    assert "Nunca invente ou infira metadados" in review_contract
+    assert "Use o `.cursor/model-map.yaml` compartilhado do consumidor, sem fallback" in review_contract
+    assert "Em seguida execute `verify-wave`" in review_contract
+    assert "scripts/process-fsm/review_process_checklist.py` passarem (`PASS`)" in review_contract
+    assert "Não inferir que o Agent API controla o sandbox do pai" in skill
+    skill_order = [
+        review_contract.index("O pai/orquestrador gravável materializa"),
+        review_contract.index("Inicie no mesmo worktree uma sessão Codex CLI dedicada"),
+        review_contract.index("Só depois dos dois retornos, o pai/orquestrador gravável registra"),
+        review_contract.index("Em seguida execute `verify-wave`"),
+        review_contract.index("Faça commit somente depois que `verify-wave`"),
+    ]
+    assert skill_order == sorted(skill_order)
 
 
 def test_design_stub_names_openspec_prototype_allow():
