@@ -28,10 +28,22 @@ FOOTER = (
     "Chat é wording; NLU ≠ δ. Overlay on-demand (portas, Drive, release)."
 )
 CODEX_CLIENT_CONTEXT = (
-    "Cliente ativo: Codex CLI. No Code Review, crie `diff-reviewer` e `code-reviewer` "
-    "com o Agent nativo do Codex; ambos `sandbox_mode=read-only` recebem o mesmo "
-    "`review_diff_path` e o SHA-256 desse diff verificado pelo pai; use `execucao.codex` "
-    "de `.cursor/model-map.yaml`. "
+    "Cliente ativo: Codex CLI. No Code Review, o pai/orquestrador gravável primeiro "
+    "materializa e verifica o diff e SHA-256. Depois inicia uma sessão Codex CLI dedicada "
+    "no mesmo worktree, com prova por sinal/trace autoritativo do runtime de que o turno "
+    "que fará os spawns está `read-only` (`codex exec --sandbox read-only` ou "
+    "`/permissions` → `Read Only`). Sem prova, modo diferente ou trace indisponível, "
+    "recuse visivelmente antes de qualquer spawn. Nessa sessão, no mesmo turno, crie "
+    "`diff-reviewer` e `code-reviewer` como Agents nativos do Codex; ambos "
+    "`sandbox_mode=read-only` recebem o mesmo `review_diff_path` e SHA-256, com o par "
+    "vigente `execucao.codex` do mapa compartilhado. Mantenha essa sessão `read-only` "
+    "até ambos retornarem `completed` com payload; sem escrita nem follow-up sob escrita. "
+    "Após os dois retornos, o pai/orquestrador gravável registra proxies via "
+    "`codex_proxy.py` com argumentos do spawn e metadados observados de runtime/trace e "
+    "retorno, nunca inferidos; ausentes ficam `unavailable`. Então executa `verify-wave`. "
+    "Faça commit apenas depois de `verify-wave` e `scripts/process-fsm/review_process_checklist.py` "
+    "passarem (`PASS`). O `sandbox_mode` do Agent configura só o filho e não prova nem "
+    "altera o sandbox do turno pai; use o `.cursor/model-map.yaml` compartilhado, sem fallback. "
     "Não encaminhe os reviewers para Cursor Task, `cursor-agent` ou Composer."
 )
 
