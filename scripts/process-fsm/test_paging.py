@@ -187,6 +187,38 @@ def test_page_uses_yaml_stubs():
     assert "sync: dirty" in qa
 
 
+def test_codex_page_routes_reviewers_to_codex_without_changing_cursor_page():
+    codex = page(
+        cwd=".",
+        client="codex",
+        resolve_fn=_resolve("613", "card-613-process-fsm-paging"),
+        status_provider=_provider("Code Review"),
+    )["additional_context"]
+    cursor = page(
+        cwd=".",
+        resolve_fn=_resolve("613", "card-613-process-fsm-paging"),
+        status_provider=_provider("Code Review"),
+    )["additional_context"]
+
+    assert "Cliente ativo: Codex CLI" in codex
+    assert "Agent nativo do Codex" in codex
+    assert "`diff-reviewer` e `code-reviewer`" in codex
+    assert "ambos `sandbox_mode=read-only` recebem o mesmo" in codex
+    assert "`review_diff_path` e o SHA-256 desse diff verificado pelo pai" in codex
+    assert "`execucao.codex` de `.cursor/model-map.yaml`" in codex
+    assert "Cursor Task, `cursor-agent` ou Composer" in codex
+    assert "Cliente ativo: Codex CLI" not in cursor
+    assert "Agent nativo do Codex" not in cursor
+
+    skill = (REPO / ".cursor" / "skills" / "covenant-flow" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    codex_protocol = skill.split("Protocolo por filho:", 1)[1].split("\n\n", 1)[0]
+    assert "verifica seu SHA-256" in codex_protocol
+    assert "recebem o mesmo `review_diff_path` e hash" in codex_protocol
+    assert "ambos com `sandbox_mode=read-only`" in codex_protocol
+
+
 def test_design_stub_names_openspec_prototype_allow():
     fsm = load_fsm()
     stub = str(fsm["context_file"]["Design"])

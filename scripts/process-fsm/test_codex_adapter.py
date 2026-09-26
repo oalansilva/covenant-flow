@@ -319,6 +319,27 @@ def test_session_start_uses_real_shared_page_for_bound_states(
         assert f"enabled_events: {expected_event}" in context
 
 
+def test_codex_code_review_session_does_not_route_reviewers_through_cursor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo = _repo(tmp_path, "card-1042-codex-review-routing")
+    _model_map(repo)
+    monkeypatch.setattr(
+        codex_adapter,
+        "page",
+        lambda **kwargs: shared_page(**kwargs, status_provider=lambda _bound: "Code Review"),
+    )
+
+    context = codex_adapter.session_start({"cwd": str(repo)})["hookSpecificOutput"]["additionalContext"]
+
+    assert "q=Code Review" in context
+    assert "Cliente ativo: Codex CLI" in context
+    assert "`diff-reviewer` e `code-reviewer`" in context
+    assert "Agent nativo do Codex" in context
+    assert "`execucao.codex` de `.cursor/model-map.yaml`" in context
+    assert "Não encaminhe os reviewers para Cursor Task, `cursor-agent` ou Composer." in context
+
+
 def test_session_start_page_failure_keeps_status_unread_and_write_denied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

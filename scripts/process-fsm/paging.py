@@ -27,6 +27,13 @@ FOOTER = (
     "Resolva (q, bound_card, q_git). Não invente aresta. "
     "Chat é wording; NLU ≠ δ. Overlay on-demand (portas, Drive, release)."
 )
+CODEX_CLIENT_CONTEXT = (
+    "Cliente ativo: Codex CLI. No Code Review, crie `diff-reviewer` e `code-reviewer` "
+    "com o Agent nativo do Codex; ambos `sandbox_mode=read-only` recebem o mesmo "
+    "`review_diff_path` e o SHA-256 desse diff verificado pelo pai; use `execucao.codex` "
+    "de `.cursor/model-map.yaml`. "
+    "Não encaminhe os reviewers para Cursor Task, `cursor-agent` ou Composer."
+)
 
 ResolveFn = Callable[..., dict[str, str | None]]
 StatusProvider = Callable[[str | None], str | None]
@@ -52,6 +59,7 @@ def page(
     *,
     cwd: str | Path,
     path: str | Path | None = None,
+    client: str | None = None,
     issue_id: str | int | None = None,
     resolve_fn: ResolveFn = resolve,
     status_provider: StatusProvider | None = github_status_provider,
@@ -95,6 +103,7 @@ def page(
     lines = [
         "process-fsm page",
         f"q={q_display if q_display is not None else 'None'} bound_card={bound_display} q_git={git}",
+        *([CODEX_CLIENT_CONTEXT] if client == "codex" else []),
         f"enabled_events: {events}",
         "---",
         stub,
