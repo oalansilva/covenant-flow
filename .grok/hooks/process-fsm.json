@@ -20,6 +20,16 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "matcher": "Task|Agent|spawn_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "test -f .grok/hooks/process-fsm-model-selection.sh && exec .grok/hooks/process-fsm-model-selection.sh; test -f ./process-fsm-model-selection.sh && exec ./process-fsm-model-selection.sh; root=`git rev-parse --show-toplevel 2>/dev/null`; test -f \"$root/.grok/hooks/process-fsm-model-selection.sh\" && exec \"$root/.grok/hooks/process-fsm-model-selection.sh\"; printf '%s\\n' '{\"decision\":\"deny\",\"reason\":\"model_selection resolver unavailable\"}'",
+            "timeout": 30
+          }
+        ]
       }
     ],
     "SessionStart": [

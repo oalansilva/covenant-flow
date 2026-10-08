@@ -6,4 +6,4 @@ description: "Operar GitHub Projects v2 a partir do contexto correto do workspac
 # github-project-board
 
 Cliente: Grok Build. MUST Read `.cursor/skills/github-project-board/SKILL.md` and follow it as the runbook.
-Map Cursor Task `inherit` to `spawn_subagent` inherit. Do not copy the runbook here.
+No Grok, `spawn_subagent` passa `model` da captura local do resolver para este cliente/faixa. Sem esforço não suportado, herança ou fallback. Do not copy the runbook here.

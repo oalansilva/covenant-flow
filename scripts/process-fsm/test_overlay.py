@@ -157,10 +157,10 @@ def test_grok_opencode_have_no_law_table():
 
 
 D5_CLIENTS = (
-    "Clientes: Cursor Agent (cooperativo); Grok Build, OpenCode e dsh "
+    "Clientes: Cursor Agent (cooperativo); Codex CLI (cooperativo; hooks só após trust review); Grok Build, OpenCode e dsh "
     "(cooperativos até ensaio deny na branch de integração)."
 )
-D5_NO_AUTO = "Não reivindique modo Auto no Cursor, no Grok, no OpenCode nem no dsh."
+D5_NO_AUTO = "Não reivindique modo Auto no Cursor, no Codex, no Grok, no OpenCode nem no dsh."
 
 
 def test_render_agents_hardcodes_four_cooperative_clients():

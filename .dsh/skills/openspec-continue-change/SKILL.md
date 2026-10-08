@@ -6,4 +6,5 @@ description: Continue working on an OpenSpec change by creating the next artifac
 # openspec-continue-change
 
 Cliente: dsh. MUST Read `.cursor/skills/openspec-continue-change/SKILL.md` and follow it as the runbook.
+Resolver local: `scripts/process-fsm/model_selection.py` para este cliente/faixa; parâmetros nativos explícitos ou recusa visível.
 Do not copy the runbook here.

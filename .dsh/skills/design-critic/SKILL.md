@@ -6,4 +6,5 @@ description: "Crítica de Design com teto de rodadas: sem-tela fecha em 1 autor 
 # design-critic
 
 Cliente: dsh. MUST Read `.cursor/skills/design-critic/SKILL.md` and follow it as the runbook.
+Resolver local: `scripts/process-fsm/model_selection.py` para este cliente/faixa; parâmetros nativos explícitos ou recusa visível.
 Do not copy the runbook here.

@@ -9,6 +9,8 @@ Canónico: `.cursor/skills/design-critic/` no git do consumidor. Vale nos client
 
 ## Classificação
 
+No chat do operador e nas seções Impeccable/Design Critique de `design.md`, emitir só bullets P0–P3, disposition e verdict. Proibido tabela Nielsen, ensaio de personas ou Brief/Critique/Audit/Trace integrais. Relatório completo (incluindo tabela Nielsen/personas e metadata de modelo) fica somente no snapshot `.impeccable/critique/`; Apply e Code Review não o leem. Esta cláusula preserva o contrato de emissão da antiga cópia reconciliada em `.agents/skills/design-critic/`.
+
 Só produto/escopo/contrato visível (tela, estados, acessibilidade, escopo furado) gera P0/P1. Detalhe de implementação (ORM, nomes internos, polish) é P3 "detalhe de Apply": registado como aceito em `design.md` e resolvido no Apply — o crítico nunca o reabre como P0/P1.
 
 ## Teto

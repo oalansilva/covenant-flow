@@ -59,6 +59,15 @@ copy_tree() {
   rsync -a --delete "$from" "$to"
 }
 
+copy_tree_if_missing() {
+  local from="$1" to="$2"
+  if [[ -e "$to" ]]; then
+    echo "preserving existing path: $to"
+    return
+  fi
+  copy_tree "$from" "$to"
+}
+
 if [[ "$MODE" == "init" ]]; then
   refuse_bad_channels
   mkdir -p "$TARGET/.covenant-flow"
@@ -103,6 +112,22 @@ except OverlayError as exc:
     raise SystemExit(f"overlay invalid: {exc}")
 PY
 
+# All Codex collisions are checked before any part of the pin is written. The
+# hook preflight also refuses an active [hooks] table in config.toml; the bridge
+# preflight refuses operator-edited skills without touching vendor paths.
+python_overlay "$SOURCE/scripts/process-fsm/codex_hooks.py" preflight --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/codex_skills.py" preflight --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/codex_agents.py" preflight --source "$SOURCE" --target "$TARGET"
+# Preflight only the shipped mechanisms. Never read the account's selections.
+for mechanism in .cursor/model-policy.yaml scripts/process-fsm/model_selection.py scripts/process-fsm/model_selection_adapter.py scripts/process-fsm/model_selection_lib.js scripts/process-fsm/model_proxy.py scripts/process-fsm/release_model_selection.py scripts/process-fsm/codex_adapter.py scripts/process-fsm/codex_proxy.py scripts/process-fsm/codex_review.py .dsh/plugin/process-fsm-guard.js .opencode/plugin/process-fsm-guard.js .cursor/hooks/process-fsm-model-selection.sh .grok/hooks/process-fsm-model-selection.sh; do
+  [[ -f "$SOURCE/$mechanism" ]] || die "selection mechanism missing in source: $mechanism"
+done
+python_overlay - <<PY
+from model_selection import policy
+policy()
+PY
+
+copy_tree "$SOURCE/.cursor/model-policy.yaml" "$TARGET/.cursor/model-policy.yaml"
 copy_tree "$SOURCE/.cursor/process-fsm.yaml" "$TARGET/.cursor/process-fsm.yaml"
 copy_tree "$SOURCE/.cursor/hooks.json" "$TARGET/.cursor/hooks.json"
 copy_tree "$SOURCE/.cursor/hooks/" "$TARGET/.cursor/hooks/"
@@ -125,15 +150,18 @@ copy_tree "$SOURCE/.dsh/plugin/" "$TARGET/.dsh/plugin/"
 copy_tree "$SOURCE/.dsh/skills/" "$TARGET/.dsh/skills/"
 copy_tree "$SOURCE/.dsh/cordis.patch.yml" "$TARGET/.dsh/cordis.patch.yml"
 
-copy_tree "$SOURCE/.agents/skills/impeccable/" "$TARGET/.agents/skills/impeccable/"
-copy_tree "$SOURCE/.agents/skills/design-critic/" "$TARGET/.agents/skills/design-critic/"
-copy_tree "$SOURCE/.agents/skills/playwright-cli/" "$TARGET/.agents/skills/playwright-cli/"
+copy_tree_if_missing "$SOURCE/.agents/skills/impeccable/" "$TARGET/.agents/skills/impeccable/"
+copy_tree_if_missing "$SOURCE/.agents/skills/playwright-cli/" "$TARGET/.agents/skills/playwright-cli/"
 
 copy_tree "$SOURCE/scripts/process-fsm/" "$TARGET/scripts/process-fsm/"
 copy_tree "$SOURCE/scripts/release-guard" "$TARGET/scripts/release-guard"
 if [[ -f "$SOURCE/scripts/post-card-evidence-comment.sh" ]]; then
   copy_tree "$SOURCE/scripts/post-card-evidence-comment.sh" "$TARGET/scripts/post-card-evidence-comment.sh"
 fi
+
+python_overlay "$TARGET/scripts/process-fsm/codex_skills.py" install --source "$TARGET" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/codex_hooks.py" install --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/codex_agents.py" install --source "$SOURCE" --target "$TARGET"
 
 python_overlay - <<PY
 from pathlib import Path
@@ -146,6 +174,7 @@ print("pin", "$PIN")
 print("overlay_doc", overlay.get("overlay_doc"))
 PY
 
-# Do not touch overlay_doc markdown.
+# Do not touch overlay_doc markdown or account model selections.
+echo "Codex project hooks require operator trust review; pin does not confer trust."
 echo "implantar --pin $PIN complete in $TARGET"
 echo "Commit these trees in the consumer git (not a submodule)."

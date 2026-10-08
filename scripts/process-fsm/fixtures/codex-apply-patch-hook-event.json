@@ -1,0 +1,14 @@
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "apply_patch",
+  "cwd": "/tmp/codex-consumer-clone",
+  "model": "gpt-6-luna",
+  "permission_mode": "workspace-write",
+  "session_id": "fixture-session",
+  "tool_use_id": "fixture-tool-use",
+  "transcript_path": "/tmp/codex-rollout.jsonl",
+  "turn_id": "fixture-turn",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Delete File: frontend/src/.codex-real-hook-envelope-probe.txt\n*** Add File: frontend/src/.codex-real-hook-envelope-probe.txt\n+fixture\n*** End Patch"
+  }
+}

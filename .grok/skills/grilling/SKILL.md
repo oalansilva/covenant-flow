@@ -6,4 +6,4 @@ description: Grill the user relentlessly about a plan, decision, or idea. Use wh
 # grilling
 
 Cliente: Grok Build. MUST Read `.cursor/skills/grilling/SKILL.md` and follow it as the runbook.
-Map Cursor Task `inherit` to `spawn_subagent` inherit. Do not copy the runbook here.
+No Grok, `spawn_subagent` passa `model` da captura local do resolver para este cliente/faixa. Sem esforço não suportado, herança ou fallback. Do not copy the runbook here.

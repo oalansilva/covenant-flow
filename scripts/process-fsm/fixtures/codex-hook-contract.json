@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "trusted_project_hook": {
+    "pre_tool_use": "Covenant adapter runs and can return documented permissionDecision=deny before the matched local tool call",
+    "session_start": "Covenant adapter injects the shared paging.page additionalContext"
+  },
+  "absent_disabled_or_untrusted_hook": {
+    "adapter_invocation": "not-guaranteed",
+    "policy_result": "no Covenant hook decision is produced",
+    "operator_expectation": "host-native permission checks remain; do not claim Covenant guard coverage"
+  },
+  "empty_apply_patch_path": {
+    "expected": "deny",
+    "reason": "empty_path"
+  },
+  "missing_overlay": {
+    "expected": "bound card remains visible; Status unread; Write produto deny; no invented state"
+  },
+  "uncovered_hosted_route": {
+    "expected": "no adapter invocation unless the host emits a matched local tool event"
+  },
+  "limits": {
+    "mode": "cooperative",
+    "auto_claim": false,
+    "post_tool_use_or_stop_reverses_side_effects": false
+  }
+}

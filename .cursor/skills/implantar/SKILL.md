@@ -32,15 +32,38 @@ Preencha o overlay **antes** de `--pin`. Overlay vazio a meio **não** é sucess
 
 ## --pin
 
-Exige overlay já válido (join `board.status_options` nome→id; globs e board preenchidos).
+Exige overlay já válido (join `board.status_options` nome→id; globs e board preenchidos) sem exigir mapa legado ou configuração operacional local existente.
 
 ```bash
 /path/to/covenant-flow/install.sh --pin v1.1.4
 ```
 
-Copia: nucleus (`.cursor/process-fsm.yaml`, `scripts/process-fsm/`), quatro adapters (`.cursor/` `.grok/` `.opencode/` `.dsh/`), `.agents/skills/` (`impeccable`, `design-critic`, `playwright-cli`), helpers (`publish-openspec-card-artifacts.sh`, `release-guard` genérico, `dsh_boot.sh`), `AGENTS.md` gerado do overlay. Copia `.dsh/` **sempre**, mesmo quando o overlay omite `clients.dsh`. Grava `pin` no overlay. **Não** injeta `clients.dsh`. **Não** sobrescreve o Markdown `overlay_doc`.
+Copia o nucleus e quatro adapters existentes (`.cursor/` `.grok/` `.opencode/` `.dsh/`), o quinto adapter local `.codex/`, `.agents/skills/` (pontes para canônicos, Impeccable e playwright-cli apenas se ainda ausentes), helpers (`publish-openspec-card-artifacts.sh`, `release-guard` genérico, `dsh_boot.sh`) e `AGENTS.md` gerado do overlay. Copia `.dsh/` **sempre**, mesmo quando o overlay omite `clients.dsh`. Instala `.cursor/model-policy.yaml` e o resolver/adapters; não lê/escreve escolhas operacionais nem injeta pares. Grava `pin` no overlay. **Não** injeta `clients.dsh`. **Não** sobrescreve o Markdown `overlay_doc`.
 
 Bump: re-correr `--pin` com a tag nova; preserva chaves de projeto; o consumidor commita o diff.
+
+### Inventário de descoberta Codex
+
+O instalador de pin copia o adapter local para `.codex/` e as pontes de skills
+para `.agents/skills/`. Nesta árvore, `.agents/skills/` já contém `impeccable`
+do fornecedor, `design-critic` (que deve apontar ao canônico em
+`.cursor/skills/design-critic/`) e `playwright-cli` (skill existente, sem
+equivalente canônico em `.cursor/skills/`). O inventário canônico vem de cada
+`.cursor/skills/<nome>/SKILL.md`; o pin gera pontes para esses nomes sem copiar
+os runbooks.
+
+No destino, um `.agents/skills/impeccable/` existente é propriedade do
+fornecedor e deve permanecer byte a byte intacto. Um `.codex/hooks.json`
+existente pode conter hooks locais do operador: preservar todas as chaves e
+handlers alheios, mesclar somente handlers do Covenant Flow e recusar JSON
+inválido ou conflito sem modificar o destino. Um `.codex/config.toml` com
+`[hooks]` também é uma fonte ativa de hooks; o pin deve detectá-lo e recusar a
+instalação automática até a composição ficar explícita. Mostrar o caminho de
+cada recusa e não deixar outros arquivos do pin parcialmente escritos.
+
+`install.sh --pin` faz preflight read-only de mecanismos/política e hooks/roles/bridges antes de copiar; não exige mapa legado nem lê/escreve `$HOME/.config/covenant-flow/model-selection.yaml`. Instala política/resolver/adapters e pacote Codex, nunca escolhas. Flags antigas de codex_models.py são compatibilidade sem leitura/escrita. Pin comunica trust review explícito da definição atual pelo operador e não concede confiança. Migração explícita e rollback: `docs/model-selection.md`.
+
+O installer é entregue no nucleus; o consumidor não precisa copiá-lo para operar. Task3.4 foi implementada e ensaiada no worktree nucleus do mesmo #1080: seis testes reais de installer, incluindo resolver/hook funcional no destino pinado. Nenhuma escolha operacional é default de pin.
 
 ## Fail-closed
 

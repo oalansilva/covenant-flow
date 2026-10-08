@@ -27,6 +27,25 @@ FOOTER = (
     "Resolva (q, bound_card, q_git). Não invente aresta. "
     "Chat é wording; NLU ≠ δ. Overlay on-demand (portas, Drive, release)."
 )
+CODEX_CLIENT_CONTEXT = (
+    "Cliente ativo: Codex CLI. No Code Review, o pai/orquestrador gravável primeiro "
+    "materializa e verifica o diff e SHA-256. Depois inicia uma sessão Codex CLI dedicada "
+    "no mesmo worktree, com prova por sinal/trace autoritativo do runtime de que o turno "
+    "que fará os spawns está `read-only` (`codex exec --sandbox read-only` ou "
+    "`/permissions` → `Read Only`). Sem prova, modo diferente ou trace indisponível, "
+    "recuse visivelmente antes de qualquer spawn. Nessa sessão, no mesmo turno, crie "
+    "`diff-reviewer` e `code-reviewer` como Agents nativos do Codex; ambos "
+    "`sandbox_mode=read-only` recebem o mesmo `review_diff_path` e SHA-256, com o par "
+    "capturado de `codex/execucao` da escolha local. Mantenha essa sessão `read-only` "
+    "até ambos retornarem `completed` com payload; sem escrita nem follow-up sob escrita. "
+    "Após os dois retornos, o pai/orquestrador gravável registra proxies via "
+    "`codex_proxy.py` com argumentos do spawn e metadados observados de runtime/trace e "
+    "retorno, nunca inferidos; ausentes ficam `unavailable`. Então executa `verify-wave`. "
+    "Faça commit apenas depois de `verify-wave` e `scripts/process-fsm/review_process_checklist.py` "
+    "passarem (`PASS`). O `sandbox_mode` do Agent configura só o filho e não prova nem "
+    "altera o sandbox do turno pai; use a captura local de nascimento, sem fallback. "
+    "Não encaminhe os reviewers para Cursor Task, `cursor-agent` ou Composer."
+)
 
 ResolveFn = Callable[..., dict[str, str | None]]
 StatusProvider = Callable[[str | None], str | None]
@@ -52,6 +71,7 @@ def page(
     *,
     cwd: str | Path,
     path: str | Path | None = None,
+    client: str | None = None,
     issue_id: str | int | None = None,
     resolve_fn: ResolveFn = resolve,
     status_provider: StatusProvider | None = github_status_provider,
@@ -95,6 +115,7 @@ def page(
     lines = [
         "process-fsm page",
         f"q={q_display if q_display is not None else 'None'} bound_card={bound_display} q_git={git}",
+        *([CODEX_CLIENT_CONTEXT] if client == "codex" else []),
         f"enabled_events: {events}",
         "---",
         stub,

@@ -5,6 +5,7 @@ alwaysApply: true
 
 # Harness (Cursor)
 
-- Cliente: Cursor Agent. Hooks: `.cursor/hooks.json`. Task `inherit`.
+- Cliente: Cursor Agent. Hooks: `.cursor/hooks.json`.
+- Task: juízo/execução = resolver `scripts/process-fsm/model_selection.py` e captura local por nascimento. Sem inherit do picker. Papéis = skill `covenant-flow`.
 - Always-on δ vive em `AGENTS.md`. Não invente aresta; use `process_event`.
 - Overlay on-demand; runbook = skill `covenant-flow`.

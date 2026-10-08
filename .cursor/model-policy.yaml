@@ -1,0 +1,37 @@
+version: 1
+schema_version: 1
+forbid: [composer-2.5-fast, inherit, auto]
+roles:
+  grill-card: juizo
+  design-autor: juizo
+  design-author: juizo
+  design-critic: juizo
+  assessment-a: juizo
+  assessment-b: juizo
+  apply-coluna: execucao
+  qa-gate: execucao
+  diff-reviewer: execucao
+  code-reviewer: execucao
+  same-card-search: execucao
+  fecho-lote: execucao
+clients:
+  cursor:
+    contract: cursor-task-model-v1
+    fields: [label, model]
+    required: [label, model]
+  codex:
+    contract: codex-agent-pair-v1
+    fields: [label, model, effort]
+    required: [label, model, effort]
+  grok:
+    contract: grok-spawn-model-v1
+    fields: [label, model]
+    required: [label, model]
+  opencode:
+    contract: opencode-task-unavailable-v1
+    fields: [label, model, provider, variant]
+    required: [label, model, provider]
+  dsh:
+    contract: dsh-subagent-selection-v1
+    fields: [label, model, provider, effort]
+    required: [label, model, provider]
