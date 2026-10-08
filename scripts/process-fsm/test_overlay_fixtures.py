@@ -90,3 +90,23 @@ def write_overlay(repo: Path, **overrides: Any) -> Path:
         encoding="utf-8",
     )
     return dest
+
+
+def write_model_map(repo: Path) -> Path:
+    """Install a consumer-owned legacy model map for pin integration tests."""
+    path = repo / ".cursor" / "model-map.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "juizo": {"label": "Cursor judgment", "slug": "cursor-judgment"},
+                "execucao": {"label": "Cursor execution", "slug": "cursor-execution"},
+                "forbid": ["composer-2.5-fast", "inherit"],
+            },
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return path

@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from dsh_stubs import stub_errors  # noqa: E402
 from paging import page  # noqa: E402
-from test_overlay_fixtures import write_overlay  # noqa: E402
+from test_overlay_fixtures import write_model_map, write_overlay  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -521,6 +521,7 @@ def test_dsh_stubs_match_cursor_skills():
 def test_pin_copies_dsh_without_injecting_clients_dsh(tmp_path: Path):
     target = tmp_path / "consumer"
     write_overlay(target)
+    write_model_map(target)
     overlay_before = yaml.safe_load(
         (target / ".covenant-flow" / "overlay.yaml").read_text(encoding="utf-8")
     )
@@ -1294,4 +1295,3 @@ def test_r9_a8_a9_do_not_sigterm_operator_3080(tmp_path: Path):
         assert sidecar != LIVE_SIDECAR
     assert _listen_pids(LIVE_LISTEN) == live_pids
     assert _live_sidecar_bytes() == live_sidecar
-

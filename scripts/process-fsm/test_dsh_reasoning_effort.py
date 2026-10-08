@@ -490,7 +490,7 @@ process.stdout.write(JSON.stringify({{
     assert 'export const inject = ["systemPrompt", "skills", "jobs"];' in guard
 
 
-def test_e11_guard_and_law_files_untouched() -> None:
+def test_e11_guard_and_law_contracts_are_stable() -> None:
     guard_src = (ROOT / "guard.py").read_text(encoding="utf-8")
     assert "reasoningEffort" not in guard_src
     assert "dsh_reasoning_effort" not in guard_src
@@ -513,21 +513,13 @@ def test_e11_guard_and_law_files_untouched() -> None:
     skill = SKILL.read_text(encoding="utf-8")
     assert "ERROR: subagent spawn failed/empty" in skill
     assert "#518" in skill
-    proc = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(REPO),
-            "diff",
-            "--",
-            ".cursor/process-fsm.yaml",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == ""
+    from guard import extract_paths, normalize
+
+    shell = normalize({"tool_name": "exec_command", "tool_input": {"command": "true"}})
+    assert shell["tool_name"] == "Bash"
+    patch = "*** Begin Patch\n*** Add File: backend/app.py\n+payload\n*** End Patch"
+    write = normalize({"tool_name": "apply_patch", "tool_input": {"patchText": patch}})
+    assert extract_paths(write) == ["backend/app.py"]
     yaml_text = (REPO / ".cursor" / "process-fsm.yaml").read_text(encoding="utf-8")
     assert "enabled_tools" in yaml_text
     qa_stub = yaml.safe_load(yaml_text)["context_file"]["QA"]

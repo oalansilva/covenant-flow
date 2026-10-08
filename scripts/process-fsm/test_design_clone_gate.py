@@ -18,6 +18,7 @@ from design_clone_gate import (
     load_catalog_file,
     load_head_catalog,
     parse_live_route,
+    parse_surface,
     requires_existing_clone,
     routes_from_catalog,
 )
@@ -228,6 +229,10 @@ def test_parse_live_route_accepts_landing_and_na():
     value, justification = parse_live_route("live_route: N/A harness-only; no product route\n")
     assert value == "N/A"
     assert "harness-only" in justification
+
+
+def test_parse_surface_accepts_none_for_non_ui_changes():
+    assert parse_surface("surface: none\n") == "none"
 
 
 def test_requires_existing_clone_and_new_exempt_treat_landing():

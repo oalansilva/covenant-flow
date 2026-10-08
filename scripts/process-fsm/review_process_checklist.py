@@ -24,7 +24,11 @@ ERROR = "ERROR: process-checklist failed:"
 FSM_REL = ".cursor/process-fsm.yaml"
 PATCH_REL = Path(".cursor") / "tmp" / "review-diff.patch"
 PENDING_RE = re.compile(r"^- \[ \] ", re.MULTILINE)
+TASK_ROW_RE = re.compile(r"^- \[([ xX])\]\s+(\d+(?:\.\d+)+)\b(.*)$")
+TASK_PHASE_RE = re.compile(r"\s+<!-- covenant-flow:after-(commit|pin|qa) -->\s*\Z")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+PHASE_ORDER = {"precommit": 0, "postcommit": 1, "postpin": 2, "postqa": 3}
+TASK_BARRIER_ORDER = {"commit": 1, "pin": 2, "qa": 3}
 _GIT_OVERRIDE_VARS = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -67,8 +71,8 @@ def _git_abbrev_ref(directory: Path) -> str:
     return branch
 
 
-def _bound_change_dir(repo: Path) -> Path | None:
-    changes = repo / "openspec" / "changes"
+def _bound_change_dir(repo: Path, change_root: Path | None = None) -> Path | None:
+    changes = (change_root or repo) / "openspec" / "changes"
     if not changes.is_dir():
         return None
     q_git = _git_abbrev_ref(repo)
@@ -97,12 +101,46 @@ def _check_wave_same_turn(value: str | None) -> str | None:
     return None
 
 
-def _check_tasks(change_dir: Path) -> str | None:
+def _check_tasks(change_dir: Path, phase: str | None = None) -> str | None:
     path = change_dir / "tasks.md"
     if not path.is_file():
         return "tasks.md pending"
     text = path.read_text(encoding="utf-8")
-    if PENDING_RE.search(text):
+    pending = False
+    current_order = PHASE_ORDER.get(phase, max(PHASE_ORDER.values()))
+    for line in text.splitlines():
+        if not line.startswith("- ["):
+            continue
+        row = TASK_ROW_RE.match(line)
+        annotation_text = "covenant-flow:" in line
+        phase_match = TASK_PHASE_RE.search(line)
+        if annotation_text and (
+            phase_match is None or row is None or line.count("covenant-flow:") != 1
+        ):
+            return "tasks.md phase annotation"
+        if row is None:
+            if PENDING_RE.match(line):
+                pending = True
+            continue
+        state, task_id, _body = row.groups()
+        if state.casefold() == "x":
+            continue
+        pending = True
+        if phase is None:
+            continue
+        if phase_match is None:
+            return "tasks.md pending"
+        barrier = phase_match.group(1)
+        barrier_order = TASK_BARRIER_ORDER[barrier]
+        if barrier_order <= current_order:
+            phase_name = {1: "postcommit", 2: "postpin", 3: "postqa"}[barrier_order]
+            return f"tasks.md task {task_id} pending at {phase_name}"
+    if pending and phase is None:
+        return "tasks.md pending"
+    if pending and any(
+        PENDING_RE.match(line) and TASK_ROW_RE.match(line) is None
+        for line in text.splitlines()
+    ):
         return "tasks.md pending"
     return None
 
@@ -303,14 +341,22 @@ def _check_fsm_edge(repo: Path, patch: str) -> str | None:
     return None
 
 
-def check(repo: Path, wave_same_turn: str | None) -> str | None:
+def check(
+    repo: Path,
+    wave_same_turn: str | None,
+    *,
+    change_root: Path | None = None,
+    phase: str | None = None,
+) -> str | None:
+    if phase is not None and phase not in PHASE_ORDER:
+        return "phase"
     item = _check_wave_same_turn(wave_same_turn)
     if item:
         return item
-    change_dir = _bound_change_dir(repo)
+    change_dir = _bound_change_dir(repo, change_root)
     if change_dir is None:
         return "bound change"
-    item = _check_tasks(change_dir)
+    item = _check_tasks(change_dir, phase)
     if item:
         return item
     item = _check_design_tokens(change_dir)
@@ -326,8 +372,27 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="review_process_checklist")
     parser.add_argument("--wave-same-turn", choices=("yes", "no"), default=None)
     parser.add_argument("--root", default=str(REPO_ROOT))
+    parser.add_argument(
+        "--change-root",
+        type=Path,
+        help="repository root containing the bound openspec/changes entry (defaults to --root)",
+    )
+    parser.add_argument(
+        "--phase",
+        choices=(*PHASE_ORDER, "strict"),
+        default="strict",
+        help=(
+            "strict requires every task checked; phased gates allow only explicitly annotated "
+            "future tasks to remain pending"
+        ),
+    )
     args = parser.parse_args(argv)
-    item = check(Path(args.root), args.wave_same_turn)
+    item = check(
+        Path(args.root),
+        args.wave_same_turn,
+        change_root=args.change_root,
+        phase=None if args.phase == "strict" else args.phase,
+    )
     if item:
         return _fail(item)
     return 0
