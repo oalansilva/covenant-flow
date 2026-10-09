@@ -11,6 +11,11 @@
         "command": ".cursor/hooks/process-fsm-guard.sh",
         "matcher": "Write|StrReplace|Delete|EditNotebook",
         "failClosed": true
+      },
+      {
+        "command": ".cursor/hooks/process-fsm-model-selection.sh",
+        "matcher": "Task|Agent",
+        "failClosed": true
       }
     ],
     "beforeShellExecution": [

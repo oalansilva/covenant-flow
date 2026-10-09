@@ -13,7 +13,8 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from codex_models import ModelRoutingError, validate_requested_pair  # noqa: E402
+from codex_models import ModelRoutingError  # noqa: E402
+from model_selection import validate_spawn  # noqa: E402
 from guard import (  # noqa: E402
     decide,
     extract_paths,
@@ -86,17 +87,6 @@ def _tool_input(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _routing_effort(tool_input: Mapping[str, Any]) -> Any:
-    for key in ("reasoning_effort", "model_reasoning_effort", "effort"):
-        value = tool_input.get(key)
-        if isinstance(value, str) and value.strip():
-            return value
-    reasoning = tool_input.get("reasoning")
-    if isinstance(reasoning, Mapping):
-        return reasoning.get("effort")
-    return None
-
-
 def pre_tool_use(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return a documented Codex deny decision, or None to continue normally."""
 
@@ -123,11 +113,7 @@ def pre_tool_use(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         cwd = _cwd(event)
         root = _repo_root(cwd)
         if canonical_tool == "Agent":
-            validate_requested_pair(
-                root,
-                model=data.get("model"),
-                effort=_routing_effort(data),
-            )
+            validate_spawn("codex", data)
             return None
 
         if canonical_tool == "Bash" and not isinstance(data.get("command"), str):

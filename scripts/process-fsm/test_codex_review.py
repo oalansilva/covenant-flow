@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 import pytest
+from model_selection_fixtures import machine_models
+from model_selection import resolve, save_capture
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -59,6 +61,9 @@ def _write_wave(
 
 def _wave_entry(activity: str, child_id: str, digest: str) -> dict[str, object]:
     return {
+        "selection_capture": resolve("codex", "execucao", role=activity),
+        "host": "Codex CLI",
+        "host_version": "0.162.0",
         "wave_id": "1042-review-1",
         "bound_card": "1042",
         "activity": activity,
@@ -292,7 +297,7 @@ def test_verify_wave_requires_two_distinct_successful_readonly_reviewers_on_same
         (lambda entries: entries[1].update(review_diff_sha256="0" * 64), "expected diff SHA-256"),
         (lambda entries: entries[0].update(sandbox_mode="workspace-write"), "sandbox_mode=read-only"),
         (lambda entries: entries[0].update(status="failed", successful=False), "did not complete"),
-        (lambda entries: entries[0].update(requested_effort="high"), "does not match the current shared map"),
+        (lambda entries: entries[0].update(requested_effort="high"), "does not match its birth capture"),
         (
             lambda entries: entries[0].update(
                 observed_model="unavailable", observed_effort="unavailable"
@@ -323,7 +328,7 @@ def test_verify_wave_rejects_incomplete_or_mismatched_review_evidence(
         )
 
 
-def test_verify_wave_reads_shared_map_from_explicit_consumer_root(tmp_path: Path):
+def test_verify_wave_ignores_legacy_map_root_uses_captured_account_selection(tmp_path: Path):
     repo = _repo(tmp_path / "product")
     consumer_root = tmp_path / "criptofarol"
     consumer_root.mkdir()

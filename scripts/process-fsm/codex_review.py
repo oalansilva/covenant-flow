@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from codex_fs import atomic_write_bytes
-from codex_models import ModelRoutingError, resolve_pair
+from codex_models import ModelRoutingError, pair_from_capture
+from model_selection import compare_wave, validate_capture
 
 
 DEFAULT_DIFF = Path(".cursor/tmp/review-diff.patch")
@@ -217,12 +218,6 @@ def verify_wave(
         raise ReviewDiffError("expected review diff SHA-256 must be 64 hexadecimal characters")
 
     expected_digest = expected_sha256.casefold()
-    try:
-        shared_map_root = Path(map_root).expanduser().resolve() if map_root is not None else repo
-        current_pair = resolve_pair(shared_map_root, "execucao")
-    except ModelRoutingError as exc:
-        raise ReviewDiffError(f"cannot verify reviewer model against the shared map: {exc}") from exc
-
     records = _proxy_entries(repo, proxy_log, wave_id)
     by_activity: dict[str, dict[str, Any]] = {}
     for entry in records:
@@ -239,8 +234,19 @@ def verify_wave(
         raise ReviewDiffError(f"review wave {wave_id!r} is missing: {', '.join(missing)}")
 
     child_ids: list[str] = []
+    first_capture = None
     for activity in REVIEWERS:
         entry = by_activity[activity]
+        try:
+            birth = validate_capture(entry.get("selection_capture"), client="codex", band="execucao", role=activity)
+            if first_capture is not None:
+                compare_wave(first_capture, birth)
+                if first_capture["attempt_id"] == birth["attempt_id"]:
+                    raise ModelRoutingError("reviewers must have distinct birth captures")
+            first_capture = birth
+            current_pair = pair_from_capture(birth, "execucao")
+        except ModelRoutingError as exc:
+            raise ReviewDiffError(f"{activity} invalid birth capture: {exc}") from exc
         if entry.get("bound_card") != bound_card:
             raise ReviewDiffError(f"{activity} proxy record is not bound to card {bound_card}")
         if entry.get("band") != "execucao":
@@ -250,18 +256,20 @@ def verify_wave(
             current_pair.effort,
         ):
             raise ReviewDiffError(
-                f"{activity} requested pair does not match the current shared map: "
+                f"{activity} requested pair does not match its birth capture: "
                 f"expected {current_pair.slug}/{current_pair.effort}"
             )
         observed = (entry.get("observed_model"), entry.get("observed_effort"))
         if "unavailable" in observed:
             raise ReviewDiffError(f"{activity} observed model pair is unavailable")
         if observed != (current_pair.slug, current_pair.effort):
-            raise ReviewDiffError(f"{activity} observed model pair differs from the shared map")
+            raise ReviewDiffError(f"{activity} observed model pair differs from its birth capture")
         if entry.get("status") != "completed" or entry.get("payload_returned") is not True:
             raise ReviewDiffError(f"{activity} did not complete with a returned payload")
         if entry.get("successful") is not True:
             raise ReviewDiffError(f"{activity} proxy record is not marked successful")
+        if any(not isinstance(entry.get(k), str) or entry[k] in ("", "unavailable") for k in ("host", "host_version")):
+            raise ReviewDiffError(f"{activity} host/version evidence is unavailable")
         if entry.get("sandbox_mode") != "read-only":
             raise ReviewDiffError(f"{activity} was not recorded with sandbox_mode=read-only")
         review_digest = entry.get("review_diff_sha256")
@@ -293,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     wave_parser.add_argument(
         "--map-root",
         type=Path,
-        help="consumer root containing .cursor/model-map.yaml (defaults to --root)",
+        help="deprecated consumer identifier; does not override machine selection",
     )
     wave_parser.add_argument("--proxy-jsonl", type=Path, default=DEFAULT_PROXY_LOG)
     wave_parser.add_argument("--wave-id", required=True)

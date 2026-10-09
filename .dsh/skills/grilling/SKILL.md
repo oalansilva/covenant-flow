@@ -6,4 +6,5 @@ description: Grill the user relentlessly about a plan, decision, or idea. Use wh
 # grilling
 
 Cliente: dsh. MUST Read `.cursor/skills/grilling/SKILL.md` and follow it as the runbook.
+Resolver local: `scripts/process-fsm/model_selection.py` para este cliente/faixa; parâmetros nativos explícitos ou recusa visível.
 Do not copy the runbook here.

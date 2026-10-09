@@ -20,6 +20,10 @@ import {
   capJobOutputWaitTimeout,
   waitJobOutputUntilSettled,
 } from "../../scripts/process-fsm/dsh_plugin_lib.js";
+import {
+  applyCapturedDshRequest,
+  nativeDshSelectionAvailable, validateNativeSpawn,
+} from "../../scripts/process-fsm/model_selection_lib.js";
 
 export const name = "covenant-flow-process-fsm-guard";
 export const inject = ["systemPrompt", "skills", "jobs"];
@@ -188,7 +192,14 @@ export function apply(ctx) {
   const deadTurnRetried = new Set();
   const effortState = { retriedAgents, spawnBlockedParents, deadTurnRetried };
   const childTurnEnds = new Map();
-  ctx.on("agent/request", async (payload, next) => sanitizeReasoningEffort(await next()));
+  const birthCaptures = new Map();
+  const livingCaptures = new WeakMap();
+  const usedBirths = new Set();
+  ctx.on("agent/request", async (payload, next) => {
+    const config = await next();
+    const capture = payload?.agent && livingCaptures.get(payload.agent);
+    return capture ? applyCapturedDshRequest(config, capture) : sanitizeReasoningEffort(config);
+  });
   ctx.on("agent/request-error", createReasoningEffortRequestErrorHandler(effortState));
   ctx.on("agent/request-error", createDeadTurnRequestErrorHandler(effortState));
   ctx.on(
@@ -196,9 +207,27 @@ export function apply(ctx) {
     (payload) => {
       try {
         const agent = payload && payload.agent;
-        attachAgentEffortGuards(agent && agent.ctx, effortState);
-      } catch {
-        // attach MUST NOT veto child publication
+        const session = agent && agent.session;
+        // A fork may inherit its parent's capture; only child-owned events bind.
+        const events = typeof session?.ownEvents === "function" ? session.ownEvents() : [];
+        const ownCapture = events.findLast((e) => e.type === "covenant-flow/model-selection")?.data;
+        const descriptor = events.findLast((e) => e.type === "subagent/descriptor")?.data;
+        const marker = String(descriptor?.label || "").match(/\bcf=([a-f0-9-]{36})\b/);
+        const capture = ownCapture || (marker && birthCaptures.get(marker[1]));
+        if (marker && !capture) {
+          attachAgentEffortGuards(agent.ctx, effortState, () => { throw new Error("model_selection: managed child birth capture unavailable"); });
+        } else if (capture) {
+          livingCaptures.set(agent, capture);
+          if (!ownCapture) session.append("covenant-flow/model-selection", capture);
+          attachAgentEffortGuards(agent.ctx, effortState, (config) => applyCapturedDshRequest(config, capture));
+          birthCaptures.delete(capture.attempt_id);
+        } else {
+          attachAgentEffortGuards(agent && agent.ctx, effortState);
+        }
+      } catch (error) {
+        // Never synchronously veto publication; the next request fails visibly.
+        const agent = payload && payload.agent;
+        attachAgentEffortGuards(agent && agent.ctx, effortState, () => { throw error; });
       }
     },
     { global: true },
@@ -276,6 +305,20 @@ export function apply(ctx) {
           kind: "deny",
           reason: "process-fsm-guard deny reason=dsh_reasoning_effort_spawn",
         };
+      }
+      try {
+        const capture = validateNativeSpawn("dsh", args);
+        await nativeDshSelectionAvailable(ctx, exec, capture);
+        // arguments are deep-frozen by the host; require the caller's prepared
+        // capture marker rather than mutating the native tool envelope.
+        const marker = String(args.description || "").match(/\bcf=([a-f0-9-]{36})\b/);
+        if (!marker) throw new Error("model_selection: dsh description requires cf=<birth attempt id>");
+        if (capture.attempt_id !== marker[1]) throw new Error("model_selection: wrong birth capture marker");
+        if (usedBirths.has(capture.attempt_id)) throw new Error("model_selection: reused birth capture; prepare a fresh spawn");
+        usedBirths.add(capture.attempt_id);
+        birthCaptures.set(capture.attempt_id, capture);
+      } catch (error) {
+        return { kind: "deny", reason: `process-fsm-guard deny reason=model_selection. ${error.message}` };
       }
     }
     if (isCordisRestricted(tool)) {

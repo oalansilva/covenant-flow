@@ -19,7 +19,7 @@ from test_dsh_adapter import (  # noqa: E402
     _init_repo,
     _node,
 )
-from test_overlay_fixtures import write_model_map, write_overlay  # noqa: E402
+from test_overlay_fixtures import write_overlay  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -419,7 +419,8 @@ process.stdout.write(JSON.stringify({{ applySpawn, applyNext, grill, grillNext }
     proc = _node(code)
     assert proc.returncode == 0, proc.stderr
     data = json.loads(proc.stdout)
-    assert data["applyNext"] is True
+    assert data["applyNext"] is False
+    assert "model_selection" in data["applySpawn"]["reason"]
     assert data["applySpawn"]["kind"] != "deny" or "dsh_reasoning_effort_spawn" not in (
         data["applySpawn"].get("reason") or ""
     )
@@ -541,7 +542,6 @@ def test_e12_pin_expects_free_patch_and_dsh_auto_false(tmp_path: Path) -> None:
         "opencode": {"auto": False},
         "dsh": {"auto": False},
     })
-    write_model_map(target)
     proc = subprocess.run(
         [
             str(INSTALLER),

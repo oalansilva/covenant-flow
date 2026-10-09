@@ -9,7 +9,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codex_models import ModelRoutingError, resolve_pair
+from codex_models import ModelRoutingError, pair_from_capture
+from model_selection import load_capture, validate_capture
 
 
 DEFAULT_PATH = Path(".cursor/tmp/codex-child-proxies.jsonl")
@@ -41,6 +42,7 @@ def record(
     review_diff_sha256: str = UNAVAILABLE,
     reason: str = "",
     output: str | Path = DEFAULT_PATH,
+    capture: dict | str | Path | None = None,
 ) -> dict[str, object]:
     root = Path(repo_root).expanduser().resolve()
     if not root.is_dir():
@@ -57,24 +59,28 @@ def record(
     target = target.resolve()
     if root not in target.parents:
         raise ProxyError(f"proxy output must stay under repository root: {target}")
-    map_directory = root if map_root is None else Path(map_root).expanduser().resolve()
     map_reason = ""
     try:
-        current_pair = resolve_pair(map_directory, band)
+        birth = load_capture(capture) if isinstance(capture, (str, Path)) else capture
+        birth = validate_capture(birth, client="codex", band=band, role=activity)
+        current_pair = pair_from_capture(birth, band)
     except ModelRoutingError as exc:
-        map_reason = f"current shared-map pair is unavailable: {exc}"
+        birth = None
+        map_reason = f"birth capture is unavailable: {exc}"
         requested_pair_is_current = False
     else:
         requested_pair_is_current = (
             requested_model == current_pair.slug and requested_effort == current_pair.effort
         )
         if not requested_pair_is_current:
-            map_reason = f"requested pair does not match the current {band} shared-map pair"
+            map_reason = f"requested pair does not match the captured {band} selection"
 
     successful = (
         requested_pair_is_current
         and status == "completed"
         and payload_returned
+        and host != UNAVAILABLE
+        and host_version != UNAVAILABLE
         and observed_model != UNAVAILABLE
         and observed_effort != UNAVAILABLE
         and observed_model == requested_model
@@ -98,6 +104,7 @@ def record(
         "wave_id": wave_id or UNAVAILABLE,
         "sandbox_mode": sandbox_mode or UNAVAILABLE,
         "review_diff_sha256": review_diff_sha256 or UNAVAILABLE,
+        "selection_capture": birth,
     }
     final_reason = reason.strip() or (map_reason if not requested_pair_is_current else "")
     if final_reason:
@@ -119,9 +126,10 @@ def main(argv: list[str] | None = None) -> int:
         "--map-root",
         type=Path,
         default=None,
-        help="shared model-map root; defaults to --repo-root",
+        help="deprecated consumer identifier; does not override machine selection",
     )
     parser.add_argument("--output", type=Path, default=DEFAULT_PATH)
+    parser.add_argument("--capture", required=True, type=Path, help="immutable birth capture, created before spawn")
     parser.add_argument("--activity", required=True)
     parser.add_argument("--band", required=True, choices=("juizo", "execucao"))
     parser.add_argument("--requested-model", default="")
@@ -160,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             bound_card=args.bound_card,
             review_diff_sha256=args.review_diff_sha256,
             reason=args.reason,
+            capture=args.capture,
         )
     except ProxyError as exc:
         print(f"codex proxy error: {exc}", file=sys.stderr)

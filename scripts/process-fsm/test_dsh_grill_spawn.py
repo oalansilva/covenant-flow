@@ -115,7 +115,7 @@ def test_g4_unrelated_subagent_calls_next() -> None:
     assert data["result"]["kind"] != "deny" or "dsh_grill_spawn" not in (
         data["result"].get("reason") or ""
     )
-    assert data["nextCalled"] is True
+    assert data["nextCalled"] is False
 
 
 def test_g5_task_spawn_subagent_and_opencode_task_call_next() -> None:
@@ -242,7 +242,7 @@ def test_g12_design_autor_citation_fronteira_vazia_allows() -> None:
             "prompt": "Closed ritual: grill-card fronteira vazia. Write the OpenSpec.",
         },
     )
-    assert data["nextCalled"] is True
+    assert data["nextCalled"] is False
     reason = (data["result"] or {}).get("reason") or ""
     assert "dsh_grill_spawn" not in reason
 
@@ -257,7 +257,7 @@ def test_g12b_apply_citation_dod_allows() -> None:
             "subagent",
             {"description": "apply 818", "prompt": prompt},
         )
-        assert data["nextCalled"] is True, prompt
+        assert data["nextCalled"] is False, prompt
         reason = (data["result"] or {}).get("reason") or ""
         assert "dsh_grill_spawn" not in reason, prompt
 
@@ -270,7 +270,7 @@ def test_g12c_diff_reviewer_closed_grill_allows() -> None:
             "prompt": "Review the diff. Fact: closed grill; grill-card already ran on the root.",
         },
     )
-    assert data["nextCalled"] is True
+    assert data["nextCalled"] is False
     reason = (data["result"] or {}).get("reason") or ""
     assert "dsh_grill_spawn" not in reason
 
@@ -283,7 +283,7 @@ def test_g12d_nested_non_prompt_field_allows_nested_prompt_still_role() -> None:
             "inner": {"fact": "grill-card fronteira vazia"},
         },
     )
-    assert data["nextCalled"] is True
+    assert data["nextCalled"] is False
     reason = (data["result"] or {}).get("reason") or ""
     assert "dsh_grill_spawn" not in reason
 

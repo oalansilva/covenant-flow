@@ -29,6 +29,7 @@ def stub_body(name: str, canonical_dir: str) -> str:
         f"# {name}\n"
         "\n"
         f"Cliente: dsh. MUST Read `{canonical_dir}/SKILL.md` and follow it as the runbook.\n"
+        "Resolver local: `scripts/process-fsm/model_selection.py` para este cliente/faixa; parâmetros nativos explícitos ou recusa visível.\n"
         "Do not copy the runbook here.\n"
     )
 

@@ -25,7 +25,7 @@ def _read_role(path: Path) -> tuple[str, bytes]:
         raise AgentConfigError(f"Codex agent role has no name: {path}")
     for key in ("model", "model_reasoning_effort"):
         if key in parsed:
-            raise AgentConfigError(f"Codex role {path} must not set {key}; route from model-map per spawn")
+            raise AgentConfigError(f"Codex role {path} must not set {key}; route from captured machine selection per spawn")
     if parsed.get("sandbox_mode") != "read-only":
         raise AgentConfigError(f"Codex reviewer role must set sandbox_mode=read-only: {path}")
     for key in ("description", "developer_instructions"):

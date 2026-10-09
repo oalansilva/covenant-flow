@@ -6,4 +6,5 @@ description: Start a new OpenSpec change using the experimental artifact workflo
 # openspec-new-change
 
 Cliente: dsh. MUST Read `.cursor/skills/openspec-new-change/SKILL.md` and follow it as the runbook.
+Resolver local: `scripts/process-fsm/model_selection.py` para este cliente/faixa; parâmetros nativos explícitos ou recusa visível.
 Do not copy the runbook here.

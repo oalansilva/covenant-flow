@@ -506,6 +506,10 @@ def test_grok_hooks_json_registers_guard():
     for item in pre:
         handler = item["hooks"][0]
         assert handler["timeout"] >= 30
+        if "spawn_subagent" in item.get("matcher", ""):
+            assert ".grok/hooks/process-fsm-model-selection.sh" in handler["command"]
+            assert '"decision":"deny"' in handler["command"]
+            continue
         assert ".grok/hooks/process-fsm-guard.sh" in handler["command"]
         assert "test -f .grok/hooks/process-fsm-guard.sh" in handler["command"]
         assert "./process-fsm-guard.sh" in handler["command"]

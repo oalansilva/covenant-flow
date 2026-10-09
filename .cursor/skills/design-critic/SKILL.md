@@ -5,9 +5,11 @@ description: "Crítica de Design com teto de rodadas: sem-tela fecha em 1 autor 
 
 # Design Critic (canónico)
 
-Canónico: `.cursor/skills/design-critic/` no git do consumidor. Vale nos clientes via MUST Read — sem fork da lei por cliente, sem dual-write em `.dsh/` nem `.grok/`. Não ressuscitar `.agents/skills/` como canónico.
+Canónico: `.cursor/skills/design-critic/` no git do consumidor. Vale nos clientes via MUST Read (Cursor / Grok / dsh) — sem fork da lei por cliente, sem dual-write em `.dsh/` nem `.grok/`. Não ressuscitar `.agents/skills/` como canónico.
 
 ## Classificação
+
+No chat do operador e nas seções Impeccable/Design Critique de `design.md`, emitir só bullets P0–P3, disposition e verdict. Proibido tabela Nielsen, ensaio de personas ou Brief/Critique/Audit/Trace integrais. Relatório completo (incluindo tabela Nielsen/personas e metadata de modelo) fica somente no snapshot `.impeccable/critique/`; Apply e Code Review não o leem. Esta cláusula preserva o contrato de emissão da antiga cópia reconciliada em `.agents/skills/design-critic/`.
 
 Só produto/escopo/contrato visível (tela, estados, acessibilidade, escopo furado) gera P0/P1. Detalhe de implementação (ORM, nomes internos, polish) é P3 "detalhe de Apply": registado como aceito em `design.md` e resolvido no Apply — o crítico nunca o reabre como P0/P1.
 
@@ -16,10 +18,6 @@ Só produto/escopo/contrato visível (tela, estados, acessibilidade, escopo fura
 Sem-tela: 1 autor + 1 crítico + 1 rework. Com-tela: autor + dupla + 1 rework. Segundo rework só com P0 novo de produto justificado no prompt; fora disso o pai publica a seção de crítica com os P3 aceitos e submete.
 
 Validação: o pai justifica o P0 novo no prompt; sem justificativa, o segundo rework não é spawnado.
-
-## Limites de emissão
-
-No chat do operador e nas seções Impeccable/Design Critique de `design.md`, emitir só bullets P0–P3, disposition e verdict. Proibido tabela Nielsen, ensaio de personas ou Brief/Critique/Audit/Trace integrais. Relatório completo (incluindo tabela Nielsen/personas e metadata de modelo) fica somente no snapshot `.impeccable/critique/`; Apply e Code Review não o leem.
 
 ## Gate no autor
 

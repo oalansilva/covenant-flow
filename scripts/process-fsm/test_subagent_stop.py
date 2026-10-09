@@ -388,7 +388,8 @@ def test_agents_require_review_diff_and_forbid_git_transcripts() -> None:
     for path in (DIFF_AGENT, CODE_AGENT):
         text = path.read_text(encoding="utf-8")
         assert "readonly: true" in text
-        assert "model: inherit" in text
+        assert "\nmodel:" not in text
+        assert "captured machine execucao selection" in text
         assert "ERROR: review-diff missing" in text
         assert "MUST NOT git" in text
         assert "MUST NOT transcripts" in text

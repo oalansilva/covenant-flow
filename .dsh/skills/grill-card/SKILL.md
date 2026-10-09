@@ -6,4 +6,5 @@ description: "Grelha a história de um card em Em Refinamento no body do GitHub 
 # grill-card
 
 Cliente: dsh. MUST Read `.cursor/skills/grill-card/SKILL.md` and follow it as the runbook.
+Resolver local: `scripts/process-fsm/model_selection.py` para este cliente/faixa; parâmetros nativos explícitos ou recusa visível.
 Do not copy the runbook here.

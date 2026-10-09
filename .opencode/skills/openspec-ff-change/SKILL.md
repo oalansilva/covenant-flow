@@ -6,4 +6,5 @@ description: Fast-forward through OpenSpec artifact creation. Use when the user 
 # openspec-ff-change
 
 Cliente: OpenCode. MUST Read `.cursor/skills/openspec-ff-change/SKILL.md` and follow it as the runbook.
+Resolver local: `scripts/process-fsm/model_selection.py` para este cliente/faixa; parâmetros nativos explícitos ou recusa visível.
 Do not copy the runbook here. Use the skill tool.

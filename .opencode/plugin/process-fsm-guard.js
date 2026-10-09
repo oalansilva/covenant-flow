@@ -5,11 +5,13 @@ import {
   runPage,
   assertAllow,
 } from "../../scripts/process-fsm/opencode_plugin_lib.js";
+import { refuseOpenCodeTask } from "../../scripts/process-fsm/model_selection_lib.js";
 
 export default async function processFsmGuard(input = {}) {
   const directory = input.directory || input.worktree || REPO_ROOT;
   return {
     "tool.execute.before": async (hookInput, output) => {
+      if (hookInput.tool === "task") refuseOpenCodeTask((output && output.args) || {});
       const envelope = {
         tool: hookInput.tool,
         args: (output && output.args) || {},

@@ -6,4 +6,5 @@ description: Enter explore mode - a thinking partner for exploring ideas, invest
 # openspec-explore
 
 Cliente: dsh. MUST Read `.cursor/skills/openspec-explore/SKILL.md` and follow it as the runbook.
+Resolver local: `scripts/process-fsm/model_selection.py` para este cliente/faixa; parâmetros nativos explícitos ou recusa visível.
 Do not copy the runbook here.

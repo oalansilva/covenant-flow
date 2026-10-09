@@ -681,7 +681,7 @@ export async function waitJobOutputUntilSettled(ctx, exec, initialResult, option
   return initialResult;
 }
 
-export function attachAgentEffortGuards(agentCtx, state) {
+export function attachAgentEffortGuards(agentCtx, state, capturedRequest = null) {
   try {
     if (!agentCtx || typeof agentCtx.on !== "function") return;
     const shared = state && typeof state === "object" ? state : {};
@@ -692,7 +692,7 @@ export function attachAgentEffortGuards(agentCtx, state) {
       shared.deadTurnRetried instanceof Set ? shared.deadTurnRetried : new Set();
     agentCtx.on(
       "agent/request",
-      async (_payload, next) => sanitizeReasoningEffort(await next()),
+      async (_payload, next) => capturedRequest ? capturedRequest(await next()) : sanitizeReasoningEffort(await next()),
       { prepend: true },
     );
     agentCtx.on(

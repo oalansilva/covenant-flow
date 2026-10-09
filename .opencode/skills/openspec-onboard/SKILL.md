@@ -6,4 +6,5 @@ description: Guided onboarding for OpenSpec - walk through a complete workflow c
 # openspec-onboard
 
 Cliente: OpenCode. MUST Read `.cursor/skills/openspec-onboard/SKILL.md` and follow it as the runbook.
+Resolver local: `scripts/process-fsm/model_selection.py` para este cliente/faixa; parâmetros nativos explícitos ou recusa visível.
 Do not copy the runbook here. Use the skill tool.

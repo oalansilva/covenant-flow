@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from model_selection_fixtures import machine_models
+from model_selection import resolve, save_capture
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -261,27 +263,24 @@ def test_codex_direct_gh_status_edit_is_denied_and_requires_process_event(tmp_pa
     assert "status" in reason.lower()
 
 
-def test_agent_spawn_requires_current_map_pair_and_reads_map_again_each_time(
-    tmp_path: Path,
-):
+def test_agent_spawn_requires_local_pair_role_and_birth_capture(tmp_path: Path, machine_models):
     root = _repo(tmp_path, "card-1042-codex-adapter")
-    _model_map(root)
-    request = {
-        "tool_name": "Agent",
-        "tool_input": {"model": "gpt-6-sol", "reasoning_effort": "high"},
-        "cwd": str(root),
-    }
-
+    _model_map(root)  # Legacy cannot override the account's selection.
+    cap_path = tmp_path / "birth.json"
+    save_capture(cap_path, resolve("codex", "juizo", role="design-autor"))
+    request = {"tool_name": "Agent", "tool_input": {
+        "description": "design-autor 1042", "prompt": f"model_selection_capture: {cap_path}",
+        "model": "gpt-6-sol", "reasoning_effort": "high"}, "cwd": str(root)}
     assert codex_adapter.pre_tool_use(request) is None
-    path = root / ".cursor" / "model-map.yaml"
-    document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    document["juizo"]["codex"].update(label="Updated Sol", slug="updated-sol", effort="xhigh")
-    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
-
+    document = yaml.safe_load(machine_models.read_text())
+    document["clients"]["codex"]["juizo"].update(label="Updated Sol", model="updated-sol", effort="xhigh")
+    machine_models.write_text(yaml.safe_dump(document))
     assert codex_adapter.pre_tool_use(request) is not None
-    request["tool_input"] = {"model": "updated-sol", "reasoning_effort": "xhigh"}
+    fresh = tmp_path / "fresh.json"
+    save_capture(fresh, resolve("codex", "juizo", role="design-autor"))
+    request["tool_input"].update(model="updated-sol", reasoning_effort="xhigh", prompt=f"model_selection_capture: {fresh}")
     assert codex_adapter.pre_tool_use(request) is None
-    request["tool_input"] = {"model": "inherit", "reasoning_effort": "max"}
+    request["tool_input"].update(model="inherit")
     assert codex_adapter.pre_tool_use(request) is not None
 
 
@@ -344,7 +343,7 @@ def test_codex_code_review_session_does_not_route_reviewers_through_cursor(
     assert "registra proxies via `codex_proxy.py`" in context
     assert "metadados observados de runtime/trace e retorno, nunca inferidos" in context
     assert "scripts/process-fsm/review_process_checklist.py" in context
-    assert "`execucao.codex` do mapa compartilhado" in context
+    assert "`codex/execucao` da escolha local" in context
     assert "Não encaminhe os reviewers para Cursor Task, `cursor-agent` ou Composer." in context
     order = [
         context.index("o pai/orquestrador gravável primeiro materializa"),

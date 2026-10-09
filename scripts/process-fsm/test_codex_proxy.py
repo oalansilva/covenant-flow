@@ -1,247 +1,64 @@
 from __future__ import annotations
-
 import json
 import subprocess
 import sys
 from pathlib import Path
-
 import pytest
 import yaml
-
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
-
-from codex_proxy import ProxyError, record  # noqa: E402
+from model_selection_fixtures import machine_models
+from model_selection import resolve, save_capture
+from codex_proxy import ProxyError, record
 
 
-def _write_map(root: Path, *, forbidden: list[str] | None = None) -> None:
-    path = root / ".cursor" / "model-map.yaml"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    document = {
-        "juizo": {"codex": {"label": "GPT-6 Sol", "slug": "gpt-6-sol", "effort": "high"}},
-        "execucao": {"codex": {"label": "GPT-6 Luna", "slug": "gpt-6-luna", "effort": "max"}},
-        "forbid": forbidden if forbidden is not None else ["composer-2.5-fast", "inherit"],
-    }
-    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+def kwargs(root, role="code-reviewer", band="execucao"):
+    cap = resolve("codex", band, role=role)
+    selection = cap["selection"]
+    return dict(repo_root=root, activity=role, band=band, capture=cap,
+                requested_model=selection["model"], requested_effort=selection["effort"],
+                observed_model=selection["model"], observed_effort=selection["effort"],
+                host="Codex CLI", host_version="0.162.0", status="completed", payload_returned=True)
 
 
-def test_proxy_records_requested_and_observed_pairs_without_prompt_content(tmp_path: Path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    _write_map(root)
-    path = root / ".cursor" / "tmp" / "proxies.jsonl"
-
-    entry = record(
-        repo_root=root,
-        activity="diff-reviewer",
-        band="juizo",
-        requested_model="gpt-6-sol",
-        requested_effort="high",
-        observed_model="gpt-6-sol",
-        observed_effort="high",
-        host="Codex CLI",
-        host_version="0.156.1",
-        status="completed",
-        payload_returned=True,
-        bound_card="1042",
-        review_diff_sha256="a" * 64,
-        output=path,
-    )
-
-    persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert entry["successful"] is True
-    assert persisted["requested_model"] == persisted["observed_model"] == "gpt-6-sol"
-    assert persisted["requested_effort"] == persisted["observed_effort"] == "high"
-    assert persisted["review_diff_sha256"] == "a" * 64
-    assert "prompt" not in persisted and "transcript" not in persisted
+def test_proxy_uses_birth_after_edit_and_separates_facts(tmp_path, machine_models):
+    data = kwargs(tmp_path)
+    doc = yaml.safe_load(machine_models.read_text())
+    doc["clients"]["codex"]["execucao"].update(model="gpt-6.1-sol", effort="high")
+    machine_models.write_text(yaml.safe_dump(doc))
+    entry = record(**data, output=".cursor/tmp/proxies.jsonl")
+    assert entry["successful"]
+    assert entry["requested_model"] == entry["observed_model"] == "gpt-6-luna"
+    assert entry["selection_capture"] == data["capture"]
+    assert "prompt" not in entry and "transcript" not in entry
 
 
-def test_completed_without_payload_is_not_recorded_as_success_and_observed_can_be_unavailable(tmp_path: Path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    _write_map(root)
-
-    entry = record(
-        repo_root=root,
-        activity="apply-coluna",
-        band="execucao",
-        requested_model="gpt-6-luna",
-        requested_effort="max",
-        host="Codex CLI",
-        host_version="0.156.1",
-        status="completed",
-        payload_returned=False,
-        output=".cursor/tmp/proxies.jsonl",
-    )
-
-    assert entry["observed_model"] == "unavailable"
-    assert entry["observed_effort"] == "unavailable"
-    assert entry["successful"] is False
+@pytest.mark.parametrize("change", [dict(payload_returned=False), dict(status="failed"), dict(observed_model="unavailable"), dict(observed_effort="unavailable"), dict(observed_model="different"), dict(observed_effort="high"), dict(host_version="unavailable"), dict(capture=None), dict(band="juizo")])
+def test_incomplete_mismatched_or_wrong_role_proxies_do_not_succeed(tmp_path, change):
+    data = kwargs(tmp_path); data.update(change)
+    assert not record(**data)["successful"]
 
 
-def test_completed_with_payload_but_unavailable_observation_is_not_success(tmp_path: Path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    _write_map(root)
-
-    entry = record(
-        repo_root=root,
-        activity="diff-reviewer",
-        band="execucao",
-        requested_model="gpt-6-luna",
-        requested_effort="max",
-        host="Codex CLI",
-        host_version="0.156.1",
-        status="completed",
-        payload_returned=True,
-        output=".cursor/tmp/proxies.jsonl",
-    )
-
-    assert entry["observed_model"] == "unavailable"
-    assert entry["observed_effort"] == "unavailable"
-    assert entry["successful"] is False
+@pytest.mark.parametrize("output", ["../escape.jsonl", "/tmp/escape.jsonl"])
+def test_output_cannot_escape_repository(tmp_path, output):
+    with pytest.raises(ProxyError): record(**kwargs(tmp_path), output=output)
 
 
-def test_completed_with_wrong_observed_pair_is_not_success(tmp_path: Path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    _write_map(root)
-    entry = record(
-        repo_root=root,
-        activity="apply-coluna",
-        band="execucao",
-        requested_model="gpt-6-luna",
-        requested_effort="max",
-        observed_model="gpt-6-luna",
-        observed_effort="high",
-        host="Codex CLI",
-        host_version="0.156.1",
-        status="completed",
-        payload_returned=True,
-        output=".cursor/tmp/proxies.jsonl",
-    )
-    assert entry["successful"] is False
+def test_invalid_activity_status_and_missing_repo_are_visible(tmp_path):
+    data = kwargs(tmp_path); data["status"] = "running"
+    with pytest.raises(ProxyError): record(**data)
+    data["status"] = "completed"; data["activity"] = ""
+    with pytest.raises(ProxyError): record(**data)
+    data = kwargs(tmp_path); data["repo_root"] = tmp_path / "missing"
+    with pytest.raises(ProxyError): record(**data)
 
 
-def test_proxy_refuses_escape_and_invalid_status(tmp_path: Path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    kwargs = {
-        "repo_root": root,
-        "activity": "code-reviewer",
-        "band": "juizo",
-        "requested_model": "gpt-6-sol",
-        "requested_effort": "high",
-        "host": "Codex CLI",
-        "host_version": "0.156.1",
-        "status": "failed",
-        "payload_returned": False,
-    }
-
-    with pytest.raises(ProxyError, match="stay under repository root"):
-        record(**kwargs, output=tmp_path / "outside.jsonl")
-    with pytest.raises(ProxyError, match="invalid host status"):
-        record(**{**kwargs, "status": "completed-without-result"})
-
-
-def test_proxy_does_not_mark_obsolete_matching_pair_successful(tmp_path: Path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    _write_map(root)
-
-    entry = record(
-        repo_root=root,
-        activity="code-reviewer",
-        band="execucao",
-        requested_model="gpt-6-luna-v1",
-        requested_effort="max",
-        observed_model="gpt-6-luna-v1",
-        observed_effort="max",
-        host="Codex CLI",
-        host_version="0.156.1",
-        status="completed",
-        payload_returned=True,
-        output=".cursor/tmp/proxies.jsonl",
-    )
-
-    assert entry["successful"] is False
-    assert "does not match the current execucao shared-map pair" in entry["reason"]
-
-
-def test_proxy_does_not_mark_map_pair_successful_when_it_is_forbidden(tmp_path: Path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    _write_map(root, forbidden=["composer-2.5-fast", "gpt-6-luna"])
-
-    entry = record(
-        repo_root=root,
-        activity="code-reviewer",
-        band="execucao",
-        requested_model="gpt-6-luna",
-        requested_effort="max",
-        observed_model="gpt-6-luna",
-        observed_effort="max",
-        host="Codex CLI",
-        host_version="0.156.1",
-        status="completed",
-        payload_returned=True,
-        output=".cursor/tmp/proxies.jsonl",
-    )
-
-    assert entry["successful"] is False
-    assert "is forbidden" in entry["reason"]
-
-
-def test_cli_uses_separate_consumer_map_and_keeps_proxy_output_in_repo(tmp_path: Path):
-    product = tmp_path / "product"
-    consumer = tmp_path / "consumer"
-    product.mkdir()
-    consumer.mkdir()
-    _write_map(consumer)
-    map_path = consumer / ".cursor" / "model-map.yaml"
-    map_before = map_path.read_bytes()
-    output = Path(".cursor/tmp/proxies.jsonl")
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "codex_proxy.py"),
-            "--repo-root",
-            str(product),
-            "--map-root",
-            str(consumer),
-            "--output",
-            str(output),
-            "--activity",
-            "code-reviewer",
-            "--band",
-            "execucao",
-            "--requested-model",
-            "gpt-6-luna",
-            "--requested-effort",
-            "max",
-            "--observed-model",
-            "gpt-6-luna",
-            "--observed-effort",
-            "max",
-            "--host",
-            "Codex CLI",
-            "--host-version",
-            "0.156.1",
-            "--status",
-            "completed",
-            "--payload-returned",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
+def test_proxy_cli_requires_real_birth_file_and_does_not_read_legacy_root(tmp_path):
+    cap = tmp_path / "birth.json"; save_capture(cap, resolve("codex", "execucao", role="code-reviewer"))
+    script = Path(__file__).with_name("codex_proxy.py")
+    argv = [sys.executable, str(script), "--repo-root", str(tmp_path), "--map-root", str(tmp_path / "absent"),
+            "--capture", str(cap), "--activity", "code-reviewer", "--band", "execucao",
+            "--requested-model", "gpt-6-luna", "--requested-effort", "max", "--observed-model", "gpt-6-luna",
+            "--observed-effort", "max", "--host", "Codex", "--host-version", "0.162.0", "--status", "completed", "--payload-returned"]
+    result = subprocess.run(argv, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    entry = json.loads(result.stdout)
-    proxy_path = product / output
-    assert entry["successful"] is True
-    assert proxy_path.is_file()
-    assert json.loads(proxy_path.read_text(encoding="utf-8"))["successful"] is True
-    assert map_path.read_bytes() == map_before
-    assert not (consumer / output).exists()
+    assert json.loads(result.stdout)["successful"]
+    assert not (tmp_path / "absent").exists()
