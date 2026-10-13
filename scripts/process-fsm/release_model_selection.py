@@ -105,3 +105,44 @@ def check_runtime_model(
         runtime_slug=runtime_slug,
     )
 
+
+
+def check_claude_parent(
+    *,
+    root: str | Path,
+    capture: dict | None,
+    session: str | None = None,
+    runtime=None,
+    environ=None,
+) -> ModelCheck:
+    """T16 / `fecho-lote` precondition in Claude Code: the *parent* session itself.
+
+    Model and effort come from the parent's latest assistant turn in its own
+    transcript, never from the request or the current selection file. Anything
+    unobserved or divergent refuses the closeout; the living parent is not retuned.
+    """
+
+    from claude_evidence import EvidenceError, observe_parent
+
+    try:
+        seen = observe_parent(session=session, runtime=runtime, environ=environ)
+    except EvidenceError as exc:
+        return ModelCheck(
+            ok=False, divergence=True, auto_claimed=False, routed=False,
+            message=(
+                f"parent session model/effort unobserved ({exc.code}): T16 and fecho-lote refused; "
+                "start a new Claude Code session configured for claude/execucao (/model + /effort); "
+                "do not claim routing occurred; do not edit the selection"
+            ),
+            map_slug="unavailable", runtime_slug="unavailable",
+        )
+    result = check_runtime_model(
+        root=root, client="claude", runtime_slug=seen["model"], runtime_effort=seen["effort"], capture=capture,
+    )
+    if result.ok:
+        return result
+    return ModelCheck(
+        ok=False, divergence=True, auto_claimed=False, routed=False,
+        message=result.message + "; start a new Claude Code session configured for claude/execucao (/model + /effort)",
+        map_slug=result.map_slug, runtime_slug=result.runtime_slug,
+    )

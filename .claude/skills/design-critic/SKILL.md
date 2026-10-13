@@ -1,0 +1,8 @@
+---
+name: design-critic
+description: "Crítica de Design com teto de rodadas: sem-tela fecha em 1 autor + 1 crítico + 1 rework, com-tela em autor + dupla + 1 rework; só produto/escopo/contrato visível gera P0/P1, detalhe de implementação é P3 aceito resolvido no Apply; o primeiro autor já entrega os tokens parseáveis do gate. Use durante Status=Design, antes de solicitar Aprovação de Design."
+---
+
+# Canonical skill bridge
+
+Read the complete `.cursor/skills/design-critic/SKILL.md` file and follow it as the sole runbook. This bridge intentionally contains no copied workflow.

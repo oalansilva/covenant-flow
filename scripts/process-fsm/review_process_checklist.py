@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -142,6 +143,114 @@ def _check_tasks(change_dir: Path, phase: str | None = None) -> str | None:
         for line in text.splitlines()
     ):
         return "tasks.md pending"
+    return None
+
+PILOT_GATE_FILE = "pilot-evidence-gate.json"
+SHA1_RE = re.compile(r"[0-9a-f]{40}\Z")
+DESIGN_ROLES = frozenset({"design-autor", "design-author", "design-critic", "assessment-a", "assessment-b"})
+APPLY_ROLES = frozenset({"apply-coluna", "diff-reviewer", "code-reviewer", "qa-gate"})
+PILOT_REQUIRED = (("design-autor", "design-author"), ("design-critic",), ("apply-coluna",), ("diff-reviewer",), ("code-reviewer",), ("qa-gate",))
+SWITCH_DESIGN_CLIENTS = frozenset({"cursor", "codex"})
+UNOBSERVED = {"", "unavailable", "not_applicable", None}
+QaVerifier = Callable[[str], bool]
+
+
+def qa_gate_green_for_sha(sha: str) -> bool:
+    """`qa-gate` completed with success on exactly this commit (Checks API, as in QA)."""
+    import t14
+
+    try:
+        done = t14._run(
+            ["gh", "api", f"repos/{t14._overlay_repo()}/commits/{sha}/check-runs", "--paginate", "--jq", ".check_runs[] | {name,status,conclusion}"],
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return False
+    if done.returncode != 0:
+        return False
+    for line in (done.stdout or "").splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if item.get("name") == t14.QA_GATE:
+            return str(item.get("status")).lower() == "completed" and str(item.get("conclusion")).lower() == "success"
+    return False
+
+
+def _pilot_problem(card: dict[str, Any], kind: str, declared_card: str, qa_green: QaVerifier) -> str | None:
+    if not isinstance(card, dict):
+        return f"{kind}: evidence missing"
+    card_id, sha, children = card.get("card"), card.get("sha"), card.get("children")
+    if not isinstance(card_id, str) or not card_id.isdigit() or card_id == declared_card:
+        return f"{kind}: card id missing or equal to the gated card"
+    if not isinstance(sha, str) or not SHA1_RE.fullmatch(sha):
+        return f"{kind}: qa-gate SHA missing"
+    if not qa_green(sha):
+        return f"{kind}: SHA {sha} has no qa-gate success"
+    if not isinstance(children, list) or not children:
+        return f"{kind}: per-child proxies missing"
+    seen: set[str] = set()
+    for child in children:
+        if not isinstance(child, dict):
+            return f"{kind}: malformed child proxy"
+        role, client = child.get("activity"), child.get("client")
+        if not isinstance(role, str) or not isinstance(client, str) or not child.get("child_id"):
+            return f"{kind}: child proxy lacks activity/client/child_id"
+        if child.get("observed_model") in UNOBSERVED or child.get("status") != "completed":
+            return f"{kind}: {role} proxy lacks an observed model or a completed status"
+        seen.add(role)
+        if kind == "pilot":
+            if client != "claude":
+                return f"{kind}: {role} ran on {client!r}, every pilot child must be claude"
+        elif role in DESIGN_ROLES:
+            if client not in SWITCH_DESIGN_CLIENTS:
+                return f"{kind}: Design child {role} ran on {client!r}, expected cursor or codex"
+        elif role in APPLY_ROLES:
+            if client != "claude":
+                return f"{kind}: {role} ran on {client!r}, expected claude"
+        elif client not in SWITCH_DESIGN_CLIENTS | {"claude"}:
+            return f"{kind}: {role} ran on unknown client {client!r}"
+    for alternatives in PILOT_REQUIRED:
+        if not seen & set(alternatives):
+            return f"{kind}: no proxy for {'/'.join(alternatives)}"
+    return None
+
+
+def _check_pilot_evidence(
+    change_dir: Path,
+    phase: str | None,
+    evidence_path: Path | None,
+    qa_green: QaVerifier | None = None,
+) -> str | None:
+    """Active only for a change that declares the gate, and only at the end (postqa/strict)."""
+    declaration = change_dir / PILOT_GATE_FILE
+    if not declaration.is_file() or phase not in (None, "postqa"):
+        return None
+    def fail(detail: str) -> str:
+        print(f"pilot_evidence detail: {detail}", file=sys.stderr)
+        return "pilot_evidence"
+    try:
+        declared = json.loads(declaration.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return fail(f"unreadable gate declaration {declaration}")
+    if not isinstance(declared, dict) or declared.get("gate") != "pilot_evidence" or not str(declared.get("card", "")).isdigit():
+        return fail("invalid gate declaration")
+    if evidence_path is None:
+        return fail("--pilot-evidence <path> is required for this change")
+    try:
+        evidence = json.loads(Path(evidence_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return fail(f"unreadable evidence {evidence_path}")
+    if not isinstance(evidence, dict) or evidence.get("version") != 1:
+        return fail("evidence must be an object with version 1")
+    verifier = qa_green or qa_gate_green_for_sha
+    for kind in ("pilot", "switch"):
+        problem = _pilot_problem(evidence.get(kind), kind, str(declared["card"]), verifier)
+        if problem:
+            return fail(problem)
+    if evidence["pilot"]["card"] == evidence["switch"]["card"] or evidence["pilot"]["sha"] == evidence["switch"]["sha"]:
+        return fail("pilot and client-switch cards must be distinct")
     return None
 
 
@@ -347,6 +456,8 @@ def check(
     *,
     change_root: Path | None = None,
     phase: str | None = None,
+    pilot_evidence: Path | None = None,
+    qa_green: QaVerifier | None = None,
 ) -> str | None:
     if phase is not None and phase not in PHASE_ORDER:
         return "phase"
@@ -360,6 +471,9 @@ def check(
     if item:
         return item
     item = _check_design_tokens(change_dir)
+    if item:
+        return item
+    item = _check_pilot_evidence(change_dir, phase, pilot_evidence, qa_green)
     if item:
         return item
     item, patch = _check_patch(repo)
@@ -386,12 +500,18 @@ def main(argv: list[str] | None = None) -> int:
             "future tasks to remain pending"
         ),
     )
+    parser.add_argument(
+        "--pilot-evidence",
+        type=Path,
+        help="JSON evidence (not versioned) for a change that declares the pilot_evidence gate",
+    )
     args = parser.parse_args(argv)
     item = check(
         Path(args.root),
         args.wave_same_turn,
         change_root=args.change_root,
         phase=None if args.phase == "strict" else args.phase,
+        pilot_evidence=args.pilot_evidence,
     )
     if item:
         return _fail(item)

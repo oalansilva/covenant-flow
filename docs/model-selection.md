@@ -2,7 +2,31 @@
 
 A única fonte operacional é `$HOME/.config/covenant-flow/model-selection.yaml` da conta que executa o cliente. Na sessão Desktop+SSH, é a conta na VM. Repos e worktrees migrados compartilham esse arquivo; não há override por repo, picker ou fallback para `.cursor/model-map.yaml`. O mapa Git é somente entrada explícita de migração. `.cursor/model-policy.yaml` versiona papéis, proibições, campos e contratos, sem escolher modelos.
 
-O schema contém somente `version: 1` e `clients`. Cada cliente possui `juizo` e `execucao`, com `label` e `model`. Codex também exige `effort`; OpenCode exige `provider` e aceita `variant`; dsh exige `provider` e aceita `effort` somente conforme metadata do modelo nativo. Cursor/Grok não aceitam esforço no contrato ensaiado. Arquivo, faixa, modelo, capacidade ou campo inválido produzem erro visível, sem omissão nem tentativa com outro modelo.
+O schema contém somente `version: 1` e `clients`. Cada cliente possui `juizo` e `execucao`, com `label` e `model`. Codex e Claude Code exigem `effort`; OpenCode exige `provider` e aceita `variant`; dsh exige `provider` e aceita `effort` somente conforme metadata do modelo nativo. Cursor/Grok não aceitam esforço no contrato ensaiado. Arquivo, faixa, modelo, capacidade ou campo inválido produzem erro visível, sem omissão nem tentativa com outro modelo.
+
+## Claude Code (adapter não oficial, card #1101)
+
+`clients.claude` usa o contrato `claude-agent-pair-v1` (`label`, `model`, `effort`, todos obrigatórios) e inicia em `juizo: Opus 5.5 (claude-opus-5-5) / high` e `execucao: Sonnet 5.5 (claude-sonnet-5-5) / high`. A rota nativa é o tool `Agent` com `model` e `effort` **sempre explícitos**; o `model` do tool aceita só o alias da família (`opus`, `sonnet`, `haiku`, `fable`), então `.cursor/model-policy.yaml` carrega uma tabela de tradução de capacidade (`host_model_aliases`, não um segundo mapa de modelos) e a captura guarda o id completo como referência de verificação. O resolver recusa: modelo sem alias de família, esforço fora de `efforts`, host sem `effort` por invocação (< `host_min_version` 2.1.292, lido de `AI_AGENT` ou `claude --version`) e qualquer uma de `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` e `CLAUDE_CODE_EFFORT_LEVEL` definida. `model_selection.py validate` valida o arquivo sem depender do host que o invoca. Evidência e limites: [evidência Claude Code](claude-runtime-evidence.md).
+
+### Janela de migração da conta (decisão de Alan)
+
+O validador novo exige o bloco `claude` no `validate` e o validador antigo (`develop` e demais worktrees) recusa visivelmente um arquivo que o contenha (`clients must contain only cursor/codex/grok/opencode/dsh`). Por isso o bloco entra na seleção da conta **só no início do piloto**, depois do QA verde do #1101, nesta ordem:
+
+1. pausar os demais cards desta conta e fazer backup de `$HOME/.config/covenant-flow/model-selection.yaml`;
+2. acrescentar o bloco `claude` e rodar `model_selection.py validate` no worktree do #1101;
+3. registrar o início da janela no card; daqui até o T14 do #1101 o resolver antigo falha visivelmente;
+4. depois do T14 do #1101, os cards pausados rebaseiam em `develop` antes de retomar (para ganhar o validador novo);
+5. piloto interrompido = restaurar o backup (o #1101 fica em QA verde sem T14; a causa vai para o card).
+
+Bloco a acrescentar (edição local, sem commit):
+
+```yaml
+  claude:
+    juizo: {label: "Opus 5.5", model: claude-opus-5-5, effort: high}
+    execucao: {label: "Sonnet 5.5", model: claude-sonnet-5-5, effort: high}
+```
+
+Ensaio feito no Apply com **cópia temporária** do arquivo da conta (o arquivo real não foi tocado; sha256 `6167e38f…` antes e depois): validador novo + cópia com o bloco = 12 pares, seis clientes; validador novo + cópia sem o bloco = `claude/juizo: invalid or missing selection`; validador antigo (`origin/develop`) + cópia com o bloco = recusa visível; validador antigo + cópia sem o bloco = 10 pares. Os outros cinco clientes continuam resolvendo com o arquivo atual da conta.
 
 ## Nascimento e continuidade
 
@@ -20,7 +44,7 @@ Reviewers/A-B também recebem `model_selection_wave_capture: /tmp/cf-first.json`
 
 Filhos vivos, resume, proxy e auditoria usam a captura de nascimento, sem reler a escolha atual. Resume não recebe novos parâmetros de modelo/esforço. Para dsh, inclua `cf=<attempt_id>` na description; o plugin associa o descriptor à captura própria da sessão e instala guard na `agent.ctx` do filho. O guard valida/reaplica somente valores capturados, nunca substitui por high. Captura gerida ausente recusa a próxima request. Root e filhos anteriores conservam seu comportamento histórico; os guards de grill/erro/dead turn permanecem.
 
-`model_proxy.evidence` distingue requested de observed para os cinco clientes. `codex_proxy.py --capture <path>` e `codex_review.py verify-wave` mantêm os gates de dois papéis/filhos, diff SHA, sandbox read-only, status completed e payload. Metadata ausente é `unavailable`; parâmetro não suportado é `not_applicable`. Configuração e ensaio mock não provam runtime. Release compara o pai observado com a captura de execução da operação, no próprio cliente, sem retunar a sessão viva.
+`model_proxy.evidence` distingue requested de observed para os seis clientes (Claude Code exige o envelope de transcript: `claude_proxy.py --capture <path> --birth <receipt>`, `claude_review.py verify-wave`). Codex exige receipt preparado antes do nascimento e envelope automático de runtime: `codex_proxy.py --capture <path> --birth <receipt>`. `codex_review.py verify-wave` revalida a origem e mantém dois papéis/filhos, mesma sessão/turno, diff SHA, sandbox read-only, completed e payload. Metadados manuais/históricos não comprovam execução Codex nova. Metadata ausente é `unavailable`; parâmetro não suportado é `not_applicable`. Configuração e ensaio mock não provam runtime. Comandos finais, qualificação, matriz atual e recuperação: [evidência Codex](codex-runtime-evidence.md). Release conserva seu contrato separado de captura da operação.
 
 ## Matriz inspecionada em 2026-10-08
 

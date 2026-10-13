@@ -35,3 +35,13 @@ clients:
     contract: dsh-subagent-selection-v1
     fields: [label, model, provider, effort]
     required: [label, model, provider]
+  claude:
+    contract: claude-agent-pair-v1
+    fields: [label, model, effort]
+    required: [label, model, effort]
+    # Capability translation, not a second model map: encodes the selected full
+    # model id into the family alias accepted by the Agent tool's `model`.
+    host_model_aliases: {claude-opus: opus, claude-sonnet: sonnet, claude-haiku: haiku, claude-fable: fable}
+    efforts: [low, medium, high, xhigh, max]
+    host_min_version: "2.1.292"
+    env_overrides: [CLAUDE_CODE_SUBAGENT_MODEL, CLAUDE_CODE_SUBAGENT_MODEL_FORCE, CLAUDE_CODE_EFFORT_LEVEL]

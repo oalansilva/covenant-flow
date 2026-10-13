@@ -11,3 +11,7 @@ venv/
 .opencode/plugins/
 
 .pytest_cache/
+
+# Claude Code local-only files
+.claude/settings.local.json
+CLAUDE.local.md

@@ -271,7 +271,7 @@ def test_agent_spawn_requires_local_pair_role_and_birth_capture(tmp_path: Path, 
     request = {"tool_name": "Agent", "tool_input": {
         "description": "design-autor 1042", "prompt": f"model_selection_capture: {cap_path}",
         "model": "gpt-6-sol", "reasoning_effort": "high"}, "cwd": str(root)}
-    assert codex_adapter.pre_tool_use(request) is None
+    assert "birth_receipt_missing" in codex_adapter.pre_tool_use(request)["hookSpecificOutput"]["permissionDecisionReason"]
     document = yaml.safe_load(machine_models.read_text())
     document["clients"]["codex"]["juizo"].update(label="Updated Sol", model="updated-sol", effort="xhigh")
     machine_models.write_text(yaml.safe_dump(document))
@@ -279,7 +279,7 @@ def test_agent_spawn_requires_local_pair_role_and_birth_capture(tmp_path: Path, 
     fresh = tmp_path / "fresh.json"
     save_capture(fresh, resolve("codex", "juizo", role="design-autor"))
     request["tool_input"].update(model="updated-sol", reasoning_effort="xhigh", prompt=f"model_selection_capture: {fresh}")
-    assert codex_adapter.pre_tool_use(request) is None
+    assert "birth_receipt_missing" in codex_adapter.pre_tool_use(request)["hookSpecificOutput"]["permissionDecisionReason"]
     request["tool_input"].update(model="inherit")
     assert codex_adapter.pre_tool_use(request) is not None
 

@@ -49,19 +49,32 @@ def _validate_groups(document: Mapping[str, Any], path: Path) -> dict[str, list[
     return result
 
 
-def _is_managed(handler: Mapping[str, Any]) -> bool:
+CODEX_MARKER = "scripts/process-fsm/codex_adapter.py"
+
+
+def _is_managed(handler: Mapping[str, Any], marker: str = CODEX_MARKER) -> bool:
     command = handler.get("command")
-    return isinstance(command, str) and "scripts/process-fsm/codex_adapter.py" in command.replace("\\", "/")
+    return isinstance(command, str) and marker in command.replace("\\", "/")
 
 
 def _matcher(group: Mapping[str, Any]) -> Any:
     return group.get("matcher")
 
 
-def merge_hooks(source_document: Mapping[str, Any], target_document: Mapping[str, Any] | None, *, target_path: Path) -> dict[str, Any]:
-    """Preserve all operator keys/handlers and replace only this adapter's handlers."""
+def merge_hooks(
+    source_document: Mapping[str, Any],
+    target_document: Mapping[str, Any] | None,
+    *,
+    target_path: Path,
+    marker: str = CODEX_MARKER,
+    source_label: str = "source .codex/hooks.json",
+) -> dict[str, Any]:
+    """Preserve all operator keys/handlers and replace only this adapter's handlers.
 
-    source_groups = _validate_groups(source_document, Path("source .codex/hooks.json"))
+    `marker` identifies the handlers owned by the adapter (Claude Code reuses this merger).
+    """
+
+    source_groups = _validate_groups(source_document, Path(source_label))
     target = dict(target_document) if target_document is not None else {
         key: value for key, value in source_document.items() if key != "hooks"
     }
@@ -69,7 +82,7 @@ def merge_hooks(source_document: Mapping[str, Any], target_document: Mapping[str
 
     for event, groups in target_groups.items():
         for group in groups:
-            group["hooks"] = [handler for handler in group["hooks"] if not _is_managed(handler)]
+            group["hooks"] = [handler for handler in group["hooks"] if not _is_managed(handler, marker)]
         # Keep operator group metadata and empty groups; only managed handlers
         # are removed. This avoids destroying unknown matcher-group fields.
 

@@ -10,6 +10,8 @@ Usage:
 
 --init   Write .covenant-flow/overlay.yaml with required keys empty. Does not guess values.
 --pin    Copy nucleus, adapters, .agents/skills, helpers, and render AGENTS.md.
+         Also installs the Claude Code adapter files (CLAUDE.md only when absent,
+         .claude/skills bridges, .claude/agents, merged .claude/settings.json hooks).
          Requires a valid filled overlay. Refuses submodule / empty overlay.
 
 v1 refuses submodule, gitignore-as-install, marketplace, and template-clone as the channel.
@@ -57,6 +59,49 @@ copy_tree() {
   local from="$1" to="$2"
   mkdir -p "$(dirname "$to")"
   rsync -a --delete "$from" "$to"
+}
+
+# CLAUDE.md is consumer-owned once it exists. It is created only when absent; an
+# existing file is kept byte for byte and must already import AGENTS.md, otherwise
+# Claude Code would not load the project law and the pin refuses visibly.
+claude_memory() {
+  local action="$1"
+  CLAUDE_MD_SOURCE="$SOURCE/CLAUDE.md" CLAUDE_MD_TARGET="$TARGET/CLAUDE.md" python3 - "$action" <<'PY'
+import os
+import re
+import sys
+from pathlib import Path
+
+action = sys.argv[1]
+source = Path(os.environ["CLAUDE_MD_SOURCE"])
+target = Path(os.environ["CLAUDE_MD_TARGET"])
+IMPORT = re.compile(r"(?:^|\s)@(?:\./)?AGENTS\.md(?=\s|$)")
+
+
+def imports_agents(text: str) -> bool:
+    # An import inside a fenced block or an inline code span is not an import.
+    text = re.sub(r"(?ms)^(```|~~~).*?^\1", "", text)
+    text = re.sub(r"`[^`\n]*`", "", text)
+    return bool(IMPORT.search(text))
+
+
+if not source.is_file() or not imports_agents(source.read_text(encoding="utf-8")):
+    raise SystemExit(f"implantar: source CLAUDE.md missing or without the @AGENTS.md import: {source}")
+if target.is_symlink() or (target.exists() and not target.is_file()):
+    raise SystemExit(f"implantar: CLAUDE.md conflict: {target} is not a regular file; compose it explicitly before --pin")
+if target.exists():
+    if not imports_agents(target.read_text(encoding="utf-8", errors="replace")):
+        raise SystemExit(
+            f"implantar: CLAUDE.md conflict: {target} exists without an @AGENTS.md import; "
+            "add the import explicitly before --pin (the pin never edits an existing CLAUDE.md)"
+        )
+    print("preserving existing CLAUDE.md (imports AGENTS.md)" if action == "install" else "CLAUDE.md preflight: PASS (existing file imports AGENTS.md)")
+elif action == "install":
+    target.write_bytes(source.read_bytes())
+    print(f"created {target}")
+else:
+    print("CLAUDE.md preflight: PASS (absent; will be created)")
+PY
 }
 
 copy_tree_if_missing() {
@@ -118,13 +163,21 @@ PY
 python_overlay "$SOURCE/scripts/process-fsm/codex_hooks.py" preflight --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/codex_skills.py" preflight --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/codex_agents.py" preflight --source "$SOURCE" --target "$TARGET"
+# Claude Code collisions are also checked before anything is written: an own
+# CLAUDE.md without the AGENTS.md import, operator-edited bridges or agents under
+# .claude/, and malformed or non-object settings.json. Preflight never trusts.
+claude_memory preflight
+python_overlay "$SOURCE/scripts/process-fsm/claude_hooks.py" preflight --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/claude_skills.py" preflight --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/claude_agents.py" preflight --source "$SOURCE" --target "$TARGET"
 # Preflight only the shipped mechanisms. Never read the account's selections.
-for mechanism in .cursor/model-policy.yaml scripts/process-fsm/model_selection.py scripts/process-fsm/model_selection_adapter.py scripts/process-fsm/model_selection_lib.js scripts/process-fsm/model_proxy.py scripts/process-fsm/release_model_selection.py scripts/process-fsm/codex_adapter.py scripts/process-fsm/codex_proxy.py scripts/process-fsm/codex_review.py .dsh/plugin/process-fsm-guard.js .opencode/plugin/process-fsm-guard.js .cursor/hooks/process-fsm-model-selection.sh .grok/hooks/process-fsm-model-selection.sh; do
+for mechanism in .cursor/model-policy.yaml scripts/process-fsm/model_selection.py scripts/process-fsm/model_selection_adapter.py scripts/process-fsm/model_selection_lib.js scripts/process-fsm/model_proxy.py scripts/process-fsm/release_model_selection.py scripts/process-fsm/codex_adapter.py scripts/process-fsm/codex_proxy.py scripts/process-fsm/codex_review.py scripts/process-fsm/codex_evidence.py scripts/process-fsm/codex_fs.py scripts/process-fsm/claude_adapter.py scripts/process-fsm/claude_agents.py scripts/process-fsm/claude_evidence.py scripts/process-fsm/claude_hooks.py scripts/process-fsm/claude_proxy.py scripts/process-fsm/claude_review.py scripts/process-fsm/claude_skills.py scripts/process-fsm/claude_trust.py .claude/settings.json .claude/agents/diff-reviewer.md .claude/agents/code-reviewer.md CLAUDE.md .dsh/plugin/process-fsm-guard.js .opencode/plugin/process-fsm-guard.js .cursor/hooks/process-fsm-model-selection.sh .grok/hooks/process-fsm-model-selection.sh; do
   [[ -f "$SOURCE/$mechanism" ]] || die "selection mechanism missing in source: $mechanism"
 done
 python_overlay - <<PY
 from model_selection import policy
-policy()
+if "claude" not in policy()["clients"]:
+    raise SystemExit("implantar: source policy lacks the claude contract")
 PY
 
 copy_tree "$SOURCE/.cursor/model-policy.yaml" "$TARGET/.cursor/model-policy.yaml"
@@ -163,6 +216,20 @@ python_overlay "$TARGET/scripts/process-fsm/codex_skills.py" install --source "$
 python_overlay "$SOURCE/scripts/process-fsm/codex_hooks.py" install --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/codex_agents.py" install --source "$SOURCE" --target "$TARGET"
 
+# Claude Code adapter. Bridges come from SOURCE so an operator-installed vendor
+# skill under .agents/skills (kept above) is never parsed or rewritten. Hooks are
+# merged by handler ownership; the account trust record is never read or written.
+claude_memory install
+python_overlay "$SOURCE/scripts/process-fsm/claude_skills.py" install --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/claude_agents.py" install --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/claude_hooks.py" install --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/claude_skills.py" check --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/claude_agents.py" check --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/claude_hooks.py" check --source "$SOURCE" --target "$TARGET"
+for adapter_file in "$SOURCE"/scripts/process-fsm/claude_*.py; do
+  cmp -s "$adapter_file" "$TARGET/scripts/process-fsm/$(basename "$adapter_file")" || die "Claude adapter file differs after copy: $(basename "$adapter_file")"
+done
+
 python_overlay - <<PY
 from pathlib import Path
 from overlay import load_overlay, render_agents, set_pin
@@ -176,5 +243,6 @@ PY
 
 # Do not touch overlay_doc markdown or account model selections.
 echo "Codex project hooks require operator trust review; pin does not confer trust."
+echo "Claude Code project hooks require operator trust review (claude_adapter.py trust --record); pin does not confer trust."
 echo "implantar --pin $PIN complete in $TARGET"
 echo "Commit these trees in the consumer git (not a submodule)."

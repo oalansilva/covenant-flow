@@ -280,13 +280,8 @@ def test_verify_wave_requires_two_distinct_successful_readonly_reviewers_on_same
         ],
     )
 
-    assert verify_wave(
-        root=repo,
-        proxy_log=log,
-        wave_id="1042-review-1",
-        expected_sha256=digest,
-        bound_card="1042",
-    ) == (digest, ("child-diff", "child-code"))
+    with pytest.raises(ReviewDiffError, match="runtime provenance rejected"):
+        verify_wave(root=repo, proxy_log=log, wave_id="1042-review-1", expected_sha256=digest, bound_card="1042")
 
 
 @pytest.mark.parametrize(
@@ -343,11 +338,5 @@ def test_verify_wave_ignores_legacy_map_root_uses_captured_account_selection(tmp
     )
 
     assert not (repo / ".cursor" / "model-map.yaml").exists()
-    assert verify_wave(
-        root=repo,
-        map_root=consumer_root,
-        proxy_log=log,
-        wave_id="1042-review-1",
-        expected_sha256=digest,
-        bound_card="1042",
-    ) == (digest, ("child-diff", "child-code"))
+    with pytest.raises(ReviewDiffError, match="runtime provenance rejected"):
+        verify_wave(root=repo, map_root=consumer_root, proxy_log=log, wave_id="1042-review-1", expected_sha256=digest, bound_card="1042")

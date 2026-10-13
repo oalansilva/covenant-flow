@@ -191,7 +191,8 @@ def test_pin_installs_functional_resolver_and_selection_hooks(tmp_path, monkeypa
     payload = {"tool_name": "Agent", "cwd": str(target), "tool_input": {**birth["arguments"], "description": "same-card-search", "prompt": f"model_selection_capture: {capture}"}}
     allowed = subprocess.run([sys.executable, str(target / "scripts/process-fsm/codex_adapter.py"), "pre-tool-use"], input=json.dumps(payload), env=env, capture_output=True, text=True)
     assert allowed.returncode == 0, allowed.stderr
-    assert allowed.stdout.strip() == ""  # Native hook allow is no denial output.
+    # The matching pair is accepted, but since #1095 a spawn also needs a prepared birth receipt.
+    assert "birth_receipt_missing" in json.loads(allowed.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
     payload["tool_input"]["model"] = "other"
     denied = subprocess.run([sys.executable, str(target / "scripts/process-fsm/codex_adapter.py"), "pre-tool-use"], input=json.dumps(payload), env=env, capture_output=True, text=True)
     assert json.loads(denied.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"

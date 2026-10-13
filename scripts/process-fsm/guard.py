@@ -49,6 +49,7 @@ WRITE_TOOLS = frozenset(
         "StrReplace",
         "Delete",
         "EditNotebook",
+        "NotebookEdit",
         "write",
         "search_replace",
         "Edit",
@@ -226,6 +227,9 @@ def _path_from_write(payload: Mapping[str, Any]) -> str | None:
     tool = str(payload.get("tool_name") or "")
     if tool == "EditNotebook":
         keys = ("target_notebook",) + PATH_KEYS
+    elif tool == "NotebookEdit":
+        # Claude Code addresses the notebook as `notebook_path`.
+        keys = ("notebook_path",) + PATH_KEYS
     for key in keys:
         value = data.get(key)
         if isinstance(value, str) and value.strip():
