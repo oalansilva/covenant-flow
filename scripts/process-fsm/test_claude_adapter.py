@@ -261,6 +261,75 @@ def test_divergent_hook_digest_denies_product_writes_and_spawns_but_not_other_wo
     assert call("Bash", {"command": "ls"}, work) is None
 
 
+def test_pre_tool_use_follows_a_worktree_switch_in_the_same_session(tmp_path, monkeypatch):
+    world = World(tmp_path)
+    other = repo(tmp_path, "card-703-test")
+    old_hint = str(world.parent)
+    moved = world.home / "projects" / "-slug-other" / f"{SESSION}.jsonl"
+    moved.parent.mkdir(parents=True)
+    world.parent.rename(moved)
+    moved.write_text("".join(json.dumps(dict(r, cwd=str(other))) + "\n" for r in world.rows))
+    assert claude_trust.read_heartbeat(SESSION)["transcript_path"] == old_hint
+    with_status(monkeypatch, "Em desenvolvimento")
+    before = claude_trust.read_heartbeat(SESSION)
+    assert call("Bash", {"command": "ls"}, other, transcript_path=str(moved)) is None
+    beat = claude_trust.read_heartbeat(SESSION)
+    assert beat["transcript_path"] == str(moved) and beat["cwd"] == str(other.resolve())
+    assert beat["hooks_digest"] == DIGEST and beat["reviewed"] is True
+    assert beat["host_version"] == before["host_version"] and beat["entrypoint"] == before["entrypoint"]
+    pf = ev.preflight(root=other, runtime=world.runtime, session=SESSION, environ=world.env, trust=trust_ok)
+    assert pf["result"] == "ready" and pf["source"] == str(moved.resolve())
+    cap, path = world.capture()
+    out = ev.prepare(root=other, capture=path, task_name=f"apply-coluna 703 {cap['attempt_id'][:8]}", runtime=world.runtime,
+                     session=SESSION, environ=world.env, trust=trust_ok)
+    assert Path(out["birth"]).is_file()
+
+
+def test_worktree_switch_keeps_the_sessionstart_digest_so_changed_hooks_are_detected(tmp_path, monkeypatch):
+    world = World(tmp_path)
+    other = repo(tmp_path, "card-703-test")
+    old_digest = claude_trust.read_heartbeat(SESSION)["hooks_digest"]
+    new_digest = "a" * 64
+    assert old_digest == DIGEST and new_digest != old_digest
+    moved = world.home / "projects" / "-slug-other" / f"{SESSION}.jsonl"
+    moved.parent.mkdir(parents=True)
+    world.parent.rename(moved)
+    moved.write_text("".join(json.dumps(dict(r, cwd=str(other))) + "\n" for r in world.rows))
+    with_status(monkeypatch, "Em desenvolvimento")
+    monkeypatch.setattr(claude_adapter, "trust_status", lambda: {"reviewed": True, "digest": new_digest, "reason": ""})
+    assert call("Bash", {"command": "ls"}, other, transcript_path=str(moved)) is None
+    beat = claude_trust.read_heartbeat(SESSION)
+    assert beat["transcript_path"] == str(moved) and beat["cwd"] == str(other.resolve())
+    assert beat["hooks_digest"] == old_digest and beat["reviewed"] is True
+
+    def trust_new(**kw):
+        return {"reviewed": True, "digest": new_digest, "reason": ""}
+
+    with pytest.raises(ev.EvidenceError) as exc:
+        ev.preflight(root=other, runtime=world.runtime, session=SESSION, environ=world.env, trust=trust_new)
+    assert exc.value.code == "hooks_changed"
+
+
+def test_pre_tool_use_heartbeat_failure_never_changes_the_decision(tmp_path, monkeypatch):
+    world = World(tmp_path)
+    with_status(monkeypatch, "Em desenvolvimento")
+
+    def boom(**kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(claude_trust, "write_heartbeat", boom)
+    assert call("Bash", {"command": "ls"}, world.repo, transcript_path="/x/new.jsonl") is None
+    assert "unknown_tool" in reason(call("Frobnicate", {"a": 1}, world.repo, transcript_path="/x/new.jsonl"))
+
+
+def test_pre_tool_use_without_a_prior_heartbeat_creates_none(tmp_path, monkeypatch):
+    work = repo(tmp_path, "card-1101-test")
+    with_status(monkeypatch, "Em desenvolvimento")
+    assert claude_trust.read_heartbeat(SESSION) is None
+    assert call("Bash", {"command": "ls"}, work, transcript_path="/x/t.jsonl") is None
+    assert claude_trust.read_heartbeat(SESSION) is None
+
+
 def test_session_start_records_heartbeat_with_digest_and_flags_unreviewed(tmp_path, monkeypatch):
     work = repo(tmp_path, "card-1101-test")
     monkeypatch.setattr(claude_adapter, "page", lambda **kw: shared_page(**kw, status_provider=lambda _b: "Design"))

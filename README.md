@@ -60,6 +60,19 @@ No repositório **consumidor**:
 `--init` escreve as chaves obrigatórias **vazias** e não chuta valores do projeto.
 `--pin` copia núcleo, adapters (`.cursor/` `.grok/` `.opencode/` `.dsh/`), `.agents/skills/` (impeccable, design-critic, playwright-cli), helpers e um `AGENTS.md` gerado. Copia `.dsh/` mesmo quando o overlay omite `clients.dsh`. Recusa overlay vazio ou inválido. O consumidor **commita** essas árvores. Não sobrescreve o Markdown em `overlay_doc`.
 
+### Registro dos hooks na conta
+
+A partir do pin com registro na conta, `--pin` **não grava** registro de hooks de Claude Code, Cursor, Codex nem OpenCode no consumidor (remove dos registros de projeto só as entradas do Covenant Flow, move os plugins do adapter OpenCode para `.opencode/adapter/` e grava `.covenant-flow/adapters.json`). O registro vive na conta do operador e chama um shim fino que descobre o consumidor pelo cwd do evento e executa o adapter pinado:
+
+```bash
+/path/to/covenant-flow/install.sh --account            # shim + uma entrada por host instalado, sem tocar em entradas alheias
+/path/to/covenant-flow/install.sh --account --check    # por host: registration=account|unproven|not_installed, shim e revisões
+/path/to/covenant-flow/install.sh --account --remove   # tira só as entradas do Covenant Flow
+python3 ~/.config/covenant-flow/shim/current/cf_shim.py trust --record   # operador, depois de ler registro (R) e adapter (A)
+```
+
+Nada disso grava confiança nem toca a seleção de modelos. Grok Build e dsh ficam como antes (registro de projeto). Pins anteriores continuam com o registro de projeto; o shim não age neles.
+
 v1 **não** instala via git submodule, ponteiros gitignore, marketplace nem template-clone.
 
 ## Pin

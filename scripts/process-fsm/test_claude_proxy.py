@@ -71,3 +71,26 @@ def test_model_proxy_evidence_claude_requires_runtime_envelope(world):
     wrong = dict(facts, observed={"model": "claude-opus-5-5", "effort": "high"})
     assert model_evidence(**wrong, runtime_evidence=envelope)["successful"] is False
     assert model_evidence(**dict(facts, observed={}), runtime_evidence=envelope)["successful"] is False
+
+
+def test_a_429_synthetic_final_turn_is_recorded_as_an_unsuccessful_attempt(world, capsys):
+    from test_claude_evidence import synthetic_row
+
+    cap, path, prepared = completed(world, handback=None, extra_child_rows=(synthetic_row(world),))
+    code = claude_proxy.main(["--repo-root", str(world.repo), "--capture", str(path), "--activity", "apply-coluna", "--band", "execucao", "--birth", prepared["birth"], "--wait-seconds", "0"])
+    assert code == 0, capsys.readouterr()
+    entry = json.loads(capsys.readouterr().out)
+    assert entry["successful"] is False and entry["status"] == "failed" and entry["payload_returned"] is False
+    assert (entry["observed_model"], entry["observed_effort"]) == ("claude-sonnet-5-5", "high")  # the last real turn, never "<synthetic>"
+    assert "<synthetic>" not in json.dumps(entry)
+    assert len((world.repo / ".cursor/tmp/claude-child-proxies.jsonl").read_text().splitlines()) == 1
+
+
+def test_a_child_with_only_a_429_turn_is_an_unsuccessful_attempt_without_observation(world, capsys):
+    from test_claude_evidence import synthetic_row
+
+    cap, path, prepared = completed(world, child_tools=(), handback=None, extra_child_rows=(synthetic_row(world),))
+    code = claude_proxy.main(["--repo-root", str(world.repo), "--capture", str(path), "--activity", "apply-coluna", "--band", "execucao", "--birth", prepared["birth"], "--wait-seconds", "0"])
+    assert code == 0, capsys.readouterr()
+    entry = json.loads(capsys.readouterr().out)
+    assert entry["successful"] is False and entry["status"] == "failed" and entry["observed_model"] == "unavailable"

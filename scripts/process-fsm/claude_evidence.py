@@ -2,8 +2,10 @@
 
 The local JSONL transcripts (parent session and `subagents/agent-<id>.jsonl` +
 `.meta.json`) are the only observation source. They are an internal host
-format, not a public contract: the driver is qualified per host version and any
-other version or schema is `unverified`/`unsupported_schema`, never inferred.
+format, not a public contract: a host version is accepted when the records the
+driver reads match the declared `claude-transcript-v1` schema (never by a list of
+version numbers), and a record that lacks a required field or has another type is
+`unsupported_schema`, citing the record kind, the field and the observed version.
 Local digests detect corruption, not a server attestation. No prompts or full
 transcripts are persisted, and no manually supplied observation is accepted.
 Recovery is always a new birth; there is never a retroactive receipt.
@@ -18,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+import account_registration
 import claude_trust
 from codex_evidence import (  # the sealed-envelope helpers are client neutral
     EvidenceError,
@@ -35,9 +38,24 @@ from model_selection import SelectionError, claude_host_checks, load_capture, po
 SCHEMA = "claude-transcript-evidence-v1"
 DRIVER = "claude-transcript-v1"
 HOST = "Claude Code"
-# Versions whose transcript schema was checked against a real session. Anything
-# else is refused; add a version only after a real rehearsal (tasks 8.2).
-QUALIFIED_VERSIONS = ("2.1.296",)
+# Schema `claude-transcript-v1`: the fields the driver reads, by record kind (design §17).
+# Extra fields and record kinds the driver does not read are ignored. `(path, type)` pairs.
+# Optional (checked only when present): Agent `input.subagent_type` (a general-purpose
+# spawn may omit it) and `.meta.json` `agentType`/`model`.
+SCHEMA_FIELDS: dict[str, tuple[tuple[str, type], ...]] = {
+    "assistant": (("type", str), ("sessionId", str), ("version", str), ("entrypoint", str), ("cwd", str),
+                  ("message.id", str), ("message.model", str), ("effort", str)),
+    "agent_tool_use": (("input.description", str), ("input.model", str), ("input.effort", str)),
+    "tool_use_result": (("agentId", str), ("status", str), ("resolvedModel", str)),
+    "meta": (("toolUseId", str), ("description", str)),
+    "child": (("isSidechain", bool), ("agentId", str), ("sessionId", str)),
+}
+SCHEMA_OPTIONAL: dict[str, tuple[tuple[str, type], ...]] = {
+    "agent_tool_use": (("input.subagent_type", str),),
+    "meta": (("agentType", str), ("model", str)),
+}
+SYNTHETIC_MODEL = "<synthetic>"
+# The surface is a type of host, not a version: an unknown value still stops the stage (design §17).
 QUALIFIED_ENTRYPOINTS = ("cli",)
 DEFAULT_DEST = Path(".cursor/tmp/claude-evidence")
 MAX_WAIT = 10.0
@@ -49,6 +67,36 @@ SPAWN_TOOLS = frozenset({"Agent", "Task"})
 AGENT_ID = re.compile(r"[A-Za-z0-9]{8,64}\Z")
 SESSION_ID = re.compile(r"[A-Za-z0-9_-]{8,128}\Z")
 RETRYABLE = {"source_unavailable", "source_truncated", "spawn_return_unavailable", "terminal_unavailable", "payload_unavailable"}
+
+
+def _dig(row: Any, path: str) -> Any:
+    value: Any = row
+    for part in path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return None
+        value = value[part]
+    return value
+
+
+def check_schema(row: Any, kind: str, *, version: str = "unknown", where: str = "") -> None:
+    """`unsupported_schema` naming the record kind, the field and the observed host version."""
+
+    pairs = list(SCHEMA_FIELDS[kind])
+    pairs += [pair for pair in SCHEMA_OPTIONAL.get(kind, ()) if _dig(row, pair[0]) is not None]
+    for path, expected in pairs:
+        value = _dig(row, path)
+        wrong = value is None or not isinstance(value, expected) or (expected is str and not value.strip())
+        if wrong:
+            seen = "absent" if value is None else type(value).__name__
+            raise EvidenceError(
+                "unsupported_schema",
+                f"{kind} record{where} lacks `{path}` as {expected.__name__} ({seen}) on host version {version}",
+                recovery="the host changed the transcript format: the driver must be revalidated against a real session; no version is refused by its number",
+            )
+
+
+def _row_version(row: Mapping[str, Any]) -> str:
+    return row["version"] if isinstance(row.get("version"), str) and row["version"] else "unknown"
 
 
 class Runtime:
@@ -63,8 +111,11 @@ class Runtime:
         projects = self.home / "projects"
         found = {p.resolve() for p in projects.glob(f"*/{session}.jsonl")}
         if hint and hint != UNAVAILABLE:
-            found.add(Path(hint).resolve())
-        found = {p for p in found if p.name == f"{session}.jsonl" and projects in p.parents}
+            # The host moves the transcript when the session changes worktree: a hint to a vanished file is stale.
+            hinted = Path(hint).resolve()
+            if hinted.is_file():
+                found.add(hinted)
+        found = {p for p in found if p.name == f"{session}.jsonl" and projects in p.parents and p.is_file()}
         if not found:
             raise EvidenceError("source_unavailable", f"no transcript for session {session}")
         if len(found) != 1:
@@ -108,23 +159,26 @@ class Runtime:
 
 
 def _identity(rows, session: str) -> dict[str, Any]:
-    versions, entrypoints, cwd = set(), set(), None
+    """Session identity from the records. Any number of host versions is fine (a session resumed after an
+    update has several); the version in force is the one of the latest record that carries one."""
+
+    versions, entrypoints, cwd, latest = set(), set(), None, None
     for _i, row, _s in rows:
         if "sessionId" in row and row["sessionId"] != session:
             raise EvidenceError("identity_mismatch", f"record of session {row['sessionId']!r}", recovery="new checked birth required")
-        if isinstance(row.get("version"), str):
+        if isinstance(row.get("version"), str) and row["version"]:
             versions.add(row["version"])
+            latest = row["version"]
         if isinstance(row.get("entrypoint"), str):
             entrypoints.add(row["entrypoint"])
         if isinstance(row.get("cwd"), str) and row.get("type") in {"assistant", "user"}:
             cwd = row["cwd"]
     if not versions or not entrypoints or cwd is None:
-        raise EvidenceError("unsupported_schema", "version/entrypoint/cwd missing from transcript records")
-    if len(versions) != 1 or not versions <= set(QUALIFIED_VERSIONS):
-        raise EvidenceError("unverified", f"host version(s) {sorted(versions)} not qualified; qualified: {', '.join(QUALIFIED_VERSIONS)}", recovery="qualify the driver with a real rehearsal; installed binary is not runtime proof")
+        missing = [name for name, found in (("version", versions), ("entrypoint", entrypoints), ("cwd", cwd)) if not found]
+        raise EvidenceError("unsupported_schema", f"transcript records lack `{'`, `'.join(missing)}` (host version {latest or 'unknown'})", recovery="the host changed the transcript format; revalidate the driver against a real session")
     if len(entrypoints) != 1 or not entrypoints <= set(QUALIFIED_ENTRYPOINTS):
-        raise EvidenceError("unverified", f"surface(s) {sorted(entrypoints)} not qualified; qualified: {', '.join(QUALIFIED_ENTRYPOINTS)}", recovery="surface fails visibly until it is rehearsed")
-    return {"version": versions.pop(), "entrypoint": entrypoints.pop(), "cwd": cwd}
+        raise EvidenceError("unverified", f"surface value(s) {sorted(entrypoints)} (host version {latest}) are not a known surface; known: {', '.join(QUALIFIED_ENTRYPOINTS)}", recovery="a surface or entrypoint format change fails visibly until it is rehearsed; this is not a version check")
+    return {"version": latest, "versions": sorted(versions), "entrypoint": entrypoints.pop(), "cwd": cwd}
 
 
 def _blocks(row) -> list[dict[str, Any]]:
@@ -148,11 +202,11 @@ def last_observation(rows, *, sidechain: bool) -> dict[str, str]:
         if row.get("type") != "assistant" or bool(row.get("isSidechain")) != sidechain:
             continue
         message = row.get("message") if isinstance(row.get("message"), dict) else {}
-        model, effort = message.get("model"), row.get("effort")
-        if isinstance(model, str) and model and isinstance(effort, str) and effort:
-            return {"model": model, "effort": effort}
-        break
-    raise EvidenceError("observation_unavailable", "latest assistant record lacks model/effort")
+        if message.get("model") == SYNTHETIC_MODEL:
+            continue  # a host-generated error turn is not an observation of the model
+        check_schema(row, "assistant", version=_row_version(row))
+        return {"model": row["message"]["model"], "effort": row["effort"]}
+    raise EvidenceError("observation_unavailable", "no assistant record with an observed model/effort")
 
 
 def observe_parent(*, session: str | None = None, runtime: Runtime | None = None, environ: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -160,9 +214,9 @@ def observe_parent(*, session: str | None = None, runtime: Runtime | None = None
 
     env = os.environ if environ is None else environ
     session = session or env.get("CLAUDE_CODE_SESSION_ID") or ""
-    beat = claude_trust.read_heartbeat(session)
+    beat = claude_trust.session_heartbeat(session)
     path, rows, meta = (runtime or Runtime()).session(session, (beat or {}).get("transcript_path"))
-    return {**last_observation(rows, sidechain=False), "host_version": meta["version"], "surface": meta["entrypoint"], "source": str(path)}
+    return {**last_observation(rows, sidechain=False), "host_version": meta["version"], "host_versions": meta["versions"], "surface": meta["entrypoint"], "source": str(path)}
 
 
 def _inside(root: Path, cwd: str) -> bool:
@@ -184,18 +238,27 @@ def preflight(
     session = session or env.get("CLAUDE_CODE_SESSION_ID") or ""
     if not session:
         raise EvidenceError("session_unavailable", "CLAUDE_CODE_SESSION_ID missing")
-    beat = claude_trust.read_heartbeat(session)
-    if beat is None:
-        raise EvidenceError(
-            "hooks_inactive",
-            "no SessionStart heartbeat: project hooks did not run in this session (disabled, untrusted by the host, or absent)",
-            recovery="start a new session in the card worktree with hooks enabled; a missing hook is never protection",
-        )
-    status = (trust or claude_trust.status)()
-    if not status.get("reviewed"):
-        raise EvidenceError("hooks_unreviewed", status.get("reason") or "hook digest not recorded", recovery="operator reads the hook definition and adapter, then runs claude_adapter.py trust --record")
-    if beat.get("hooks_digest") != status.get("digest"):
-        raise EvidenceError("hooks_changed", "session heartbeat digest differs from the reviewed definition in use", recovery="start a new session after the reviewed hooks are in place")
+    try:
+        account = account_registration.require_active("claude", root, session=session, environ=env)
+    except account_registration.RegistrationRefusal as exc:
+        raise EvidenceError(exc.code, exc.detail, recovery=exc.recovery) from exc
+    if account is not None:
+        # Account pin: the shim's heartbeat, registration digest (R) and adapter digest (A) were just checked.
+        beat = account["heartbeat"]
+        status = {"digest": account["status"]["adapter"]["digest"]}
+    else:
+        beat = claude_trust.read_heartbeat(session)
+        if beat is None:
+            raise EvidenceError(
+                "hooks_inactive",
+                "no SessionStart heartbeat: project hooks did not run in this session (disabled, untrusted by the host, or absent)",
+                recovery="start a new session in the card worktree with hooks enabled; a missing hook is never protection",
+            )
+        status = (trust or claude_trust.status)()
+        if not status.get("reviewed"):
+            raise EvidenceError("hooks_unreviewed", status.get("reason") or "hook digest not recorded", recovery="operator reads the hook definition and adapter, then runs claude_adapter.py trust --record")
+        if beat.get("hooks_digest") != status.get("digest"):
+            raise EvidenceError("hooks_changed", "session heartbeat digest differs from the reviewed definition in use", recovery="start a new session after the reviewed hooks are in place")
     path, rows, meta = (runtime or Runtime()).session(session, beat.get("transcript_path"))
     observed = last_observation(rows, sidechain=False)
     root = Path(root).resolve()
@@ -211,10 +274,37 @@ def preflight(
     check_writable_destination(out)
     return {
         "result": "ready", "session": session, "source": str(path), "driver": DRIVER, "host": HOST,
-        "host_version": meta["version"], "surface": meta["entrypoint"], "schema": SCHEMA,
+        "host_version": meta["version"], "host_versions": meta["versions"], "surface": meta["entrypoint"], "schema": SCHEMA,
         "parent_observed": observed, "source_records": len(rows), "destination": str(out),
-        "hooks_digest": status["digest"],
+        "hooks_digest": status["digest"], "parent_cwd": meta["cwd"],
+        "heartbeat_recorded_at": (beat or {}).get("recorded_at", UNAVAILABLE),
     }
+
+
+TASK_CARD = re.compile(r"(?:^|\s)#?(\d{1,7})(?=\s|$|[:,;.)])")
+
+
+def task_card(task_name: str) -> str | None:
+    """Card id named by the `--task-name` (`grill-card 703 ...`), if any."""
+
+    found = TASK_CARD.search(task_name or "")
+    return found.group(1) if found else None
+
+
+def git_bound_card(root: Path) -> str | None:
+    """Card the Git state binds: `card-<id>-...` worktree directory or branch."""
+
+    import subprocess
+
+    found = re.match(r"card-(\d+)(?:-|$)", root.name)
+    if found:
+        return found.group(1)
+    try:
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"], check=False, capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = re.match(r"card-(\d+)(?:-|$)", head)
+    return found.group(1) if found else None
 
 
 def prepare(*, root, capture, task_name, dest=DEFAULT_DEST, review_diff_sha256=UNAVAILABLE, wave_id=UNAVAILABLE, runtime=None, session=None, environ=None, trust=None):
@@ -227,6 +317,15 @@ def prepare(*, root, capture, task_name, dest=DEFAULT_DEST, review_diff_sha256=U
             raise SelectionError("description role differs from capture")
     except SelectionError as exc:
         raise EvidenceError("invalid_task_name", f"{task_name!r}: {exc}") from exc
+    named = task_card(task_name)
+    bound = git_bound_card(Path(root).resolve())
+    if bound is not None and named is not None and bound != named:
+        raise EvidenceError(
+            "card_mismatch",
+            f"the session is bound to card {bound} but the task name {task_name!r} names card {named}",
+            recovery="start the child from the card's own worktree, or fix the card id in the task name",
+        )
+    card = bound or named or UNAVAILABLE
     review = cap["role"] in REVIEWERS
     if review and (len(review_diff_sha256) != 64 or any(c not in "0123456789abcdef" for c in review_diff_sha256)):
         raise EvidenceError("diff_unavailable")
@@ -238,15 +337,15 @@ def prepare(*, root, capture, task_name, dest=DEFAULT_DEST, review_diff_sha256=U
             continue
         if other.get("task_name") == task_name and other.get("parent_session") == pf["session"]:
             raise EvidenceError("task_name_not_unique", f"{task_name!r} already has a birth receipt", recovery="use a new unique description with the role needle")
-    beat = claude_trust.read_heartbeat(pf["session"]) or {}
     birth = sealed({
         "schema": SCHEMA, "driver": DRIVER, "capture": cap, "capture_path": str(Path(capture).resolve()),
         "root": str(Path(root).resolve()),
-        "bound_card": Path(root).resolve().name.split("-")[1] if Path(root).resolve().name.startswith("card-") else UNAVAILABLE,
+        "bound_card": card, "card_source": "git" if bound is not None else ("task_name" if named is not None else UNAVAILABLE),
         "attempt_id": cap["attempt_id"], "role": cap["role"], "band": cap["band"], "task_name": task_name,
         "parent_session": pf["session"], "parent_transcript": pf["source"], "before_record": pf["source_records"],
-        "host_version": pf["host_version"], "surface": pf["surface"], "hooks_digest": pf["hooks_digest"],
-        "heartbeat_recorded_at": beat.get("recorded_at", UNAVAILABLE),
+        "host_version": pf["host_version"], "host_versions": pf["host_versions"], "parent_cwd": pf["parent_cwd"],
+        "surface": pf["surface"], "hooks_digest": pf["hooks_digest"],
+        "heartbeat_recorded_at": pf["heartbeat_recorded_at"],
         "review_diff_sha256": review_diff_sha256, "wave_id": wave_id, "qualification": False,
     })
     target = out / f"{cap['attempt_id']}.birth.json"
@@ -426,6 +525,8 @@ def extract(birth, *, runtime: Runtime | None = None):
     if len(calls) != 1:
         raise EvidenceError("birth_mismatch", f"expected one native spawn, found {len(calls)}", recovery="new checked birth required if no intact spawn origin")
     ci, call_row, call = calls[0]
+    check_schema(call, "agent_tool_use", version=_row_version(call_row), where=f" (record {ci})")
+    check_schema(call_row, "assistant", version=_row_version(call_row), where=f" (record {ci})")
     args = call["input"]
     try:
         if request_role(args) != birth["role"]:
@@ -434,9 +535,7 @@ def extract(birth, *, runtime: Runtime | None = None):
         raise EvidenceError("role_mismatch", str(exc)) from exc
     if any(args.get(k) != v for k, v in cap["arguments"].items()):
         raise EvidenceError("requested_mismatch", recovery="new checked birth required")
-    message_id = (call_row.get("message") or {}).get("id")
-    if not isinstance(message_id, str) or not message_id:
-        raise EvidenceError("unsupported_schema", "parent assistant message id unavailable")
+    message_id = call_row["message"]["id"]
     outputs = [
         (i, r) for i, r, _s in parent
         if r.get("type") == "user" and isinstance(r.get("toolUseResult"), dict)
@@ -446,10 +545,11 @@ def extract(birth, *, runtime: Runtime | None = None):
         raise EvidenceError("spawn_return_unavailable")
     oi, out_row = outputs[0]
     result = out_row["toolUseResult"]
-    agent_id = result.get("agentId")
-    resolved = result.get("resolvedModel")
-    if not isinstance(agent_id, str) or not AGENT_ID.fullmatch(agent_id):
-        raise EvidenceError("spawn_return_malformed", "agentId missing")
+    check_schema(result, "tool_use_result", version=_row_version(out_row), where=f" (record {oi})")
+    agent_id = result["agentId"]
+    resolved = result["resolvedModel"]
+    if not AGENT_ID.fullmatch(agent_id):
+        raise EvidenceError("spawn_return_malformed", "agentId is not a valid agent id")
     if resolved != selected["model"]:
         raise EvidenceError("model_mismatch", f"host resolved {resolved!r}, captured {selected['model']!r}", recovery="new checked birth required; do not resume/retune", observed=resolved or UNAVAILABLE)
     child_path, meta_path = rt.child_paths(parent_path, birth["parent_session"], agent_id)
@@ -457,7 +557,10 @@ def extract(birth, *, runtime: Runtime | None = None):
         meta = json.loads(meta_path.read_text())
     except (OSError, ValueError) as exc:
         raise EvidenceError("source_unavailable", f"child metadata: {exc}") from exc
-    if not isinstance(meta, dict) or meta.get("toolUseId") != call["id"] or meta.get("description") != birth["task_name"]:
+    if not isinstance(meta, dict):
+        raise EvidenceError("unsupported_schema", f"meta record is not an object on host version {pmeta['version']}")
+    check_schema(meta, "meta", version=pmeta["version"])
+    if meta.get("toolUseId") != call["id"] or meta.get("description") != birth["task_name"]:
         raise EvidenceError("identity_mismatch", "child metadata does not belong to this spawn", recovery="new checked birth required")
     if args.get("subagent_type") and meta.get("agentType") not in (None, args["subagent_type"]):
         raise EvidenceError("identity_mismatch", "child agent type")
@@ -466,28 +569,43 @@ def extract(birth, *, runtime: Runtime | None = None):
             raise EvidenceError("requested_mismatch", f"child metadata {key}={meta[key]!r}", recovery="new checked birth required")
     child = rt.read(child_path)
     cmeta = _identity(child, birth["parent_session"])
-    if cmeta["version"] != pmeta["version"] or Path(cmeta["cwd"]).resolve() != Path(pmeta["cwd"]).resolve():
-        raise EvidenceError("identity_mismatch", "child version/cwd differs from parent")
-    turns, tools, used_child = [], set(), set()
+    # Identity is checked against the parent's cwd and version recorded in the receipt at birth, not
+    # against the session's present cwd/version: a child born before EnterWorktree or an update stays collectable.
+    birth_version = birth.get("host_version", pmeta["version"])
+    birth_cwd = birth.get("parent_cwd", pmeta["cwd"])
+    if not set(cmeta["versions"]) <= {birth_version} or Path(cmeta["cwd"]).resolve() != Path(birth_cwd).resolve():
+        raise EvidenceError("identity_mismatch", f"child version/cwd ({cmeta['versions']}, {cmeta['cwd']}) differs from the parent recorded at birth ({birth_version}, {birth_cwd})", recovery="new checked birth required")
+    turns, tools, used_child, synthetic = [], set(), set(), []
+    last_assistant_synthetic = False
     for i, row, _s in child:
         if row.get("agentId") not in (None, agent_id) or (row.get("type") in {"assistant", "user"} and row.get("isSidechain") is not True):
             raise EvidenceError("identity_mismatch", f"record {i} is not a sidechain record of agent {agent_id}")
+        if row.get("type") in {"assistant", "user"}:
+            check_schema(row, "child", version=_row_version(row), where=f" (child record {i})")
         if row.get("type") != "assistant":
             continue
         message = row.get("message") if isinstance(row.get("message"), dict) else {}
-        observed = {"model": message.get("model") or UNAVAILABLE, "effort": row.get("effort") or UNAVAILABLE}
+        if message.get("model") == SYNTHETIC_MODEL:
+            # Host-generated error turn (for example HTTP 429): never a model observation, and a failure when it ends the child.
+            synthetic.append({"ordinal": i, "uuid": row.get("uuid", UNAVAILABLE)})
+            used_child.add(i)
+            last_assistant_synthetic = True
+            continue
+        last_assistant_synthetic = False
+        check_schema(row, "assistant", version=_row_version(row), where=f" (child record {i})")
+        observed = {"model": message["model"], "effort": row["effort"]}
         if observed != {"model": selected["model"], "effort": selected["effort"]} or row.get("perTurnEffort", observed["effort"]) != observed["effort"]:
             raise EvidenceError("model_mismatch", f"turn record {i}: {observed}", recovery="new checked birth required; do not resume/retune", observed=observed)
         turns.append({"ordinal": i, "uuid": row.get("uuid", UNAVAILABLE), "observed": observed})
         used_child.add(i)
         tools.update(b["name"] for b in _blocks(row) if b.get("type") == "tool_use" and isinstance(b.get("name"), str))
-    if not turns:
+    if not turns and not synthetic:
         raise EvidenceError("observation_unavailable", "child transcript has no assistant record")
     if birth["role"] in REVIEWERS and not tools <= (READ_ONLY_TOOLS | RETURN_CHANNEL_TOOLS):
         raise EvidenceError("child_tool_mismatch", f"reviewer used {sorted(tools - READ_ONLY_TOOLS - RETURN_CHANNEL_TOOLS)}")
     host_status = str(result.get("status") or "")
     payloads: list[str] = []
-    if host_status in {"failed", "error"}:
+    if last_assistant_synthetic or host_status in {"failed", "error"}:
         status = "failed"
     elif host_status in {"interrupted", "killed", "cancelled", "stopped"}:
         status = "interrupted"
@@ -498,13 +616,18 @@ def extract(birth, *, runtime: Runtime | None = None):
             raise EvidenceError("terminal_unavailable", "no completed payload returned to the parent yet")
         status = "completed"
     used_parent = {ci, oi}
+    # Parent versions only up to the spawn return record: a host update after collection (resumed session)
+    # must not change the re-read evidence, or verify_evidence would report provenance_mismatch on accepted work.
+    parent_versions = {row["version"] for i, row, _s in parent if i <= oi and isinstance(row.get("version"), str) and row["version"]}
     result_doc = {
         "schema": SCHEMA, "driver": DRIVER, "birth": birth, "attempt_id": cap["attempt_id"],
         "bound_card": birth["bound_card"], "root": birth["root"], "role": birth["role"], "band": birth["band"],
         "parent_session": birth["parent_session"], "parent_message_id": message_id, "child_agent_id": agent_id,
-        "call_id": call["id"], "host": HOST, "host_version": pmeta["version"], "surface": pmeta["entrypoint"],
+        "call_id": call["id"], "host": HOST, "host_version": birth_version, "host_versions": sorted(parent_versions | set(cmeta["versions"])),
+        "surface": pmeta["entrypoint"],
         "requested": {"model": selected["model"], "effort": selected["effort"]}, "requested_native": cap["arguments"],
-        "resolved_model": resolved, "turns": turns, "tools_used": sorted(tools),
+        "resolved_model": resolved, "turns": turns, "synthetic_turns": synthetic, "synthetic_final": last_assistant_synthetic,
+        "tools_used": sorted(tools),
         "read_only": tools <= (READ_ONLY_TOOLS | RETURN_CHANNEL_TOOLS),
         "status": status, "payload_returned": status == "completed",
         "payload_sha256": [digest(p.encode()) for p in payloads], "qualification": False,
@@ -554,10 +677,17 @@ def verify_evidence(path, *, runtime=None):
     return envelope
 
 
+def observed_pair(proof: Mapping[str, Any]) -> dict[str, str]:
+    """Pair of the last real turn; a child that only ever produced host error turns observed nothing."""
+
+    turns = proof.get("turns") or []
+    return dict(turns[-1]["observed"]) if turns else {"model": UNAVAILABLE, "effort": UNAVAILABLE}
+
+
 def verify_proxy(entry, *, runtime=None):
     proof = verify_evidence(entry.get("runtime_evidence", ""), runtime=runtime)
     cap = proof["birth"]["capture"]
-    last = proof["turns"][-1]["observed"]
+    last = observed_pair(proof)
     bindings = {
         "activity": proof["role"], "band": proof["band"], "bound_card": proof["bound_card"], "child_id": proof["child_agent_id"],
         "host": proof["host"], "host_version": proof["host_version"], "surface": proof["surface"], "selection_capture": cap,

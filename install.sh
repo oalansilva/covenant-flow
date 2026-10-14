@@ -7,12 +7,22 @@ usage() {
 Usage:
   install.sh --init [--target DIR]
   install.sh --pin <vMAJOR.MINOR.PATCH> [--target DIR] [--source DIR]
+  install.sh --account [--check | --remove] [--target DIR] [--source DIR]
 
---init   Write .covenant-flow/overlay.yaml with required keys empty. Does not guess values.
---pin    Copy nucleus, adapters, .agents/skills, helpers, and render AGENTS.md.
-         Also installs the Claude Code adapter files (CLAUDE.md only when absent,
-         .claude/skills bridges, .claude/agents, merged .claude/settings.json hooks).
-         Requires a valid filled overlay. Refuses submodule / empty overlay.
+--init     Write .covenant-flow/overlay.yaml with required keys empty. Does not guess values.
+--pin      Copy nucleus, adapters, .agents/skills, helpers, and render AGENTS.md.
+           Also installs the Claude Code adapter files (CLAUDE.md only when absent,
+           .claude/skills bridges, .claude/agents) and writes .covenant-flow/adapters.json.
+           It writes NO hook registration for Claude Code, Cursor, Codex or OpenCode and
+           removes only Covenant Flow's entries from their project registration files; the
+           Grok Build and dsh registrations are copied as before.
+           Requires a valid filled overlay. Refuses submodule / empty overlay.
+--account  Install the account shim (~/.config/covenant-flow/shim/) and merge one hook
+           registration into the global config of each of Claude Code, Cursor, Codex and
+           OpenCode found on this machine (foreign entries preserved; Grok Build and dsh
+           untouched). --check reports per host (and for the consumer at --target) what is
+           missing or unreviewed; --remove takes only Covenant Flow's entries out. It never
+           records trust: the operator runs `cf_shim.py trust --record`.
 
 v1 refuses submodule, gitignore-as-install, marketplace, and template-clone as the channel.
 USAGE
@@ -22,12 +32,16 @@ PRODUCT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 TARGET="$(pwd)"
 MODE=""
 PIN=""
+ACCOUNT_ACTION="install"
 SOURCE="$PRODUCT_ROOT"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --init) MODE="init"; shift ;;
     --pin) MODE="pin"; PIN="${2:-}"; shift 2 ;;
+    --account) MODE="account"; shift ;;
+    --check) ACCOUNT_ACTION="check"; shift ;;
+    --remove) ACCOUNT_ACTION="remove"; shift ;;
     --target) TARGET="$(cd "${2:-.}" && pwd)"; shift 2 ;;
     --source) SOURCE="$(cd "${2:-.}" && pwd)"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -38,6 +52,9 @@ done
 if [[ -z "$MODE" ]]; then
   usage >&2
   exit 2
+fi
+if [[ "$MODE" != "account" && "$ACCOUNT_ACTION" != "install" ]]; then
+  die "--check and --remove apply to --account only"
 fi
 
 die() { echo "implantar: $*" >&2; exit 1; }
@@ -139,6 +156,12 @@ PY
   exit 0
 fi
 
+if [[ "$MODE" == "account" ]]; then
+  # Operator account only: nothing is written to a consumer and no trust is recorded.
+  [[ -f "$SOURCE/scripts/process-fsm/account_install.py" && -f "$SOURCE/scripts/process-fsm/cf_shim.py" ]] || die "source has no account shim: $SOURCE"
+  exec python3 "$SOURCE/scripts/process-fsm/account_install.py" "$ACCOUNT_ACTION" --source "$SOURCE/scripts/process-fsm" --target "$TARGET"
+fi
+
 if [[ "$MODE" != "pin" ]]; then
   die "unknown mode"
 fi
@@ -158,20 +181,21 @@ except OverlayError as exc:
 PY
 
 # All Codex collisions are checked before any part of the pin is written. The
-# hook preflight also refuses an active [hooks] table in config.toml; the bridge
-# preflight refuses operator-edited skills without touching vendor paths.
-python_overlay "$SOURCE/scripts/process-fsm/codex_hooks.py" preflight --source "$SOURCE" --target "$TARGET"
+# bridge preflight refuses operator-edited skills without touching vendor paths.
+# Hook registration is not written by the pin (it lives in the operator account):
+# the project-registration preflight only proves that Covenant Flow's entries can be
+# removed from the project files without loss.
+python_overlay "$SOURCE/scripts/process-fsm/project_registration.py" preflight --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/codex_skills.py" preflight --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/codex_agents.py" preflight --source "$SOURCE" --target "$TARGET"
 # Claude Code collisions are also checked before anything is written: an own
-# CLAUDE.md without the AGENTS.md import, operator-edited bridges or agents under
-# .claude/, and malformed or non-object settings.json. Preflight never trusts.
+# CLAUDE.md without the AGENTS.md import and operator-edited bridges or agents
+# under .claude/. Preflight never trusts.
 claude_memory preflight
-python_overlay "$SOURCE/scripts/process-fsm/claude_hooks.py" preflight --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/claude_skills.py" preflight --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/claude_agents.py" preflight --source "$SOURCE" --target "$TARGET"
 # Preflight only the shipped mechanisms. Never read the account's selections.
-for mechanism in .cursor/model-policy.yaml scripts/process-fsm/model_selection.py scripts/process-fsm/model_selection_adapter.py scripts/process-fsm/model_selection_lib.js scripts/process-fsm/model_proxy.py scripts/process-fsm/release_model_selection.py scripts/process-fsm/codex_adapter.py scripts/process-fsm/codex_proxy.py scripts/process-fsm/codex_review.py scripts/process-fsm/codex_evidence.py scripts/process-fsm/codex_fs.py scripts/process-fsm/claude_adapter.py scripts/process-fsm/claude_agents.py scripts/process-fsm/claude_evidence.py scripts/process-fsm/claude_hooks.py scripts/process-fsm/claude_proxy.py scripts/process-fsm/claude_review.py scripts/process-fsm/claude_skills.py scripts/process-fsm/claude_trust.py .claude/settings.json .claude/agents/diff-reviewer.md .claude/agents/code-reviewer.md CLAUDE.md .dsh/plugin/process-fsm-guard.js .opencode/plugin/process-fsm-guard.js .cursor/hooks/process-fsm-model-selection.sh .grok/hooks/process-fsm-model-selection.sh; do
+for mechanism in .cursor/model-policy.yaml scripts/process-fsm/model_selection.py scripts/process-fsm/model_selection_adapter.py scripts/process-fsm/model_selection_lib.js scripts/process-fsm/model_proxy.py scripts/process-fsm/release_model_selection.py scripts/process-fsm/codex_adapter.py scripts/process-fsm/codex_proxy.py scripts/process-fsm/codex_review.py scripts/process-fsm/codex_evidence.py scripts/process-fsm/codex_fs.py scripts/process-fsm/claude_adapter.py scripts/process-fsm/claude_agents.py scripts/process-fsm/claude_evidence.py scripts/process-fsm/claude_proxy.py scripts/process-fsm/claude_review.py scripts/process-fsm/claude_skills.py scripts/process-fsm/claude_trust.py scripts/process-fsm/cf_shim.py scripts/process-fsm/cf_shim_opencode.js scripts/process-fsm/account_install.py scripts/process-fsm/account_registration.py scripts/process-fsm/adapter_manifest.py scripts/process-fsm/project_registration.py .claude/agents/diff-reviewer.md .claude/agents/code-reviewer.md CLAUDE.md .dsh/plugin/process-fsm-guard.js .opencode/plugin/process-fsm-guard.js .opencode/plugin/impeccable-hook.js .cursor/hooks/process-fsm-model-selection.sh .grok/hooks/process-fsm-model-selection.sh; do
   [[ -f "$SOURCE/$mechanism" ]] || die "selection mechanism missing in source: $mechanism"
 done
 python_overlay - <<PY
@@ -182,7 +206,6 @@ PY
 
 copy_tree "$SOURCE/.cursor/model-policy.yaml" "$TARGET/.cursor/model-policy.yaml"
 copy_tree "$SOURCE/.cursor/process-fsm.yaml" "$TARGET/.cursor/process-fsm.yaml"
-copy_tree "$SOURCE/.cursor/hooks.json" "$TARGET/.cursor/hooks.json"
 copy_tree "$SOURCE/.cursor/hooks/" "$TARGET/.cursor/hooks/"
 copy_tree "$SOURCE/.cursor/rules/" "$TARGET/.cursor/rules/"
 copy_tree "$SOURCE/.cursor/commands/" "$TARGET/.cursor/commands/"
@@ -196,7 +219,7 @@ mkdir -p "$TARGET/.grok/rules"
 copy_tree "$SOURCE/.grok/rules/00-harness.md" "$TARGET/.grok/rules/00-harness.md"
 copy_tree "$SOURCE/.grok/skills/" "$TARGET/.grok/skills/"
 
-copy_tree "$SOURCE/.opencode/plugin/" "$TARGET/.opencode/plugin/"
+# The OpenCode adapter modules go to .opencode/adapter/ below (not auto-loaded by the host).
 copy_tree "$SOURCE/.opencode/skills/" "$TARGET/.opencode/skills/"
 
 copy_tree "$SOURCE/.dsh/plugin/" "$TARGET/.dsh/plugin/"
@@ -213,22 +236,25 @@ if [[ -f "$SOURCE/scripts/post-card-evidence-comment.sh" ]]; then
 fi
 
 python_overlay "$TARGET/scripts/process-fsm/codex_skills.py" install --source "$TARGET" --target "$TARGET"
-python_overlay "$SOURCE/scripts/process-fsm/codex_hooks.py" install --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/codex_agents.py" install --source "$SOURCE" --target "$TARGET"
 
 # Claude Code adapter. Bridges come from SOURCE so an operator-installed vendor
-# skill under .agents/skills (kept above) is never parsed or rewritten. Hooks are
-# merged by handler ownership; the account trust record is never read or written.
+# skill under .agents/skills (kept above) is never parsed or rewritten. The account
+# trust record is never read or written.
 claude_memory install
 python_overlay "$SOURCE/scripts/process-fsm/claude_skills.py" install --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/claude_agents.py" install --source "$SOURCE" --target "$TARGET"
-python_overlay "$SOURCE/scripts/process-fsm/claude_hooks.py" install --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/claude_skills.py" check --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/claude_agents.py" check --source "$SOURCE" --target "$TARGET"
-python_overlay "$SOURCE/scripts/process-fsm/claude_hooks.py" check --source "$SOURCE" --target "$TARGET"
 for adapter_file in "$SOURCE"/scripts/process-fsm/claude_*.py; do
   cmp -s "$adapter_file" "$TARGET/scripts/process-fsm/$(basename "$adapter_file")" || die "Claude adapter file differs after copy: $(basename "$adapter_file")"
 done
+
+# Account-registration pin: no hook registration of Claude Code, Cursor, Codex or OpenCode stays in
+# the consumer (only Covenant Flow's entries are removed; the OpenCode adapter modules move out of the
+# auto-load path). Grok Build (.grok/hooks/) and dsh (.dsh/) keep their project registration.
+python_overlay "$SOURCE/scripts/process-fsm/project_registration.py" apply --source "$SOURCE" --target "$TARGET"
+python_overlay "$SOURCE/scripts/process-fsm/project_registration.py" check --source "$SOURCE" --target "$TARGET"
 
 python_overlay - <<PY
 from pathlib import Path
@@ -241,8 +267,12 @@ print("pin", "$PIN")
 print("overlay_doc", overlay.get("overlay_doc"))
 PY
 
+# The adapter manifest is what the account shim reads; written last, over the copied files.
+python_overlay "$SOURCE/scripts/process-fsm/adapter_manifest.py" write --root "$TARGET" --pin "$PIN"
+python_overlay "$SOURCE/scripts/process-fsm/adapter_manifest.py" check --root "$TARGET"
+
 # Do not touch overlay_doc markdown or account model selections.
-echo "Codex project hooks require operator trust review; pin does not confer trust."
-echo "Claude Code project hooks require operator trust review (claude_adapter.py trust --record); pin does not confer trust."
+echo "No hook registration was written to the consumer: run \`install.sh --account\` once in the operator account."
+echo "The pin does not confer trust: the operator reviews with \`python3 ~/.config/covenant-flow/shim/current/cf_shim.py trust --record\` (Codex also needs its own /hooks review)."
 echo "implantar --pin $PIN complete in $TARGET"
 echo "Commit these trees in the consumer git (not a submodule)."

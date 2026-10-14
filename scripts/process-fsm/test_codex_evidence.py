@@ -198,7 +198,7 @@ def test_old_anchor_refuses_unfinished_continuation_and_tampered_revision(essay)
 @pytest.mark.parametrize("mutation,code", [
     (lambda e: e.c[0]["payload"]["source"]["subagent"]["thread_spawn"].update(parent_thread_id="another"), "source_conflict"),
     (lambda e: e.c[0]["payload"].update(id="another"), "identity_mismatch"),
-    (lambda e: e.c[0]["payload"].update(cli_version="999"), "unsupported_host"),
+    (lambda e: e.c[0]["payload"].pop("cli_version"), "unsupported_schema"),
     (lambda e: e.c[2]["payload"].update(model=None), "observed_mismatch"),
     (lambda e: e.c[2]["payload"].update(effort=None), "observed_mismatch"),
     (lambda e: e.c[2]["payload"].update(model="different"), "observed_mismatch"),
@@ -226,7 +226,7 @@ def test_refusal_preserves_work_and_status(essay, mutation, code):
 
 @pytest.mark.parametrize("mutation,code", [
     (lambda e: e.p[0]["payload"].update(originator="other"), "unsupported_host"),
-    (lambda e: e.p[0]["payload"].pop("cli_version"), "unsupported_host"),
+    (lambda e: e.p[0]["payload"].pop("cli_version"), "unsupported_schema"),
     (lambda e: e.p[1]["payload"].pop("turn_id"), "unsupported_schema"),
     (lambda e: e.p[1]["payload"].update(cwd="/other"), "worktree_mismatch"),
 ])
@@ -235,6 +235,57 @@ def test_preflight_host_schema_and_worktree(essay, mutation, code):
     essay.write(essay.parent, essay.p)
     with pytest.raises(ce.EvidenceError, match=code):
         ce.preflight(root=essay.root, qualification=True)
+
+
+def test_a_cli_version_never_seen_with_the_same_rollout_format_passes_preflight_and_is_recorded(essay):
+    essay.complete()
+    for rows, path in ((essay.p, essay.parent), (essay.c, essay.child)):
+        rows[0]["payload"]["cli_version"] = "9.9.9"
+        essay.write(path, rows)
+    assert ce.preflight(root=essay.root, qualification=True)["driver"] == ce.DRIVER == "codex_exec/rollout-v1"
+    result = essay.collect()
+    assert result["host_version"] == "9.9.9" and result["driver"] == "codex_exec/rollout-v1" and result["status"] == "completed"
+
+
+def test_the_schema_error_names_the_record_kind_the_field_and_the_observed_version(essay):
+    essay.complete()
+    essay.p[0]["payload"]["cli_version"] = "9.9.9"
+    essay.p[1]["payload"].pop("sandbox_policy")
+    essay.write(essay.parent, essay.p)
+    with pytest.raises(ce.EvidenceError) as e:
+        ce.preflight(root=essay.root, qualification=True)
+    assert e.value.code == "unsupported_schema" and "turn_context" in str(e.value) and "sandbox_policy" in str(e.value) and "9.9.9" in str(e.value)
+
+
+def test_originator_still_has_to_be_codex_exec_in_every_version(essay):
+    essay.p[0]["payload"].update(originator="codex_tui", cli_version="9.9.9")
+    essay.write(essay.parent, essay.p)
+    with pytest.raises(ce.EvidenceError, match="unsupported_host"):
+        ce.preflight(root=essay.root, qualification=True)
+
+
+def test_divergent_evidence_fails_the_gate_in_a_new_version_too(essay):
+    essay.complete()
+    for rows, path in ((essay.p, essay.parent), (essay.c, essay.child)):
+        rows[0]["payload"]["cli_version"] = "9.9.9"
+    essay.c[2]["payload"].update(model="different")
+    essay.write(essay.parent, essay.p)
+    essay.write(essay.child, essay.c)
+    with pytest.raises(ce.EvidenceError, match="observed_mismatch"):
+        essay.collect()
+
+
+def test_the_first_driver_id_names_the_same_schema_so_existing_births_and_qualifications_stay_valid(essay):
+    essay.complete()
+    legacy = "codex_exec/0.162.1/rollout-v1"
+    assert legacy in ce.ACCEPTED_DRIVERS and legacy != ce.DRIVER
+    birth = json.loads(essay.birth.read_text())
+    birth.pop("integrity_sha256")
+    birth["driver"] = legacy
+    essay.birth.chmod(0o600)
+    essay.birth.write_text(json.dumps(ce.sealed(birth)))
+    result = essay.collect()
+    assert result["driver"] == legacy and result["status"] == "completed"
 
 
 def test_unverified_no_source_session_and_bad_destination(essay, monkeypatch):

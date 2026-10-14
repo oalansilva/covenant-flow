@@ -2,7 +2,12 @@
 
 The SQLite index is only a locator. Local hashes detect corruption, not a server
 attestation. No prompts, full transcripts, or manually supplied observations are
-persisted. Ordinary work requires a real qualification of this host/version.
+persisted. Ordinary work requires a real qualification of this driver schema.
+
+A host version is accepted when the rollout records the driver reads match the
+declared `codex_exec/rollout-v1` schema, never by a version number: the
+`cli_version` is recorded in the receipt and the evidence and refuses nothing on
+its own. Only `originator` (the kind of host) and the record schema are checked.
 """
 from __future__ import annotations
 
@@ -19,7 +24,32 @@ from pathlib import Path
 from model_selection import load_capture, request_role, validate_capture
 
 SCHEMA = "codex-rollout-evidence-v1"
-DRIVER = "codex_exec/0.162.1/rollout-v1"
+DRIVER = "codex_exec/rollout-v1"
+# The first driver id embedded the version it was rehearsed on; it names the same schema.
+LEGACY_DRIVERS = ("codex_exec/0.162.1/rollout-v1",)
+ACCEPTED_DRIVERS = (DRIVER, *LEGACY_DRIVERS)
+# Rollout record schema (`codex_exec/rollout-v1`): kind -> required `(field, type)` pairs.
+ROLLOUT_SCHEMA = {
+    "session_meta": (("id", str), ("originator", str), ("cli_version", str), ("cwd", str)),
+    "turn_context": (("turn_id", str), ("cwd", str), ("sandbox_policy", dict)),
+    "function_call": (("call_id", str), ("arguments", str)),
+    "function_call_output": (("call_id", str), ("output", str)),
+    "task_event": (("turn_id", str),),
+    "agent_message": (("author", str), ("content", list)),
+}
+
+
+def check_rollout_schema(kind, payload, *, version="unavailable", where=""):
+    """`unsupported_schema` naming the record kind, the field and the observed host version."""
+
+    for field, expected in ROLLOUT_SCHEMA[kind]:
+        value = payload.get(field) if isinstance(payload, dict) else None
+        if not isinstance(value, expected) or (expected is str and not value.strip()):
+            raise EvidenceError(
+                "unsupported_schema",
+                f"{kind} record{where} lacks `{field}` as {expected.__name__} on host version {version}",
+                recovery="the host changed the rollout format: revalidate the driver against a real session; no version is refused by its number",
+            )
 DEFAULT_DEST = Path(".cursor/tmp/codex-evidence")
 MAX_WAIT = 10.0
 UNAVAILABLE = "unavailable"
@@ -147,11 +177,15 @@ class Rollout:
         if len(metas) != 1 or metas[0].get("id") != thread:
             raise EvidenceError("identity_mismatch", thread, recovery="new checked birth required")
         meta = metas[0]
-        if (meta.get("originator"), meta.get("cli_version")) != ("codex_exec", "0.162.1"):
-            raise EvidenceError("unsupported_host", f"{meta.get('originator', UNAVAILABLE)}/{meta.get('cli_version', UNAVAILABLE)}", recovery="qualify a versioned driver; installed binary is not runtime proof")
+        version = meta.get("cli_version") if isinstance(meta.get("cli_version"), str) else UNAVAILABLE
+        check_rollout_schema("session_meta", meta, version=version)
+        if meta["originator"] != "codex_exec":
+            raise EvidenceError("unsupported_host", f"{meta['originator']}/{version}", recovery="the driver reads `codex exec` rollouts; another host type needs its own driver")
         turns = [r[1]["payload"] for r in rows if r[1].get("type") == "turn_context"]
-        if not turns or any(not t.get("turn_id") or not t.get("cwd") or not isinstance(t.get("sandbox_policy"), dict) for t in turns):
-            raise EvidenceError("unsupported_schema", "turn identity/cwd/sandbox missing")
+        if not turns:
+            raise EvidenceError("unsupported_schema", f"turn_context record absent on host version {version}")
+        for turn in turns:
+            check_rollout_schema("turn_context", turn, version=version)
         return path, rows, meta, turns
 
 
@@ -179,7 +213,7 @@ def preflight(*, root, capture=None, dest=DEFAULT_DEST, thread=None, qualificati
             qualified = json.loads((out / "qualification.json").read_text())
             check_seal(qualified)
             proof = verify_evidence(qualified["evidence"], runtime=rt)
-            if proof["driver"] != DRIVER or not proof["qualification"] or not qualified.get("refusal_codes"):
+            if proof["driver"] not in ACCEPTED_DRIVERS or not proof["qualification"] or not qualified.get("refusal_codes"):
                 raise EvidenceError("unverified", "qualification lacks positive proof and real refusals")
             refusals = [check_seal(json.loads(Path(p).read_text())) for p in qualified["refusals"]]
             if [r.get("code") for r in refusals] != qualified["refusal_codes"] or any(r.get("attempt_id") != proof["attempt_id"] or r.get("result") != "blocked" for r in refusals):
@@ -242,7 +276,7 @@ def _projection(rows, ordinals, source):
 def extract(birth, *, runtime=None):
     rt = runtime or Rollout()
     check_seal(birth)
-    if birth.get("schema") != SCHEMA or birth.get("driver") != DRIVER:
+    if birth.get("schema") != SCHEMA or birth.get("driver") not in ACCEPTED_DRIVERS:
         raise EvidenceError("unsupported_schema")
     cap = validate_capture(birth["capture"], client="codex", role=birth["role"])
     if birth["attempt_id"] != cap["attempt_id"] or birth["band"] != cap["band"]:
@@ -268,6 +302,7 @@ def extract(birth, *, runtime=None):
             used_parent.add(i)
         if i < birth["before_record"] or row["type"] != "response_item" or v.get("type") != "function_call" or v.get("name") != "spawn_agent":
             continue
+        check_rollout_schema("function_call", v, version=parent_meta["cli_version"], where=f" (record {i})")
         try:
             args = json.loads(v["arguments"])
         except (KeyError, ValueError) as exc:
@@ -289,6 +324,7 @@ def extract(birth, *, runtime=None):
     if len(outputs) != 1:
         raise EvidenceError("spawn_return_unavailable")
     oi, output = outputs[0]
+    check_rollout_schema("function_call_output", output, version=parent_meta["cli_version"], where=f" (record {oi})")
     if output.get("internal_chat_message_metadata_passthrough", {}).get("turn_id") != birth["parent_turn"]:
         raise EvidenceError("turn_mismatch", "native spawn result belongs to another parent turn")
     try:
@@ -337,6 +373,7 @@ def extract(birth, *, runtime=None):
     for i, row, sha in child:
         v = row["payload"]
         if row["type"] == "event_msg" and v.get("type") in {"task_started", "task_complete"}:
+            check_rollout_schema("task_event", v, version=meta["cli_version"], where=f" ({v['type']}, record {i})")
             if v.get("turn_id") not in seen_turns:
                 raise EvidenceError("turn_mismatch", "terminal/start belongs to unknown turn")
             used_child.add(i)
@@ -354,6 +391,7 @@ def extract(birth, *, runtime=None):
         v = row["payload"]
         if i <= oi or row["type"] != "response_item" or v.get("type") != "agent_message" or v.get("author") != child_path:
             continue
+        check_rollout_schema("agent_message", v, version=parent_meta["cli_version"], where=f" (record {i})")
         for content in v.get("content", []):
             text = content.get("text", "")
             if content.get("type") == "input_text" and text.startswith("Message Type: FINAL_ANSWER\n") and "\nPayload:\n" in text:
@@ -361,7 +399,7 @@ def extract(birth, *, runtime=None):
     if len(returns) != len(completes) or [p for i, p in returns] != [p for t, p in completes]:
         raise EvidenceError("return_payload_mismatch", "native FINAL_ANSWER must match each child terminal payload")
     used_parent.update([ci, oi, *[i for i, p in returns]])
-    result = {"schema": SCHEMA, "driver": DRIVER, "birth": birth, "attempt_id": cap["attempt_id"], "bound_card": birth["bound_card"], "root": birth["root"], "role": birth["role"], "band": birth["band"], "parent_thread": birth["parent_thread"], "child_thread": child_id, "child_path": child_path, "call_id": call["call_id"], "host": meta["originator"], "host_version": meta["cli_version"], "requested": cap["arguments"], "turns": relevant, "parent_sandbox": parent_turn[0]["sandbox_policy"]["type"], "status": "completed", "payload_returned": True, "payload_sha256": [digest(p.encode()) for t, p in completes], "qualification": birth["qualification"], "review_diff_sha256": birth["review_diff_sha256"], "sources": _projection(parent, used_parent, parent_path) + _projection(child, used_child, child_source), "validation": "verified"}
+    result = {"schema": SCHEMA, "driver": birth["driver"], "birth": birth, "attempt_id": cap["attempt_id"], "bound_card": birth["bound_card"], "root": birth["root"], "role": birth["role"], "band": birth["band"], "parent_thread": birth["parent_thread"], "child_thread": child_id, "child_path": child_path, "call_id": call["call_id"], "host": meta["originator"], "host_version": meta["cli_version"], "requested": cap["arguments"], "turns": relevant, "parent_sandbox": parent_turn[0]["sandbox_policy"]["type"], "status": "completed", "payload_returned": True, "payload_sha256": [digest(p.encode()) for t, p in completes], "qualification": birth["qualification"], "review_diff_sha256": birth["review_diff_sha256"], "sources": _projection(parent, used_parent, parent_path) + _projection(child, used_child, child_source), "validation": "verified"}
     if "wave_id" in birth:
         result["wave_id"] = birth["wave_id"]
     return result

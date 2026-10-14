@@ -60,7 +60,7 @@ def test_pin_installs_claude_adapter_and_resolves_the_fixture_selection_without_
     result = _pin(target)
 
     assert result.returncode == 0, result.stderr
-    assert "Claude Code project hooks require operator trust review" in result.stdout
+    assert "No hook registration was written to the consumer" in result.stdout and "does not confer trust" in result.stdout
     # CLAUDE.md is the one-line bridge copied from the product source.
     assert (target / "CLAUDE.md").read_bytes() == (ROOT / "CLAUDE.md").read_bytes()
     assert (target / "CLAUDE.md").read_text(encoding="utf-8").startswith("@AGENTS.md")
@@ -71,8 +71,11 @@ def test_pin_installs_claude_adapter_and_resolves_the_fixture_selection_without_
     for role in ("diff-reviewer", "code-reviewer"):
         agent = (target / ".claude" / "agents" / f"{role}.md").read_text(encoding="utf-8")
         assert "tools: Read, Grep, Glob" in agent and "model:" not in agent and "effort:" not in agent
-    hooks = json.loads((target / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]
-    assert {"SessionStart", "PreToolUse", "PostToolUse", "SubagentStop", "Stop"} <= set(hooks)
+    # The pin writes no hook registration: the account shim carries it (install.sh --account).
+    assert not (target / ".claude" / "settings.json").exists()
+    manifest_clients = json.loads((target / ".covenant-flow" / "adapters.json").read_text(encoding="utf-8"))["clients"]
+    assert {c: manifest_clients[c]["registration"] for c in manifest_clients} == {
+        "claude": "account", "cursor": "account", "codex": "account", "opencode": "account", "grok": "project", "dsh": "project"}
     for name in ("claude_adapter.py", "claude_evidence.py", "claude_proxy.py", "claude_review.py", "claude_trust.py"):
         assert filecmp.cmp(ROOT / "scripts/process-fsm" / name, target / "scripts/process-fsm" / name, shallow=False)
     policy = yaml.safe_load((target / ".cursor" / "model-policy.yaml").read_text(encoding="utf-8"))
@@ -94,6 +97,8 @@ def test_pin_installs_claude_adapter_and_resolves_the_fixture_selection_without_
     assert selection.read_bytes() == before
     assert sorted(p.name for p in selection.parent.iterdir()) == ["model-selection.yaml"]
     assert not (_home(tmp_path) / ".config" / "covenant-flow" / "claude-hook-trust.json").exists()
+    assert not (_home(tmp_path) / ".config" / "covenant-flow" / "hook-trust.json").exists()
+    assert not (_home(tmp_path) / ".config" / "covenant-flow" / "shim").exists()
     status = subprocess.run(
         [sys.executable, str(target / "scripts/process-fsm/claude_adapter.py"), "trust", "--status"],
         env=_env(tmp_path), cwd=target, capture_output=True, text=True,
@@ -145,10 +150,8 @@ def test_pin_preserves_consumer_claude_files_hooks_and_own_skills(tmp_path: Path
     assert merged["model"] == "operator-default" and merged["permissions"] == {"allow": ["Bash(ls:*)"]}
     assert merged["hooks"]["Notification"][0]["hooks"][0]["command"] == "python operator-notify.py"
     commands = [h["command"] for g in merged["hooks"]["PreToolUse"] for h in g["hooks"]]
-    assert commands.count("python operator-bash.py") == 1
-    assert sum(MANAGED in command for command in commands) == 1
-    assert all("timeout" not in h or h["timeout"] != 1 for g in merged["hooks"]["PreToolUse"] for h in g["hooks"] if MANAGED in h["command"])
-    assert {"SessionStart", "PostToolUse", "SubagentStop", "Stop"} <= set(merged["hooks"])
+    assert commands == ["python operator-bash.py"]  # the stale Covenant Flow handler is removed, never duplicated or re-added
+    assert MANAGED not in json.dumps(merged) and set(merged["hooks"]) == {"Notification", "PreToolUse"}
 
 
 def test_existing_adapters_are_installed_byte_for_byte_and_claude_never_touches_their_hooks(tmp_path: Path):
@@ -162,12 +165,20 @@ def test_existing_adapters_are_installed_byte_for_byte_and_claude_never_touches_
     assert result.returncode == 0, result.stderr
     assert (target / ".cursor" / "model-map.yaml").read_bytes() == original_map
     for tree in (".cursor/hooks", ".cursor/rules", ".cursor/commands", ".cursor/agents", ".cursor/skills", ".grok",
-                 ".opencode/plugin", ".opencode/skills", ".dsh", ".codex/agents"):
+                 ".opencode/skills", ".dsh", ".codex/agents"):
         comparison = filecmp.dircmp(ROOT / tree, target / tree)
         assert not comparison.left_only and not comparison.diff_files, tree
+    # Grok Build and dsh keep their project registration exactly as before.
+    for registration in (".grok/hooks/process-fsm.json", ".dsh/cordis.patch.yml", ".dsh/dsh_boot.sh"):
+        if (ROOT / registration).is_file():
+            assert (target / registration).read_bytes() == (ROOT / registration).read_bytes(), registration
+    # The OpenCode adapter modules are in a path the host does not auto-load.
+    comparison = filecmp.dircmp(ROOT / ".opencode" / "plugin", target / ".opencode" / "adapter")
+    assert not comparison.left_only and not comparison.diff_files
+    assert not (target / ".opencode" / "plugin").exists() and not (target / ".cursor" / "hooks.json").exists()
     codex = json.loads(codex_hooks.read_text(encoding="utf-8"))
-    assert "claude_adapter.py" not in json.dumps(codex)
-    assert "codex_adapter.py" in json.dumps(codex) and "Notification" in codex["hooks"]
+    assert "claude_adapter.py" not in json.dumps(codex) and "codex_adapter.py" not in json.dumps(codex)
+    assert set(codex["hooks"]) == {"Notification"}
     assert len(list((target / ".agents" / "skills").glob("*/SKILL.md"))) == 20
     # Separate manifests: the Claude bridges also cover the vendored skills.
     assert (target / ".claude" / "skills" / ".covenant-flow-bridges.json").read_bytes() != (
@@ -200,8 +211,8 @@ def test_claude_collisions_abort_the_pin_before_any_tree_is_written(tmp_path: Pa
     cases = {
         "edited bridge": (".claude/skills/implantar/SKILL.md", b"operator-authored skill\n", "skill bridge conflict"),
         "edited reviewer agent": (".claude/agents/diff-reviewer.md", b"operator-authored agent\n", "Claude agent conflict"),
-        "malformed settings": (".claude/settings.json", b"{not json", "claude hook merge error"),
-        "non-object hooks": (".claude/settings.json", b'{"hooks": []}', "claude hook merge error"),
+        "malformed settings": (".claude/settings.json", b"{not json", "project registration error"),
+        "non-object hooks": (".claude/settings.json", b'{"hooks": []}', "project registration error"),
     }
     for name, (relative, content, message) in cases.items():
         target, original_map = _target(tmp_path / name.replace(" ", "-"))
@@ -242,7 +253,8 @@ def _source_copy(tmp_path: Path) -> Path:
         "scripts/process-fsm/claude_adapter.py",
         "scripts/process-fsm/claude_evidence.py",
         "scripts/process-fsm/codex_evidence.py",
-        ".claude/settings.json",
+        "scripts/process-fsm/cf_shim.py",
+        ".opencode/plugin/impeccable-hook.js",
         ".claude/agents/code-reviewer.md",
         "CLAUDE.md",
     ],

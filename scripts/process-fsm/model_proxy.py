@@ -27,9 +27,9 @@ def evidence(*, capture: dict, observed: dict[str, Any], host: str, host_version
         # manual `observed` facts cannot prove a new Claude Code execution.
         successful = False
         if runtime_evidence is not None:
-            from claude_evidence import verify_evidence as verify_claude
+            from claude_evidence import observed_pair, verify_evidence as verify_claude
             proof = verify_claude(runtime_evidence)
-            last = proof["turns"][-1]["observed"]
+            last = observed_pair(proof)
             successful = (proof["birth"]["capture"] == birth and proof["host"] == host and proof["host_version"] == host_version and proof["status"] == status and proof["payload_returned"] == payload_returned and last["model"] == actual["model"] and last["effort"] == actual["effort"] and proof["requested"] == {"model": requested["model"], "effort": requested["effort"]})
     result = {"selection_capture": birth, "requested": requested, "observed": actual,
             "host": host or UNAVAILABLE, "host_version": host_version or UNAVAILABLE,

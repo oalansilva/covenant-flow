@@ -1,14 +1,14 @@
 # Evidência automática do Codex
 
-O adapter lê o rollout local pelo driver `codex_exec/0.162.1/rollout-v1`; envelope `codex-rollout-evidence-v1`. O índice SQLite é localizador por UUID/path exatos. A prova vem de `session_meta`, `turn_context`, chamada/retorno nativos, `task_started`, `task_complete` e `agent_message` com `FINAL_ANSWER` no pai. `message` cifrado no spawn não é necessário nem é decifrado.
+O adapter lê o rollout local pelo driver `codex_exec/rollout-v1`; envelope `codex-rollout-evidence-v1`. O driver aceita o host **pelo formato**, não pelo número da versão: `originator == codex_exec` (tipo de host) e os registros que lê batendo com o schema declarado (`ROLLOUT_SCHEMA` em `codex_evidence.py`). A `cli_version` é registrada no receipt e na evidência e nunca recusa sozinha. O id antigo `codex_exec/0.162.1/rollout-v1` nomeia o mesmo schema: receipts, evidências e a qualificação privada já gravados com ele continuam válidos. O índice SQLite é localizador por UUID/path exatos. A prova vem de `session_meta`, `turn_context`, chamada/retorno nativos, `task_started`, `task_complete` e `agent_message` com `FINAL_ANSWER` no pai. Campo exigido ausente ou de outro tipo = `unsupported_schema` citando o tipo de registro, o campo e a versão observada. Evidência ausente ou divergente reprova em qualquer versão. `message` cifrado no spawn não é necessário nem é decifrado.
 
 ## Capacidade demonstrada em 2026-10-13
 
 | Runtime observado | Fonte / resultado | Limite |
 | --- | --- | --- |
-| `codex_exec/0.162.1` | Rollout local; ensaio nativo #1095 com captura, modelo/esforço, filiação/UUID/turno, terminal, payload retornado, coleta e proxy consumidor aprovados | Suporte a este schema/fonte. O ensaio teve sandbox workspace-write; a onda read-only tem testes de contrato e exige observação real da sessão em cada execução. |
-| Codex `0.162.0` | Exploração histórica/catálogo, sem qualificação deste coletor | `unverified`; não preencher a versão com a saída de um binário instalado. |
-| Outros hosts/versões; app-server | Nenhum driver/prova equivalentes | Indisponíveis neste driver; sem fallback. |
+| `codex_exec/0.162.1` | Rollout local; ensaio nativo #1095 com captura, modelo/esforço, filiação/UUID/turno, terminal, payload retornado, coleta e proxy consumidor aprovados | Suporte ao schema `codex_exec/rollout-v1` (a qualificação vale por schema do driver; uma `cli_version` nova com o mesmo formato passa no preflight sem novo ensaio). O ensaio teve sandbox workspace-write; a onda read-only tem testes de contrato e exige observação real da sessão em cada execução. |
+| Codex `0.162.0` | Exploração histórica/catálogo, sem ensaio deste coletor | Aceito se o rollout bate com o schema; não preencher a versão com a saída de um binário instalado. |
+| Outros tipos de host (`originator` diferente de `codex_exec`), app-server | Nenhum driver/prova equivalentes | `unsupported_host`; sem fallback. |
 
 Prova sanitizada reproduzível: [evidence.md](../openspec/changes/card-1095-codex-evidencia/evidence.md). A qualificação privada precisa continuar íntegra e acessível: suporte documentado não substitui o preflight da sessão atual.
 
@@ -76,7 +76,7 @@ Em 2026-10-13, uma sessão comprovadamente read-only recusou o preflight porque 
 
 ## Qualificação e recuperação
 
-Um host sem prova é `unverified`. A exceção é ensaio explícito sem produto, sem transição e dentro das permissões existentes. Capture `codex/execucao`, execute `prepare --qualification`, spawne um filho nativo que apenas retorna conteúdo e colete/consuma pelo proxy. Registre recusas reais do coletor separadamente de fixtures; `qualify --evidence <envelope> --refusal <failure-json>` exige tentativa correspondente e persiste a qualificação privada. Não usar o ensaio como QA de produto/review de diff. Fixtures não qualificam hosts.
+Um host sem prova é `unverified`. A qualificação é por **schema do driver**, não por versão do binário: formato do rollout que mudou de verdade (`unsupported_schema`) exige revalidar o driver com um ensaio real. A exceção é ensaio explícito sem produto, sem transição e dentro das permissões existentes. Capture `codex/execucao`, execute `prepare --qualification`, spawne um filho nativo que apenas retorna conteúdo e colete/consuma pelo proxy. Registre recusas reais do coletor separadamente de fixtures; `qualify --evidence <envelope> --refusal <failure-json>` exige tentativa correspondente e persiste a qualificação privada. Não usar o ensaio como QA de produto/review de diff. Fixtures não qualificam hosts.
 
 ```bash
 python3 scripts/process-fsm/codex_evidence.py preflight

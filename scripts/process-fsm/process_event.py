@@ -379,6 +379,16 @@ def process_event(
     active_client = client or os.environ.get("COVENANT_CLIENT") or native
     if native and active_client != native:
         return _payload(result="reject", state=q, to=None, reason=f"{native}_evidence:ambiguous_client")
+    if active_client in ("cursor", "opencode", "codex") and event in PREFLIGHT_EVENTS:
+        # Account registration (pin with an adapter manifest): the hooks of these clients run from the
+        # operator account through the shim. Without the shim, its heartbeat, the client's entry or its
+        # review the transition is refused. Older pins and every other client are not checked here.
+        import account_registration
+        try:
+            account_registration.require_active(active_client, workdir)
+        except account_registration.RegistrationRefusal as exc:
+            prefix = "codex_evidence" if active_client == "codex" else f"{active_client}_registration"
+            return _payload(result="reject", state=q, to=None, reason=f"{prefix}:{exc.code}", message=f"{active_client}: {exc}")
     if active_client == "codex" and event in PREFLIGHT_EVENTS:
         from codex_evidence import EvidenceError, preflight
         try:

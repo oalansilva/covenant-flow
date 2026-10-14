@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+import cf_shim
 from model_selection import claude_version_from_env
 
 HERE = Path(__file__).resolve().parent
@@ -179,8 +180,8 @@ def is_reviewed(digest: str) -> bool:
     return isinstance(document, dict) and isinstance(document.get("reviews"), dict) and digest in document["reviews"]
 
 
-def status(root: Path | None = None, scripts_dir: Path = HERE) -> dict[str, Any]:
-    """Never raises: an unreadable definition is simply unreviewed."""
+def legacy_status(root: Path | None = None, scripts_dir: Path = HERE) -> dict[str, Any]:
+    """Project-registration review. Never raises: an unreadable definition is simply unreviewed."""
 
     try:
         current = current_digest(root, scripts_dir)
@@ -208,6 +209,7 @@ def write_heartbeat(
     reviewed: bool,
     environ: Mapping[str, str] | None = None,
     version: str | None = None,
+    entrypoint: str | None = None,
 ) -> Path:
     env = os.environ if environ is None else environ
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", session_id):
@@ -221,7 +223,7 @@ def write_heartbeat(
             "transcript_path": transcript_path or UNAVAILABLE,
             "cwd": cwd,
             "host_version": version or host_version(env),
-            "entrypoint": env.get("CLAUDE_CODE_ENTRYPOINT") or UNAVAILABLE,
+            "entrypoint": entrypoint or env.get("CLAUDE_CODE_ENTRYPOINT") or UNAVAILABLE,
             "hooks_digest": digest,
             "reviewed": reviewed,
             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -236,3 +238,65 @@ def read_heartbeat(session_id: str) -> dict[str, Any] | None:
         return None
     value = _read_json(heartbeat_dir() / f"{session_id}.json")
     return value if isinstance(value, dict) and value.get("version") == 1 else None
+
+
+def shim_verified() -> str | None:
+    """Digest the account shim just verified for this very run, or None when not running under the shim."""
+
+    digest = os.environ.get("CF_SHIM_ADAPTER_DIGEST")
+    return digest if os.environ.get("CF_SHIM_ACTIVE") == "1" and digest else None
+
+
+def account_pin(root: Path | None = None, scripts_dir: Path = HERE) -> bool:
+    """True when the consumer's pin declares account registration for Claude Code."""
+
+    repo = Path(root) if root is not None else project_root(scripts_dir)
+    try:
+        manifest = cf_shim.load_manifest(repo)
+    except cf_shim.ManifestError:
+        return True  # an unreadable manifest is never an old pin
+    entry = (manifest or {}).get("clients", {}).get("claude") if manifest else None
+    return bool(isinstance(entry, dict) and entry.get("registration") == "account")
+
+
+def status(root: Path | None = None, scripts_dir: Path = HERE) -> dict[str, Any]:
+    """Review state of the hooks in use. The shim already verified the adapter when it ran this process."""
+
+    verified = shim_verified()
+    if verified is not None:
+        return {"reviewed": True, "digest": verified, "reason": "", "via": "account-shim"}
+    repo = Path(root) if root is not None else project_root(scripts_dir)
+    if account_pin(repo):
+        state = cf_shim.status("claude", repo)
+        adapter = state.get("adapter") or {}
+        reviewed = bool(state["shim_installed"] and state["registered"] and state["registration"]["reviewed"] and adapter.get("reviewed"))
+        return {
+            "reviewed": reviewed,
+            "digest": adapter.get("digest", UNAVAILABLE),
+            "reason": "" if reviewed else (
+                "hooks não revisados: the operator reads the account registration and the pinned adapter, "
+                "then runs `claude_adapter.py trust --record` (delegates to the account shim)"
+            ),
+            "via": "account",
+        }
+    return legacy_status(root, scripts_dir)
+
+
+def session_heartbeat(session_id: str) -> dict[str, Any] | None:
+    """Heartbeat of a session: the shim's when it has one, else the project-registration one."""
+
+    return cf_shim.read_heartbeat("claude", session_id) or read_heartbeat(session_id)
+
+
+def delegate_record(root: Path | None = None, scripts_dir: Path = HERE) -> int:
+    """`trust --record` on an account pin: the installed shim owns the record."""
+
+    import subprocess
+    import sys
+
+    repo = Path(root) if root is not None else project_root(scripts_dir)
+    shim = cf_shim.installed_shim_dir() / "cf_shim.py"
+    if not shim.is_file():
+        print("claude adapter trust: the account shim is not installed; run `install.sh --account` first", file=sys.stderr)
+        return 2
+    return subprocess.run([sys.executable, str(shim), "trust", "--record", "--client", "claude", "--cwd", str(repo)], check=False).returncode

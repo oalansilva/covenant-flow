@@ -10,7 +10,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from claude_evidence import EvidenceError, collect, verify_evidence, verify_proxy
+from claude_evidence import EvidenceError, collect, observed_pair, verify_evidence, verify_proxy
 from model_selection import SelectionError, load_capture, validate_capture
 
 DEFAULT_PATH = Path(".cursor/tmp/claude-child-proxies.jsonl")
@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.evidence is None:
             raise ProxyError("automatic evidence required; manual observed flags cannot prove runtime")
         proof = verify_evidence(args.evidence)
-        last = proof["turns"][-1]["observed"]
+        last = observed_pair(proof)
         entry = record(
             repo_root=args.repo_root,
             output=args.output,

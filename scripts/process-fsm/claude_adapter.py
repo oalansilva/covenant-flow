@@ -150,11 +150,47 @@ def _check_spawn(event: Mapping[str, Any], data: Mapping[str, Any], root: Path) 
     return None
 
 
+def _refresh_heartbeat(event: Mapping[str, Any]) -> None:
+    """Follow a same-session worktree switch: the host moves the transcript and the cwd changes.
+
+    Only rewrites an existing heartbeat (no SessionStart, no heartbeat) and only follows transcript
+    and cwd. The digest, reviewed flag, host version and entrypoint stay the ones recorded at
+    SessionStart: the heartbeat is the sole anchor of the hooks the host loaded, so it is never
+    re-anchored to the current trust status. Best effort: a failure never changes the decision.
+    """
+
+    if claude_trust.shim_verified() is not None:
+        return  # the account shim refreshes its own heartbeat on every event
+    try:
+        session_id = _text(event.get("session_id"))
+        transcript = _text(event.get("transcript_path"))
+        if not session_id or not transcript:
+            return
+        beat = claude_trust.read_heartbeat(session_id)
+        if beat is None:
+            return
+        cwd = str(_cwd(event))
+        if beat.get("transcript_path") == transcript and beat.get("cwd") == cwd:
+            return
+        claude_trust.write_heartbeat(
+            session_id=session_id,
+            transcript_path=transcript,
+            cwd=cwd,
+            digest=str(beat.get("hooks_digest")),
+            reviewed=bool(beat.get("reviewed")),
+            version=beat.get("host_version"),
+            entrypoint=beat.get("entrypoint"),
+        )
+    except Exception:
+        return
+
+
 def pre_tool_use(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return a documented Claude Code deny decision, or None to continue normally."""
 
     try:
         event = _dict(payload)
+        _refresh_heartbeat(event)
         tool = _text(event.get("tool_name")) or _text(event.get("toolName")) or ""
         agent_id = _text(event.get("agent_id"))
         agent_type = _text(event.get("agent_type")) or ""
@@ -206,7 +242,7 @@ def session_start(payload: Mapping[str, Any]) -> dict[str, Any]:
     try:
         status = trust_status()
         session_id = _text(payload.get("session_id")) or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
-        if session_id:
+        if session_id and claude_trust.shim_verified() is None:  # under the shim the heartbeat is the shim's
             claude_trust.write_heartbeat(
                 session_id=session_id,
                 transcript_path=_text(payload.get("transcript_path")) or "",
@@ -355,6 +391,8 @@ def dispatch(event_name: str, payload: Mapping[str, Any]) -> int:
 
 def trust_command(argv: list[str]) -> int:
     if argv == ["--record"]:
+        if claude_trust.account_pin():
+            return claude_trust.delegate_record()  # the account shim owns the record (registration + adapter)
         print(json.dumps(claude_trust.record(), sort_keys=True))
         return 0
     if argv in ([], ["--status"]):
