@@ -1,0 +1,79 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/process-fsm/claude_adapter.py\" session-start",
+            "timeout": 30,
+            "statusMessage": "Loading Covenant Flow status"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/process-fsm/claude_adapter.py\" pre-tool-use",
+            "timeout": 30,
+            "statusMessage": "Checking Covenant Flow write/model policy",
+            "onFailure": "block"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/process-fsm/claude_adapter.py\" post-tool-use",
+            "timeout": 30,
+            "statusMessage": "Checking edited UI files"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/process-fsm/claude_adapter.py\" post-tool-use",
+            "timeout": 30,
+            "statusMessage": "Checking the child's resolved model"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/process-fsm/claude_adapter.py\" subagent-stop",
+            "timeout": 15,
+            "statusMessage": "Recording child evidence"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/process-fsm/claude_adapter.py\" stop",
+            "timeout": 30,
+            "statusMessage": "Running the advisory UI deep pass"
+          }
+        ]
+      }
+    ]
+  }
+}

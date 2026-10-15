@@ -51,12 +51,21 @@ from t14 import (  # noqa: E402
 )
 from t16 import (  # noqa: E402
     LiveT16Closer,
+    LoteMeasurement,
     T16Closer,
     T16Error,
     classify_package,
+    FECHAR_RELEASE_WRONG_GIT_MESSAGE,
     lote_git,
+    wrong_fechar_release_git,
     measure_m_lote,
     parse_package_cards,
+)
+from release_closeout import (  # noqa: E402
+    ContextIdentity,
+    capture_context,
+    format_t16_blockers,
+    refuse_pass_from_other_context,
 )
 
 REPO_ROOT = ROOT.parents[1]
@@ -258,6 +267,45 @@ def write_sidecar(change_dir: Path, prototype_dir: Path | None) -> None:
     )
 
 
+PREFLIGHT_EVENTS = frozenset({"iniciar_design", "recriticar", "submeter_design", "iniciar_apply", "pedir_review", "aceitar_sha", "integrar_develop"})
+AGENT_CLIENT_NAMES = {"codex": "codex", "claude": "claude"}
+
+
+def nearest_agent_client(pid: int | None = None, proc_root: Path = Path("/proc")) -> str | None:
+    """Innermost Codex/Claude Code ancestor of this process, from the process tree."""
+
+    current = os.getpid() if pid is None else pid
+    for _ in range(64):
+        try:
+            argv = [a for a in (proc_root / str(current) / "cmdline").read_bytes().decode("utf-8", "replace").split("\0") if a]
+            stat = (proc_root / str(current) / "stat").read_text()
+        except OSError:
+            return None
+        names = {Path(argument).name for argument in argv[:2]}
+        for name, client_name in AGENT_CLIENT_NAMES.items():
+            if name in names:
+                return client_name
+        try:
+            current = int(stat.rsplit(")", 1)[1].split()[1])
+        except (IndexError, ValueError):
+            return None
+        if current <= 1:
+            return None
+    return None
+
+
+def native_client() -> str | None:
+    """Native identity: `codex`, `claude`, None, or `ambiguous` when both signals
+    are set and the process tree cannot say which one is innermost (a Codex run
+    inside Claude Code's Bash inherits CLAUDECODE=1 and still counts as Codex)."""
+
+    codex = bool(os.environ.get("CODEX_THREAD_ID"))
+    claude = os.environ.get("CLAUDECODE") == "1"
+    if codex and claude:
+        return nearest_agent_client() or "ambiguous"
+    return "codex" if codex else ("claude" if claude else None)
+
+
 def _payload(
     *,
     result: str,
@@ -275,8 +323,21 @@ def _payload(
     return out
 
 
-def _fechar_message(base: str | None) -> str:
+def _fechar_message(
+    base: str | None,
+    *,
+    blockers: list[str] | tuple[str, ...] | None = None,
+    fail_class: str | None = None,
+    extra: str | None = None,
+) -> str:
     text = base or "reject"
+    if fail_class:
+        text = f"{text}; fail_class={fail_class}"
+    blocker_text = format_t16_blockers(blockers or ())
+    if blocker_text:
+        text = f"{text}; blockers: {blocker_text}"
+    if extra:
+        text = f"{text}; {extra}"
     if AMBIENTES not in text:
         text = f"{text}; see {AMBIENTES} and {RELEASE_GUARD}"
     elif RELEASE_GUARD not in text:
@@ -298,7 +359,8 @@ def process_event(
     digest_changed: bool | None = None,
     g_design: bool | None = None,
     m_lote: bool | None = None,
-    m_lote_measurer: Callable[[], bool] | None = None,
+    m_lote_measurer: Callable[..., Any] | None = None,
+    lote_pass_context: ContextIdentity | None = None,
     checks_green: bool | None = None,
     checks_green_measurer: Callable[..., bool] | None = None,
     checks_green_classifier: Callable[..., dict[str, Any]] | None = None,
@@ -311,6 +373,7 @@ def process_event(
     resolve_fn: Callable[..., dict[str, str | None]] = resolve,
     change_dir: Path | None = None,
     prototype_dir: Path | None = None,
+    client: str | None = None,
 ) -> dict[str, Any]:
     if event == "criar_card":
         return _payload(
@@ -330,6 +393,37 @@ def process_event(
     q = status if status is not None else resolved.get("q")
     git = q_git if q_git is not None else resolved.get("q_git")
     bound = bound_card if bound_card is not None else resolved.get("bound_card")
+    # Codex and Claude Code add availability checks, never a new transition or
+    # permission. Other adapters retain their existing path. Conflicting
+    # explicit/native identity is refused rather than silently selecting a client.
+    native = native_client()
+    if native == "ambiguous":
+        return _payload(result="reject", state=q, to=None, reason="claude_evidence:ambiguous_client")
+    active_client = client or os.environ.get("COVENANT_CLIENT") or native
+    if native and active_client != native:
+        return _payload(result="reject", state=q, to=None, reason=f"{native}_evidence:ambiguous_client")
+    if active_client in ("cursor", "opencode", "codex") and event in PREFLIGHT_EVENTS:
+        # Account registration (pin with an adapter manifest): the hooks of these clients run from the
+        # operator account through the shim. Without the shim, its heartbeat, the client's entry or its
+        # review the transition is refused. Older pins and every other client are not checked here.
+        import account_registration
+        try:
+            account_registration.require_active(active_client, workdir)
+        except account_registration.RegistrationRefusal as exc:
+            prefix = "codex_evidence" if active_client == "codex" else f"{active_client}_registration"
+            return _payload(result="reject", state=q, to=None, reason=f"{prefix}:{exc.code}", message=f"{active_client}: {exc}")
+    if active_client == "codex" and event in PREFLIGHT_EVENTS:
+        from codex_evidence import EvidenceError, preflight
+        try:
+            preflight(root=workdir)
+        except (EvidenceError, OSError, ValueError) as exc:
+            return _payload(result="reject", state=q, to=None, reason=f"codex_evidence:{getattr(exc, 'code', 'invalid_input')}", message=str(exc))
+    if active_client == "claude" and event in PREFLIGHT_EVENTS:
+        from claude_evidence import EvidenceError, preflight as claude_preflight
+        try:
+            claude_preflight(root=workdir)
+        except (EvidenceError, OSError, ValueError) as exc:
+            return _payload(result="reject", state=q, to=None, reason=f"claude_evidence:{getattr(exc, 'code', 'invalid_input')}", message=str(exc))
     if event in HUMAN_EVENTS:
         return _payload(result="reject", state=q, to=None, reason="actor")
     provider = status_provider if status_provider is not None else github_status_provider
@@ -357,6 +451,14 @@ def process_event(
         if _unbound(bound):
             return _payload(result="reject", state=q, to=None, reason="unbound")
     else:
+        if wrong_fechar_release_git(git):
+            return _payload(
+                result="reject",
+                state=q,
+                to=None,
+                reason="guard:lote_git",
+                message=_fechar_message(FECHAR_RELEASE_WRONG_GIT_MESSAGE),
+            )
         if _unbound(bound) and not lote_git(git):
             return _payload(result="reject", state=q, to=None, reason="unbound")
         if parsed_package is None or len(parsed_package) == 0:
@@ -389,16 +491,49 @@ def process_event(
         )
     if digest_changed is None:
         digest_changed = measure_digest_changed(resolved_change_dir, resolved_proto, q)
+    lote_report: LoteMeasurement | None = None
+    canonical_package = ",".join(str(n) for n in (parsed_package or []))
+    current_lote_context = capture_context(
+        workdir,
+        package=canonical_package,
+    )
     if event == "fechar_release" and m_lote is None:
         if m_lote_measurer is None:
             m_lote = False
+            lote_report = LoteMeasurement(ok=False, fail_class="measure_absent")
         else:
             try:
-                m_lote = bool(m_lote_measurer())
+                measured = m_lote_measurer(cwd=workdir, package=canonical_package)
             except (OSError, RuntimeError, TypeError, ValueError):
                 m_lote = False
+                lote_report = LoteMeasurement(ok=False, fail_class="measure_failed")
+            else:
+                lote_report = measured if isinstance(measured, LoteMeasurement) else None
+                m_lote = bool(measured)
+                recorded = lote_report.context if lote_report is not None else None
+                mismatch = refuse_pass_from_other_context(recorded, current_lote_context)
+                if mismatch:
+                    m_lote = False
+                    lote_report = LoteMeasurement(
+                        ok=False,
+                        blockers=lote_report.blockers if lote_report else (),
+                        output=lote_report.output if lote_report else "",
+                        fail_class="context_divergence",
+                        context=recorded,
+                    )
     elif m_lote is None:
         m_lote = False
+    if event == "fechar_release" and m_lote:
+        mismatch = refuse_pass_from_other_context(lote_pass_context, current_lote_context)
+        if mismatch:
+            m_lote = False
+            lote_report = LoteMeasurement(
+                ok=False,
+                blockers=(),
+                output=mismatch,
+                fail_class="context_divergence",
+                context=lote_pass_context,
+            )
     classified_reason: str | None = None
     if event == "aceitar_sha":
         rows: list = []
@@ -489,7 +624,15 @@ def process_event(
     enabled = enabled_events(table, eval_state if event == "fechar_release" else q)
     message = None
     if event == "fechar_release":
-        message = _fechar_message(result.reason)
+        extra_ctx = None
+        if lote_report is not None and lote_report.fail_class == "context_divergence":
+            extra_ctx = lote_report.output or "context divergence; re-run post in the T16 context"
+        message = _fechar_message(
+            result.reason,
+            blockers=lote_report.blockers if lote_report is not None else (),
+            fail_class=lote_report.fail_class if lote_report is not None else None,
+            extra=extra_ctx,
+        )
     if result.result != "transition":
         extra = enabled if event in {"request_implement", "pular_coluna", "Agent.aprovar_design"} or result.reason in {
             "illegal_event",
@@ -571,12 +714,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--card")
     parser.add_argument("--change")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--client", choices=("cursor", "codex", "grok", "opencode", "dsh", "claude"))
     args = parser.parse_args(argv)
     payload = process_event(
         args.event,
         card=args.card,
         change=args.change,
         dry_run=args.dry_run,
+        client=args.client,
         mover=None if args.dry_run else GhBoardMover(),
         checks_green_measurer=measure_checks_green,
         checks_green_classifier=classify_qa_gate,

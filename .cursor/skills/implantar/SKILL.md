@@ -42,6 +42,17 @@ Copia o nucleus e quatro adapters existentes (`.cursor/` `.grok/` `.opencode/` `
 
 Bump: re-correr `--pin` com a tag nova; preserva chaves de projeto; o consumidor commita o diff.
 
+### Canal de conta (só o registro dos hooks)
+
+"Copiar e commitar" vale para tudo **exceto** o registro dos hooks de Claude Code, Cursor, Codex e OpenCode: a partir do pin com registro na conta, `--pin` **não grava** esse registro no consumidor, remove dos registros de projeto só as entradas do Covenant Flow (preservando as alheias; JSON inválido ou conflito recusa sem escrita parcial), move os plugins do adapter OpenCode para `.opencode/adapter/` (fora do auto-load) e grava o manifesto `.covenant-flow/adapters.json` (registro por cliente, protocolo do shim, pontos de entrada e arquivos com digest). Os registros de Grok Build (`.grok/hooks/process-fsm.json`) e dsh (`.dsh/cordis.patch.yml`, `dsh_boot.sh`) continuam copiados como antes. O registro vai para a conta do operador por outro comando, que não carrega FSM, adapters, skills nem política:
+
+```bash
+/path/to/covenant-flow/install.sh --account [--check|--remove]
+python3 ~/.config/covenant-flow/shim/current/cf_shim.py trust --record   # operador, depois de ler registro e adapter
+```
+
+Sem o shim instalado, uma sessão num consumidor com o pin novo fica sem hooks e o `process_event` recusa `hooks_inactive` (ver skill `covenant-flow`, "Registro dos hooks na conta"). Pin e `--account` nunca gravam confiança.
+
 ### Inventário de descoberta Codex
 
 O instalador de pin copia o adapter local para `.codex/` e as pontes de skills
@@ -55,13 +66,13 @@ os runbooks.
 No destino, um `.agents/skills/impeccable/` existente é propriedade do
 fornecedor e deve permanecer byte a byte intacto. Um `.codex/hooks.json`
 existente pode conter hooks locais do operador: preservar todas as chaves e
-handlers alheios, mesclar somente handlers do Covenant Flow e recusar JSON
-inválido ou conflito sem modificar o destino. Um `.codex/config.toml` com
-`[hooks]` também é uma fonte ativa de hooks; o pin deve detectá-lo e recusar a
-instalação automática até a composição ficar explícita. Mostrar o caminho de
-cada recusa e não deixar outros arquivos do pin parcialmente escritos.
+handlers alheios, remover somente handlers do Covenant Flow e recusar JSON
+inválido ou conflito sem modificar o destino. (Um `[hooks]` em
+`.codex/config.toml` já não é conflito do pin, que não escreve registro; o
+instalador de conta recusa esse caso.) Mostrar o caminho de cada recusa e não
+deixar outros arquivos do pin parcialmente escritos.
 
-`install.sh --pin` faz preflight read-only de mecanismos/política e hooks/roles/bridges antes de copiar; não exige mapa legado nem lê/escreve `$HOME/.config/covenant-flow/model-selection.yaml`. Instala política/resolver/adapters e pacote Codex, nunca escolhas. Flags antigas de codex_models.py são compatibilidade sem leitura/escrita. Pin comunica trust review explícito da definição atual pelo operador e não concede confiança. Migração explícita e rollback: `docs/model-selection.md`.
+`install.sh --pin` faz preflight read-only de mecanismos/política e hooks/roles/bridges antes de copiar; não exige mapa legado nem lê/escreve `$HOME/.config/covenant-flow/model-selection.yaml`. Instala política/resolver/adapters e pacote Codex, nunca escolhas. Flags antigas de codex_models.py são compatibilidade sem leitura/escrita. Pin comunica que o operador revisa registro e adapter (`cf_shim.py trust --record`) e não concede confiança. Migração explícita e rollback: `docs/model-selection.md`.
 
 O installer é entregue no nucleus; o consumidor não precisa copiá-lo para operar. Task3.4 foi implementada e ensaiada no worktree nucleus do mesmo #1080: seis testes reais de installer, incluindo resolver/hook funcional no destino pinado. Nenhuma escolha operacional é default de pin.
 

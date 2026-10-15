@@ -15,6 +15,8 @@ def document() -> dict:
         "grok": {b: {"label": "Grok " + b, "model": "grok-" + b} for b in pairs},
         "opencode": {b: {"label": "OpenCode " + b, "provider": "test-provider", "model": "test-model", "variant": "high"} for b in pairs},
         "dsh": {b: {"label": "dsh " + b, "provider": "test-provider", "model": "test-model", "effort": "medium"} for b in pairs},
+        "claude": {"juizo": {"label": "Opus 5.5", "model": "claude-opus-5-5", "effort": "high"},
+                   "execucao": {"label": "Sonnet 5.5", "model": "claude-sonnet-5-5", "effort": "high"}},
     }}
 
 
@@ -35,6 +37,10 @@ def machine_models(tmp_path, monkeypatch):
     home = tmp_path / "machine-account"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # Claude Code identity/overrides are explicit per test, never inherited from the host running pytest.
+    monkeypatch.setenv("AI_AGENT", "claude-code_2-1-296_agent")
+    for name in ("CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "CLAUDE_CODE_EFFORT_LEVEL"):
+        monkeypatch.delenv(name, raising=False)
     path = home / ".config/covenant-flow/model-selection.yaml"
     path.parent.mkdir(parents=True)
     path.write_text(yaml.safe_dump(document(), sort_keys=False))

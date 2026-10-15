@@ -39,12 +39,33 @@ CODEX_CLIENT_CONTEXT = (
     "capturado de `codex/execucao` da escolha local. Mantenha essa sessão `read-only` "
     "até ambos retornarem `completed` com payload; sem escrita nem follow-up sob escrita. "
     "Após os dois retornos, o pai/orquestrador gravável registra proxies via "
-    "`codex_proxy.py` com argumentos do spawn e metadados observados de runtime/trace e "
-    "retorno, nunca inferidos; ausentes ficam `unavailable`. Então executa `verify-wave`. "
+    "`codex_proxy.py` com `--birth <receipt>` e coleta automática de "
+    "metadados observados de runtime/trace e retorno, nunca inferidos, "
+    "sem flags observadas manuais. Antes de cada nascimento, `codex_evidence.py prepare` "
+    "confere preflight e cria receipt; inclua `runtime_evidence_birth` no prompt. "
+    "Host sem prova = `unverified`; só ensaio explícito sem produto/transição o qualifica. "
+    "Receipts da onda apontam à sessão read-only real; detalhes: docs/codex-runtime-evidence.md. "
+    "Ausentes ficam `unavailable`. Então executa `verify-wave`. "
     "Faça commit apenas depois de `verify-wave` e `scripts/process-fsm/review_process_checklist.py` "
     "passarem (`PASS`). O `sandbox_mode` do Agent configura só o filho e não prova nem "
     "altera o sandbox do turno pai; use a captura local de nascimento, sem fallback. "
     "Não encaminhe os reviewers para Cursor Task, `cursor-agent` ou Composer."
+)
+
+CLAUDE_CLIENT_CONTEXT = (
+    "Adapter Claude Code (não oficial; cooperativo; sem Auto). Skills: pontes "
+    "`.claude/skills/<nome>/SKILL.md` que mandam ler o canônico em `.cursor/skills/<nome>/SKILL.md`. "
+    "Filhos nascem como `Agent` com `model` e `effort` explícitos da captura local "
+    "(`model_selection.py resolve --client claude`), prompt autocontido com "
+    "`model_selection_capture:` e `runtime_evidence_birth:` (`claude_evidence.py prepare`); "
+    "filho não cria filho. No Code Review, `diff-reviewer` e `code-reviewer` nascem na mesma "
+    "mensagem, só com `Read|Grep|Glob`, e `claude_review.py verify-wave` confere a onda. "
+    "Proxies: `claude_proxy.py --birth <receipt>`, nunca observação manual. Hooks só valem "
+    "depois da revisão de confiança do operador (`claude_adapter.py trust --record`); hook "
+    "ausente ou não revisado não é proteção. Status avança só por `process_event --client claude`. "
+    "Se o card do pedido ou do título da sessão (`#<id>`) difere do `bound_card`, entre sozinho no "
+    "worktree `card-<id>-*` com `EnterWorktree` (path; antes `git worktree add`, empilhado se o card "
+    "pedir), sem pedir ao operador para trocar de pasta; `process_event` e filhos só com `bound_card=<id>`."
 )
 
 ResolveFn = Callable[..., dict[str, str | None]]
@@ -116,6 +137,7 @@ def page(
         "process-fsm page",
         f"q={q_display if q_display is not None else 'None'} bound_card={bound_display} q_git={git}",
         *([CODEX_CLIENT_CONTEXT] if client == "codex" else []),
+        *([CLAUDE_CLIENT_CONTEXT] if client == "claude" else []),
         f"enabled_events: {events}",
         "---",
         stub,

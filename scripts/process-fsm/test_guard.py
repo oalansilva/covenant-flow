@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,9 +12,20 @@ ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(ROOT))
 
+import adapter_manifest  # noqa: E402
+from adapter_manifest import ENTRYPOINTS  # noqa: E402
 from fsm import load_fsm  # noqa: E402
 from guard import decide, emit, extract_path, extract_paths, normalize  # noqa: E402
 from resolve import UNBOUND  # noqa: E402
+from shim_fixtures import (  # noqa: E402
+    make_consumer,
+    opencode_module,
+    registered_account,
+    registered_document,
+    shim_call,
+    shim_command,
+    trust_all,
+)
 from test_overlay_fixtures import FIELD_ID, filled_overlay_dict, write_overlay  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -300,35 +312,36 @@ def test_git_commit_not_gated(tmp_path: Path):
     assert result["permission"] == "allow"
 
 
-def test_hooks_json_composes_impeccable():
-    hooks = json.loads((REPO / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
-    pre = hooks["hooks"]["preToolUse"]
-    assert pre[0]["command"] == ".cursor/hooks/process-fsm-guard.sh"
+def test_account_registration_composes_impeccable(monkeypatch, tmp_path: Path):
+    # The consumer carries no `.cursor/hooks.json` of Covenant Flow after the account-registration pin: the
+    # registration is the operator's `~/.cursor/hooks.json` written by `install.sh --account`, and each entry
+    # calls the account shim, which runs the pinned script that the manifest names for the event.
+    registered_account(monkeypatch, tmp_path / "operator", ["cursor"])
+    hooks = registered_document("cursor")["hooks"]
+    pre = hooks["preToolUse"]
+    assert shim_call(pre[0]["command"]) == ("cursor", "guard")
     assert pre[0]["failClosed"] is True
     assert "Write" in pre[0]["matcher"]
-    shell = hooks["hooks"]["beforeShellExecution"]
-    assert shell[0]["command"] == ".cursor/hooks/process-fsm-guard.sh"
+    shell = hooks["beforeShellExecution"]
+    assert shim_call(shell[0]["command"]) == ("cursor", "guard")
     assert shell[0].get("failClosed") is not True
-    after = hooks["hooks"]["afterFileEdit"][0]["command"]
-    stop = hooks["hooks"]["stop"][0]["command"]
-    assert ".cursor/hooks/impeccable.sh" in after and "afterFileEdit" in after
-    assert ".cursor/hooks/impeccable.sh" in stop and " stop" in f" {stop}"
-    for command in (after, stop):
-        assert "test -f .cursor/hooks/impeccable.sh" in command
-        assert "./hooks/impeccable.sh" in command
-        assert "./impeccable.sh" in command
-        assert "git rev-parse --show-toplevel" in command
-        assert "exit 127" in command
+    after = hooks["afterFileEdit"][0]["command"]
+    stop = hooks["stop"][0]["command"]
+    assert shim_call(after) == ("cursor", "impeccable-after-file-edit")
+    assert shim_call(stop) == ("cursor", "impeccable-stop")
+    assert ENTRYPOINTS["cursor"]["impeccable-after-file-edit"] == ["bash", ".cursor/hooks/impeccable.sh", "afterFileEdit"]
+    assert ENTRYPOINTS["cursor"]["impeccable-stop"] == ["bash", ".cursor/hooks/impeccable.sh", "stop"]
+    assert ENTRYPOINTS["cursor"]["guard"] == ["bash", ".cursor/hooks/process-fsm-guard.sh"]
     assert (REPO / ".cursor" / "hooks" / "impeccable.sh").is_file()
-    destape = hooks["hooks"]["subagentStop"]
-    assert destape[0]["command"] == ".cursor/hooks/process-fsm-subagent-stop.sh"
+    destape = hooks["subagentStop"]
+    assert shim_call(destape[0]["command"]) == ("cursor", "subagent-stop")
+    assert ENTRYPOINTS["cursor"]["subagent-stop"] == ["bash", ".cursor/hooks/process-fsm-subagent-stop.sh"]
     matcher = destape[0]["matcher"]
     assert "generalPurpose" in matcher
     assert "diff-reviewer" in matcher
     assert "code-reviewer" in matcher
     assert destape[0]["loop_limit"] == 32
     assert destape[0].get("failClosed") is not True
-    assert "subagentStart" not in hooks["hooks"]
 
 
 def test_fsm_still_loads():
@@ -508,7 +521,7 @@ def test_grok_hooks_json_registers_guard():
         assert handler["timeout"] >= 30
         if "spawn_subagent" in item.get("matcher", ""):
             assert ".grok/hooks/process-fsm-model-selection.sh" in handler["command"]
-            assert '"decision":"deny"' in handler["command"]
+            assert '\"decision\":\"deny\"' in handler["command"]
             continue
         assert ".grok/hooks/process-fsm-guard.sh" in handler["command"]
         assert "test -f .grok/hooks/process-fsm-guard.sh" in handler["command"]
@@ -568,17 +581,23 @@ def test_grok_impeccable_command_resolves_from_workspace_and_hooks_dir():
             assert proc.returncode == 0, (cwd, command[:120], proc.stderr)
 
 
-def test_cursor_impeccable_command_resolves_from_workspace_and_cursor_dir():
-    hooks = json.loads((REPO / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
-    commands = [
-        hooks["hooks"]["afterFileEdit"][0]["command"],
-        hooks["hooks"]["stop"][0]["command"],
-    ]
-    cwds = [REPO, REPO / ".cursor", REPO / ".cursor" / "hooks"]
-    for command in commands:
-        for cwd in cwds:
-            proc = _sh_hook(command, cwd)
-            assert proc.returncode == 0, (cwd, command[:120], proc.stderr)
+def test_cursor_impeccable_resolves_from_workspace_and_cursor_dir_through_the_shim(monkeypatch, tmp_path: Path):
+    # What the old project command resolved with `test -f` / `git rev-parse` now belongs to the shim: it finds the
+    # consumer from the event's cwd and runs the pinned wrapper with the consumer root as cwd.
+    registered_account(monkeypatch, tmp_path / "operator", ["cursor"])
+    root = make_consumer(tmp_path / "consumer-1101")
+    wrapper = root / ".cursor" / "hooks" / "impeccable.sh"
+    shutil.copyfile(REPO / ".cursor" / "hooks" / "impeccable.sh", wrapper)
+    wrapper.chmod(0o755)
+    adapter_manifest.write(root, "v1.2.0")  # the pin writes the manifest after the files are in place
+    trust_all(root, ["cursor"])
+    hooks = registered_document("cursor")["hooks"]
+    events = [shim_call(hooks["afterFileEdit"][0]["command"])[1], shim_call(hooks["stop"][0]["command"])[1]]
+    for event in events:
+        for cwd in (root, root / ".cursor", root / ".cursor" / "hooks"):
+            result = shim_command("cursor", event, {"conversation_id": "c1", "cwd": str(cwd), "file_path": "frontend/src/x.tsx"})
+            assert result.returncode == 0, (event, cwd, result.stderr)
+            assert "deny" not in result.stdout and "hooks_unreviewed" not in result.stdout, (event, cwd, result.stdout)
 
 
 def test_impeccable_wrappers_stay_fail_open():
@@ -588,7 +607,7 @@ def test_impeccable_wrappers_stay_fail_open():
         assert "sys.exit(0)" in text
         assert "except Exception" in text
     dsh = (REPO / ".dsh" / "plugin" / "impeccable-hook.js").read_text(encoding="utf-8")
-    oc = (REPO / ".opencode" / "plugin" / "impeccable-hook.js").read_text(encoding="utf-8")
+    oc = opencode_module("impeccable-hook.js").read_text(encoding="utf-8")
     assert "return next()" in dsh
     assert "fail-open" in dsh
     assert "never throw" in oc
@@ -1100,3 +1119,303 @@ def test_decide_quota_error_includes_reset(tmp_path: Path) -> None:
     assert "fail_closed" in result["agent_message"]
     assert "2026-09-03T02:55:52Z" in result["agent_message"]
     assert "remaining=0" in result["agent_message"]
+
+
+def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RELEASE_CARDS", raising=False)
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("github called")
+
+    monkeypatch.setattr("guard.github_status_provider", boom)
+
+
+def _status_of(mapping: dict[str, str | None], calls: list[str | None]):
+    def provider(card_id: str | None) -> str | None:
+        calls.append(card_id)
+        if card_id is None or card_id not in mapping:
+            return None
+        return mapping[card_id]
+
+    return provider
+
+
+def _reject_evaluate(fsm, ctx):
+    raise AssertionError(f"evaluate must not run event={getattr(ctx, 'event', ctx)}")
+
+
+def test_replay_release_unbound_without_package_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_network(monkeypatch)
+    repo = tmp_path / "release"
+    rel = "openspec/changes/closeout-notes/proposal.md"
+    _init_repo(repo, "release-2026-08-26", rel)
+    calls: list[str | None] = []
+    payload = _write_payload(repo, rel)
+    result = decide(
+        payload,
+        status_provider=_status_of({"1017": "Homologado"}, calls),
+        evaluate_fn=_reject_evaluate,
+    )
+    _assert_dual_deny(result)
+    assert "fail_closed" in result["agent_message"]
+    assert "q=None" in result["agent_message"]
+    assert "q_git=release-2026-08-26" in result["agent_message"]
+    assert "bound_card=⊥" in result["agent_message"]
+    assert "id=" not in result["agent_message"]
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "openspec/changes/card-1017-mapa-juizo-execucao/proposal.md",
+        "openspec/changes/archive/2026-09-22-card-1017-mapa-juizo-execucao/proposal.md",
+        "openspec/changes/issue-1017-mapa/proposal.md",
+    ],
+)
+def test_release_archive_homologado_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rel: str
+) -> None:
+    _no_network(monkeypatch)
+    repo = tmp_path / "release"
+    _init_repo(repo, "release-2026-09-22", rel)
+    calls: list[str | None] = []
+    payload = _write_payload(repo, rel)
+    result = decide(
+        payload,
+        status_provider=_status_of({"1017": "Homologado"}, calls),
+        evaluate_fn=_reject_evaluate,
+    )
+    _assert_dual_allow(result)
+    assert calls == ["1017"]
+
+
+def test_release_archive_empty_release_cards_still_needs_homologado(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_network(monkeypatch)
+    monkeypatch.setenv("RELEASE_CARDS", "   ")
+    repo = tmp_path / "release"
+    rel = "openspec/changes/card-1017-x/design.md"
+    _init_repo(repo, "release-2026-09-22", rel)
+    calls: list[str | None] = []
+    payload = _write_payload(repo, rel)
+    result = decide(
+        payload,
+        status_provider=_status_of({"1017": "Homologado"}, calls),
+        evaluate_fn=_reject_evaluate,
+    )
+    _assert_dual_allow(result)
+    assert calls == ["1017"]
+
+
+def test_release_archive_unread_status_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_network(monkeypatch)
+    repo = tmp_path / "release"
+    rel = "openspec/changes/card-1017-x/design.md"
+    _init_repo(repo, "release-2026-09-22", rel)
+    calls: list[str | None] = []
+    payload = _write_payload(repo, rel)
+    result = decide(payload, status_provider=_status_of({}, calls), evaluate_fn=_reject_evaluate)
+    _assert_dual_deny(result)
+    assert "fail_closed" in result["agent_message"]
+    assert "id=1017" in result["agent_message"]
+    assert calls == ["1017"]
+
+
+def test_release_archive_quota_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from graphql_quota import GraphQLQuotaError
+
+    _no_network(monkeypatch)
+    repo = tmp_path / "release"
+    rel = "openspec/changes/card-1017-x/design.md"
+    _init_repo(repo, "release-2026-09-22", rel)
+
+    def quota(card_id: str | None) -> str | None:
+        assert card_id == "1017"
+        raise GraphQLQuotaError(0, "2026-09-03T02:55:52Z")
+
+    result = decide(_write_payload(repo, rel), status_provider=quota, evaluate_fn=_reject_evaluate)
+    _assert_dual_deny(result)
+    assert "fail_closed" in result["agent_message"]
+    assert "id=1017" in result["agent_message"]
+    assert "remaining=0" in result["agent_message"]
+
+
+@pytest.mark.parametrize("status_name", ["Design", "Todo"])
+def test_release_archive_not_homologado_outside_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status_name: str
+) -> None:
+    _no_network(monkeypatch)
+    monkeypatch.setenv("RELEASE_CARDS", "1017")
+    repo = tmp_path / "release"
+    rel = "openspec/changes/card-1017-x/design.md"
+    _init_repo(repo, "release-2026-09-22", rel)
+    calls: list[str | None] = []
+    result = decide(
+        _write_payload(repo, rel),
+        status_provider=_status_of({"1017": status_name}, calls),
+        evaluate_fn=_reject_evaluate,
+    )
+    _assert_dual_deny(result)
+    assert "outside_package" in result["agent_message"]
+    assert "id=1017" in result["agent_message"]
+    assert calls == ["1017"]
+
+
+def test_release_archive_homologado_absent_from_release_cards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_network(monkeypatch)
+    monkeypatch.setenv("RELEASE_CARDS", "999")
+    repo = tmp_path / "release"
+    rel = "openspec/changes/card-1017-x/design.md"
+    _init_repo(repo, "release-2026-09-22", rel)
+    calls: list[str | None] = []
+    result = decide(
+        _write_payload(repo, rel),
+        status_provider=_status_of({"1017": "Homologado"}, calls),
+        evaluate_fn=_reject_evaluate,
+    )
+    _assert_dual_deny(result)
+    assert "outside_package" in result["agent_message"]
+    assert "id=1017" in result["agent_message"]
+    assert calls == ["1017"]
+
+
+def test_release_archive_invalid_release_cards_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_network(monkeypatch)
+    monkeypatch.setenv("RELEASE_CARDS", "1017,61O")
+    repo = tmp_path / "release"
+    rel = "openspec/changes/card-1017-x/design.md"
+    _init_repo(repo, "release-2026-09-22", rel)
+    result = decide(
+        _write_payload(repo, rel),
+        status_provider=_status_of({"1017": "Homologado"}, []),
+        evaluate_fn=_reject_evaluate,
+    )
+    _assert_dual_deny(result)
+    assert "fail_closed" in result["agent_message"]
+    assert "id=1017" in result["agent_message"]
+
+
+@pytest.mark.parametrize("branch", ["develop", "main"])
+def test_design_outside_release_branch_stays_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, branch: str
+) -> None:
+    _no_network(monkeypatch)
+    repo = tmp_path / branch
+    rel = "openspec/changes/card-1017-x/design.md"
+    _init_repo(repo, branch, rel)
+    calls: list[str | None] = []
+    result = decide(
+        _write_payload(repo, rel),
+        status_provider=_status_of({"1017": "Homologado"}, calls),
+        evaluate_fn=_reject_evaluate,
+    )
+    _assert_dual_deny(result)
+    assert "fail_closed" in result["agent_message"]
+    assert f"q_git={branch}" in result["agent_message"]
+    assert "1017" not in calls
+
+
+def test_product_on_release_unbound_stays_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_network(monkeypatch)
+    repo = tmp_path / "release"
+    rel = "backend/app/main.py"
+    _init_repo(repo, "release-2026-09-22", rel)
+    calls: list[str | None] = []
+    result = decide(
+        _write_payload(repo, rel),
+        status_provider=_status_of({"1017": "Homologado"}, calls),
+    )
+    _assert_dual_deny(result)
+    assert "1017" not in calls
+
+
+def test_prototype_on_release_unbound_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_network(monkeypatch)
+    repo = tmp_path / "release"
+    rel = "frontend/public/prototypes/x/index.html"
+    _init_repo(repo, "release-2026-09-22", rel)
+    calls: list[str | None] = []
+    result = decide(
+        _write_payload(repo, rel),
+        status_provider=_status_of({"1017": "Homologado"}, calls),
+        evaluate_fn=_reject_evaluate,
+    )
+    _assert_dual_deny(result)
+    assert "fail_closed" in result["agent_message"]
+    assert calls == []
+
+
+def test_mixed_prototype_and_archive_envelope_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_network(monkeypatch)
+    repo = tmp_path / "release"
+    rel = "openspec/changes/card-1017-x/proposal.md"
+    _init_repo(repo, "release-2026-09-22", rel)
+    payload = {
+        "tool_name": "apply_patch",
+        "tool_input": {
+            "patchText": (
+                "*** Begin Patch\n"
+                f"*** Add File: {rel}\n"
+                "*** Add File: frontend/public/prototypes/x/index.html\n"
+                "*** End Patch"
+            )
+        },
+        "cwd": str(repo),
+    }
+    calls: list[str | None] = []
+    result = decide(
+        payload,
+        status_provider=_status_of({"1017": "Homologado"}, calls),
+        evaluate_fn=_reject_evaluate,
+    )
+    _assert_dual_deny(result)
+    assert "fail_closed" in result["agent_message"]
+
+
+def test_release_archive_one_card_outside_package_denies_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_network(monkeypatch)
+    repo = tmp_path / "release"
+    first = "openspec/changes/card-1017-x/proposal.md"
+    _init_repo(repo, "release-2026-09-22", first)
+    payload = {
+        "tool_name": "apply_patch",
+        "tool_input": {
+            "patchText": (
+                "*** Begin Patch\n"
+                f"*** Add File: {first}\n"
+                "*** Add File: openspec/changes/card-999-y/proposal.md\n"
+                "*** End Patch"
+            )
+        },
+        "cwd": str(repo),
+    }
+    calls: list[str | None] = []
+    result = decide(
+        payload,
+        status_provider=_status_of({"1017": "Homologado", "999": "Design"}, calls),
+        evaluate_fn=_reject_evaluate,
+    )
+    _assert_dual_deny(result)
+    assert "outside_package" in result["agent_message"]
+    assert "id=999" in result["agent_message"]
+    assert calls == ["1017", "999"]

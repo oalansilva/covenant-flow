@@ -8,7 +8,7 @@ import yaml
 from model_selection_fixtures import machine_models, document
 from model_selection import (SelectionError, resolve, selection_path, validate_capture,
                              save_capture, compare_wave, migration_plan, apply_migration,
-                             validate_document, request_role)
+                             validate_document, request_role, validate_spawn)
 from codex_models import resolve_pair, validate_requested_pair, pin_codex_map
 from model_proxy import evidence, verify_continuation
 from release_model_selection import check_runtime_model
@@ -107,7 +107,8 @@ def test_continuation_and_parent_release_use_birth_capture(machine_models, tmp_p
     first = resolve("codex", "execucao", role="fecho-lote")
     edit(machine_models, "codex", "execucao", model="gpt-6.1-sol", effort="high")
     facts = {"model": "gpt-6-luna", "effort": "max"}
-    assert verify_continuation(first, facts, host="Codex", host_version="0.162", status="completed", payload_returned=True)["successful"]
+    with pytest.raises(SelectionError):
+        verify_continuation(first, facts, host="Codex", host_version="0.162", status="completed", payload_returned=True)
     assert check_runtime_model(root=tmp_path, client="codex", runtime_slug="gpt-6-luna", runtime_effort="max", capture=first).ok
     assert not check_runtime_model(root=tmp_path, client="codex", runtime_slug="gpt-6.1-sol", runtime_effort="high", capture=first).ok
     assert not check_runtime_model(root=tmp_path, client="codex", runtime_slug="gpt-6-luna", capture=first).ok
@@ -200,3 +201,124 @@ def test_pin_never_reads_requires_or_writes_selection_or_legacy(machine_models, 
     machine_models.unlink()
     assert not pin_codex_map(tmp_path, preflight=True)
     assert not machine_models.exists() and not (tmp_path / ".cursor").exists()
+
+
+# --- Claude Code client (card #1101) -------------------------------------------------
+
+
+def claude_args(tmp_path, role):
+    band = "juizo" if role in ("design-autor", "design-critic", "grill-card") else "execucao"
+    capture = resolve("claude", band, role=role)
+    path = tmp_path / f"claude-{capture['attempt_id']}.json"
+    save_capture(path, capture)
+    return capture, path
+
+
+def test_claude_bands_use_alans_pairs_with_family_alias_and_full_id_capture(machine_models):
+    judge = resolve("claude", "juizo", role="design-autor")
+    execution = resolve("claude", "execucao", role="apply-coluna")
+    assert judge["selection"] == {"label": "Opus 5.5", "model": "claude-opus-5-5", "effort": "high"}
+    assert judge["arguments"] == {"model": "opus", "effort": "high"}
+    assert execution["selection"]["model"] == "claude-sonnet-5-5"
+    assert execution["arguments"] == {"model": "sonnet", "effort": "high"}
+    assert judge["capability_version"] == "claude-agent-pair-v1"
+
+
+def test_claude_local_edit_affects_only_next_spawn_of_that_band(machine_models):
+    old_exec = resolve("claude", "execucao", role="apply-coluna")
+    others = {c: resolve(c, "execucao") for c in ("cursor", "grok", "opencode", "dsh")}
+    edit(machine_models, "claude", "execucao", model="claude-haiku-5-5", effort="medium")
+    new_exec = resolve("claude", "execucao", role="apply-coluna")
+    assert new_exec["arguments"] == {"model": "haiku", "effort": "medium"}
+    assert validate_capture(old_exec)["arguments"] == {"model": "sonnet", "effort": "high"}
+    assert resolve("claude", "juizo")["arguments"] == {"model": "opus", "effort": "high"}
+    for client, before in others.items():
+        assert resolve(client, "execucao")["effective_sha256"] == before["effective_sha256"]
+
+
+@pytest.mark.parametrize("change", [
+    {"model": "claude-experimental-5"},      # no host alias for the family
+    {"model": "inherit"},                     # forbidden by policy
+    {"effort": "ultra"},                      # effort unsupported by the host
+    {"effort": ""},                           # effort absent
+])
+def test_claude_model_or_effort_missing_forbidden_unsupported_fail_visibly(machine_models, change):
+    edit(machine_models, "claude", "execucao", **change)
+    with pytest.raises(SelectionError, match="claude/execucao"):
+        resolve("claude", "execucao")
+
+
+def test_claude_effort_field_must_exist(machine_models):
+    doc = yaml.safe_load(machine_models.read_text())
+    del doc["clients"]["claude"]["execucao"]["effort"]
+    machine_models.write_text(yaml.safe_dump(doc))
+    with pytest.raises(SelectionError, match="claude/execucao.*effort"):
+        resolve("claude", "execucao")
+
+
+def test_claude_block_absent_fails_with_path_client_band(machine_models):
+    doc = yaml.safe_load(machine_models.read_text())
+    del doc["clients"]["claude"]
+    machine_models.write_text(yaml.safe_dump(doc))
+    with pytest.raises(SelectionError, match="claude/juizo"):
+        resolve("claude", "juizo")
+    # the other five clients keep resolving
+    assert resolve("codex", "juizo")["selection"]["model"] == "gpt-6-sol"
+
+
+@pytest.mark.parametrize("name", ["CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "CLAUDE_CODE_EFFORT_LEVEL"])
+def test_claude_environment_overrides_refuse_before_birth(machine_models, monkeypatch, name):
+    monkeypatch.setenv(name, "1")
+    with pytest.raises(SelectionError, match=name):
+        resolve("claude", "execucao", role="apply-coluna")
+    # other clients are unaffected by Claude-only overrides
+    assert resolve("codex", "execucao")["selection"]["model"] == "gpt-6-luna"
+
+
+@pytest.mark.parametrize("facts", [{"version": "2.1.291"}, {"version": "2.0.9"}, {"version": None}])
+def test_claude_host_without_per_invocation_effort_refuses(machine_models, facts):
+    with pytest.raises(SelectionError, match="per-invocation effort"):
+        resolve("claude", "execucao", catalogue=dict(facts, environ={}))
+    assert resolve("claude", "execucao", catalogue={"version": "2.1.292", "environ": {}})
+
+
+def test_claude_validate_command_does_not_depend_on_the_invoking_host(machine_models, monkeypatch):
+    monkeypatch.delenv("AI_AGENT")
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "low")
+    result = subprocess.run(["python3", str(Path(__file__).with_name("model_selection.py")), "validate"], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_claude_spawn_validation_requires_explicit_pair_matching_capture(machine_models, tmp_path):
+    capture, path = claude_args(tmp_path, "apply-coluna")
+    args = {**capture["arguments"], "description": "apply-coluna 1101", "subagent_type": "general-purpose", "prompt": f"model_selection_capture: {path}"}
+    assert validate_spawn("claude", args)["attempt_id"] == capture["attempt_id"]
+    for broken in (dict(args, model="opus"), dict(args, effort="low"), {k: v for k, v in args.items() if k != "effort"}, {k: v for k, v in args.items() if k != "model"}):
+        with pytest.raises(SelectionError):
+            validate_spawn("claude", broken)
+    with pytest.raises(SelectionError, match="unsupported spawn parameter"):
+        validate_spawn("claude", dict(args, reasoning_effort="high"))
+
+
+def test_claude_wave_with_changed_selection_is_rejected(machine_models, tmp_path):
+    first, first_path = claude_args(tmp_path, "diff-reviewer")
+    args = {**first["arguments"], "description": "diff-reviewer 1101", "subagent_type": "diff-reviewer",
+            "prompt": f"model_selection_capture: {first_path}\nmodel_selection_wave_capture: {first_path}"}
+    assert validate_spawn("claude", args)
+    edit(machine_models, "claude", "execucao", model="claude-haiku-5-5")
+    second, second_path = claude_args(tmp_path, "code-reviewer")
+    again = {**second["arguments"], "description": "code-reviewer 1101", "subagent_type": "code-reviewer",
+             "prompt": f"model_selection_capture: {second_path}\nmodel_selection_wave_capture: {first_path}"}
+    with pytest.raises(SelectionError, match="selection_changed"):
+        validate_spawn("claude", again)
+    result = subprocess.run(
+        ["python3", str(Path(__file__).with_name("model_selection.py")), "resolve", "--client", "claude", "--band", "execucao", "--role", "code-reviewer", "--wave-capture", str(first_path)],
+        capture_output=True, text=True)
+    assert result.returncode == 2 and "selection_changed" in result.stderr
+
+
+def test_claude_policy_contract_is_fields_label_model_effort():
+    from model_selection import policy
+    contract = policy()["clients"]["claude"]
+    assert contract["contract"] == "claude-agent-pair-v1"
+    assert contract["fields"] == contract["required"] == ["label", "model", "effort"]

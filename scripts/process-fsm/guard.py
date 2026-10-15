@@ -41,6 +41,7 @@ from graphql_quota import (  # noqa: E402
     write_cache,
 )
 from resolve import UNBOUND, resolve  # noqa: E402
+from t16 import parse_package_cards  # noqa: E402
 
 REPO_ROOT = ROOT.parents[1]
 WRITE_TOOLS = frozenset(
@@ -49,6 +50,7 @@ WRITE_TOOLS = frozenset(
         "StrReplace",
         "Delete",
         "EditNotebook",
+        "NotebookEdit",
         "write",
         "search_replace",
         "Edit",
@@ -226,6 +228,9 @@ def _path_from_write(payload: Mapping[str, Any]) -> str | None:
     tool = str(payload.get("tool_name") or "")
     if tool == "EditNotebook":
         keys = ("target_notebook",) + PATH_KEYS
+    elif tool == "NotebookEdit":
+        # Claude Code addresses the notebook as `notebook_path`.
+        keys = ("notebook_path",) + PATH_KEYS
     for key in keys:
         value = data.get(key)
         if isinstance(value, str) and value.strip():
@@ -497,6 +502,111 @@ def _card_branch(q_git: str | None) -> bool:
     return bool(q_git) and CARD_GIT_RE.match(str(q_git)) is not None
 
 
+def _release_archive_git(q_git: str | None) -> bool:
+    """release-* only. t16.lote_git also matches develop, which stays fail_closed."""
+    return str(q_git or "").startswith("release-")
+
+
+_OPENSPEC_CHANGES_PREFIX = "openspec/changes/"
+_CHANGE_ID_RE = re.compile(r"^(card|issue)-(\d+)")
+_ARCHIVE_DATED_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-(.+)$")
+_HOMOLOGADO = "Homologado"
+
+
+def _openspec_change_id(rel: str) -> str | None:
+    """Id from openspec/changes/<change>/ or archive/<YYYY-MM-DD>-<change>/. No fuzzy title."""
+    posix = rel.replace("\\", "/").lstrip("./")
+    if not posix.startswith(_OPENSPEC_CHANGES_PREFIX):
+        return None
+    parts = [part for part in posix[len(_OPENSPEC_CHANGES_PREFIX) :].split("/") if part]
+    if parts and parts[0] == "archive":
+        if len(parts) < 3:
+            return None
+        dated = _ARCHIVE_DATED_RE.match(parts[1])
+        if dated is None:
+            return None
+        change = dated.group(2)
+    elif len(parts) >= 2:
+        change = parts[0]
+    else:
+        return None
+    match = _CHANGE_ID_RE.match(change)
+    if match is None:
+        return None
+    return match.group(2)
+
+
+def _archive_deny(
+    reason: str,
+    state: str | None,
+    q_git: str | None,
+    bound: str | None,
+    mapped_id: str | None,
+    quota_err: GraphQLQuotaError | None = None,
+) -> dict[str, str]:
+    message = _reason_message(reason, state, q_git, bound)
+    if mapped_id:
+        message += f" id={mapped_id}"
+    if quota_err is not None:
+        message += (
+            f" GraphQL quota remaining={quota_err.remaining} reset_at={quota_err.reset_at}"
+        )
+    return emit("deny", message)
+
+
+def _release_cards_block(mapped_id: str) -> str | None:
+    """Membership gate. Absent/empty list is not an allow token and is not a deny."""
+    raw = os.environ.get("RELEASE_CARDS")
+    if raw is None or not str(raw).strip():
+        return None
+    package = parse_package_cards(str(raw), None)
+    if package is None:
+        return "fail_closed"
+    if not package:
+        return None
+    try:
+        number = int(mapped_id, 10)
+    except ValueError:
+        return "fail_closed"
+    if number not in package:
+        return "outside_package"
+    return None
+
+
+def _decide_release_archive(
+    design: list[tuple[str, str]],
+    *,
+    q: str | None,
+    q_git: str | None,
+    bound: str | None,
+    status_provider: StatusProvider | None,
+) -> dict[str, str]:
+    mapped: list[str] = []
+    for _orig, rel in design:
+        card_id = _openspec_change_id(rel)
+        if card_id is None:
+            return _archive_deny("fail_closed", q, q_git, bound, None)
+        mapped.append(card_id)
+    if not mapped:
+        return _archive_deny("fail_closed", q, q_git, bound, None)
+    for card_id in mapped:
+        if status_provider is None:
+            return _archive_deny("fail_closed", q, q_git, bound, card_id)
+        try:
+            live = status_provider(card_id)
+        except GraphQLQuotaError as exc:
+            return _archive_deny("fail_closed", q, q_git, bound, card_id, exc)
+        live_text = live.strip() if isinstance(live, str) else ""
+        if not live_text:
+            return _archive_deny("fail_closed", q, q_git, bound, card_id)
+        if live_text != _HOMOLOGADO:
+            return _archive_deny("outside_package", q, q_git, bound, card_id)
+        block = _release_cards_block(card_id)
+        if block is not None:
+            return _archive_deny(block, q, q_git, bound, card_id)
+    return _allow()
+
+
 def environment_dev_source(overlay: Mapping[str, Any] | None) -> str:
     """Read overlay environments.dev.source — not a hardcoded production path."""
     if not overlay:
@@ -703,7 +813,14 @@ def decide(
     bound = resolved.get("bound_card")
     q: str | None = status if status is not None else resolved.get("q")
     quota_err: GraphQLQuotaError | None = None
-    if q is None and status_provider is not None:
+    # Archive exception queries status_provider(mapped id), never session bound_card.
+    release_archive = (
+        q is None
+        and kind == "design"
+        and not _card_branch(q_git)
+        and _release_archive_git(q_git)
+    )
+    if q is None and status_provider is not None and not release_archive:
         try:
             q = status_provider(None if bound in (None, UNBOUND) else str(bound))
         except GraphQLQuotaError as exc:
@@ -712,6 +829,14 @@ def decide(
 
     if kind != "product":
         if q is None and kind == "design" and not _card_branch(q_git):
+            if release_archive:
+                return _decide_release_archive(
+                    design,
+                    q=q,
+                    q_git=q_git,
+                    bound=bound,
+                    status_provider=status_provider,
+                )
             return _deny_quota("fail_closed", q, q_git, bound, quota_err)
         return _allow()
 

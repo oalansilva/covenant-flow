@@ -114,6 +114,8 @@ def pre_tool_use(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         root = _repo_root(cwd)
         if canonical_tool == "Agent":
             validate_spawn("codex", data)
+            from codex_evidence import check_prepared_spawn
+            check_prepared_spawn(data, root)
             return None
 
         if canonical_tool == "Bash" and not isinstance(data.get("command"), str):

@@ -100,6 +100,16 @@ def test_overlay_law_table_rejected():
         validate_overlay(data, require_filled=True, raw_text="fail_closed_asymmetric: true\n")
 
 
+def test_prod_oneshot_services_must_be_a_normalized_subset_of_services():
+    data = filled_overlay_dict()
+    data["environments"]["prod"]["oneshot_services"] = ["prod-backend"]
+    validate_overlay(data, require_filled=True)
+
+    data["environments"]["prod"]["oneshot_services"] = ["outside.service"]
+    with pytest.raises(OverlayInvalid, match="oneshot_services must be a subset"):
+        validate_overlay(data, require_filled=True)
+
+
 def test_missing_overlay_denies_product_write(tmp_path: Path):
     repo = tmp_path / "card"
     repo.mkdir()

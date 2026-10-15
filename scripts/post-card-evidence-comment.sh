@@ -146,28 +146,60 @@ sha_matches() {
   [[ "$a" == "$b"* ]] || [[ "$b" == "$a"* ]]
 }
 
+is_placeholder_value() {
+  local text="$1"
+  [[ -z "$text" ]] && return 0
+  case "$text" in
+    "<pacote>"|"<lista ou pendência>"|"<deploy PROD pendente>"|"release-guard post"|"pacote") return 0 ;;
+  esac
+  if printf '%s' "$text" | grep -qE '<pacote>|<lista ou pendência>|<deploy PROD pendente>'; then
+    return 0
+  fi
+  return 1
+}
+
+pronto_body_incomplete() {
+  local text="$1"
+  is_placeholder_value "$text" && return 0
+  printf '%s' "$text" | grep -qE '<pacote>|<lista ou pendência>|<deploy PROD pendente>' && return 0
+  return 1
+}
+
+if [[ "$transition" == "pronto" ]]; then
+  is_placeholder_value "$package" && error "pronto refuses placeholder or generic package name"
+  is_placeholder_value "$branches" && error "pronto refuses placeholder or empty branches"
+  is_placeholder_value "$deploy" && error "pronto refuses placeholder or missing deploy evidence"
+fi
+
 duplicate=""
 existing_url=""
-while IFS=$'\t' read -r body url; do
+existing_id=""
+while IFS=$'\t' read -r cid body url; do
   if printf '%s' "$body" | grep -qiF "$marker"; then
     existing_ref="$(extract_ref "$body")"
     if [[ -z "$existing_ref" ]]; then
       duplicate="$body"
       existing_url="$url"
+      existing_id="$cid"
       break
     fi
     if sha_matches "$existing_ref" "$commit_norm"; then
       duplicate="$body"
       existing_url="$url"
+      existing_id="$cid"
       break
     fi
   fi
-done < <(printf '%s' "$comments_json" | jq -r '.[] | [.body, .url] | @tsv')
+done < <(printf '%s' "$comments_json" | jq -r '.[] | [(.id|tostring), .body, .url] | @tsv')
 
 if [[ -n "$duplicate" ]]; then
-  printf 'DEDUPE: card #%s already has a %s evidence comment with commit ref %s.\n' "$card" "$transition" "$commit_norm"
-  printf 'Existing comment: %s\n' "$existing_url"
-  exit 0
+  if [[ "$transition" == "pronto" ]] && pronto_body_incomplete "$duplicate"; then
+    :
+  else
+    printf 'DEDUPE: card #%s already has a %s evidence comment with commit ref %s.\n' "$card" "$transition" "$commit_norm"
+    printf 'Existing comment: %s\n' "$existing_url"
+    exit 0
+  fi
 fi
 
 build_body() {
@@ -207,7 +239,6 @@ EOF
       cat <<'EOF'
 Publicado em main.
 EOF
-      [[ -n "$package" ]] || package="<pacote>"
       printf 'Pacote/release: %s\n' "$package"
       if [[ -n "$cards" ]]; then
         printf 'Cards incluídos: %s\n' "$cards"
@@ -217,9 +248,7 @@ EOF
       else
         printf 'Commit/merge: %s\n' "$commit_norm"
       fi
-      [[ -n "$deploy" ]] || deploy="<deploy PROD pendente>"
       printf 'Deploy PROD: %s\n' "$deploy"
-      [[ -n "$branches" ]] || branches="<lista ou pendência>"
       printf 'Branches limpas: %s\n' "$branches"
       printf 'Status final: pronto.\n'
       ;;
@@ -228,11 +257,37 @@ EOF
 
 body="$(build_body)"
 
-printf 'Posting evidence comment for card #%s (%s):\n' "$card" "$transition"
+if [[ "$transition" == "pronto" ]] && pronto_body_incomplete "$body"; then
+  error "pronto refuses placeholder evidence"
+fi
+
+update_existing=0
+if [[ -n "$duplicate" && "$transition" == "pronto" ]] && pronto_body_incomplete "$duplicate"; then
+  update_existing=1
+  [[ -n "$existing_id" ]] || error "pronto incomplete comment has no id; refusing to post a second comment"
+fi
+
+if [[ "$update_existing" -eq 1 ]]; then
+  printf 'Updating incomplete %s evidence comment for card #%s in place:\n' "$transition" "$card"
+else
+  printf 'Posting evidence comment for card #%s (%s):\n' "$card" "$transition"
+fi
 printf '%s\n' "$body" | sed 's/^/  /'
 
 if [[ "$dry_run" -eq 1 ]]; then
-  printf 'DRY-RUN: no comment posted.\n'
+  if [[ "$update_existing" -eq 1 ]]; then
+    printf 'DRY-RUN: existing comment would be updated, no second comment.\n'
+  else
+    printf 'DRY-RUN: no comment posted.\n'
+  fi
+  exit 0
+fi
+
+if [[ "$update_existing" -eq 1 ]]; then
+  if ! gh api -X PATCH "repos/${repo}/issues/comments/${existing_id}" -f body="$body" >/dev/null; then
+    error "gh api PATCH comment failed; comment NOT updated for card $card"
+  fi
+  printf 'Updated: %s\n' "$existing_url"
   exit 0
 fi
 

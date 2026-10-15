@@ -9,11 +9,14 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(ROOT))
 
+from adapter_manifest import ENTRYPOINTS  # noqa: E402
+from shim_fixtures import registered_account, registered_document, shim_call  # noqa: E402
 from subagent_stop import (  # noqa: E402
     FOLLOWUP_APPLY,
     FOLLOWUP_DESIGN_AUTOR,
@@ -28,7 +31,12 @@ from subagent_stop import (  # noqa: E402
 )
 
 SKILL = REPO / ".cursor" / "skills" / "covenant-flow" / "SKILL.md"
-HOOKS = REPO / ".cursor" / "hooks.json"
+MODEL_MAP = REPO / ".cursor" / "model-map.yaml"
+
+
+def _execucao_slug() -> str:
+    data = yaml.safe_load(MODEL_MAP.read_text(encoding="utf-8")) or {}
+    return str((data.get("execucao") or {}).get("slug") or "")
 STOP_SH = REPO / ".cursor" / "hooks" / "process-fsm-subagent-stop.sh"
 DIFF_AGENT = REPO / ".cursor" / "agents" / "diff-reviewer.md"
 CODE_AGENT = REPO / ".cursor" / "agents" / "code-reviewer.md"
@@ -398,6 +406,29 @@ def test_agents_require_review_diff_and_forbid_git_transcripts() -> None:
         assert "## Diff" in text
 
 
+def test_skill_t18_destape_resume_keeps_birth_capture() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+    assert "Destape/resume mantém captura de nascimento" in text
+    assert ".cursor/model-map.yaml" in text
+    assert "composer-2.5-fast" in text
+    assert "MUST NOT `resume`" in text or "MUST NOT resume" in text
+    assert "spawn **novo**" in text or "spawn novo" in text
+    assert "generalPurpose" in text
+    assert "MUST NOT `subagent_type` `explore`" in text or "MUST NOT subagent_type `explore`" in text
+    assert "fecho-lote" in text
+    assert "auto-resume" in text
+
+
+def test_skill_t18_release_refuses_divergent_parent() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+    release = text.split("## Release", 1)[1]
+    assert "chat pai" in release or "chat pai MUST" in text
+    assert "execução" in release
+    assert "check_runtime_model(..., capture=...)" in release
+    assert "juizo" in release.lower() or "juízo" in release
+    assert "process_event fechar_release" in text or "T16" in release
+
+
 def test_skill_s1_parent_materializes_diff() -> None:
     text = SKILL.read_text(encoding="utf-8")
     assert "## Modos Cursor (terminal vs Desktop+SSH)" in text
@@ -406,11 +437,40 @@ def test_skill_s1_parent_materializes_diff() -> None:
     assert "MAY spawnar" in text
     assert "subagent_type` nomeado" in text
     assert ".cursor/tmp/review-diff.patch" in text
+    assert "materialize_review_diff.py" in text
+    assert ".impeccable/critique/" in text
     assert "git diff HEAD" in text
     assert "git ls-files --others --exclude-standard" in text
     assert "git diff origin/develop...HEAD" in text
     assert "MUST NOT pedir git ao filho" in text
     assert "v1.1.16" in text
+
+
+def test_materialize_review_diff_excludes_impeccable_critique(tmp_path: Path) -> None:
+    from materialize_review_diff import is_critique_artifact, materialize
+
+    repo = tmp_path
+    critique = repo / ".impeccable" / "critique" / "snap.md"
+    critique.parent.mkdir(parents=True)
+    critique.write_text("design snapshot\n", encoding="utf-8")
+    product = repo / "backend" / "app.py"
+    product.parent.mkdir(parents=True)
+    product.write_text("print('ok')\n", encoding="utf-8")
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "backend/app.py"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@e.com", "-c", "user.name=t", "commit", "-m", "base"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    product.write_text("print('changed')\n", encoding="utf-8")
+
+    patch = materialize(repo, "pre-commit", "develop")
+    assert "backend/app.py" in patch or "app.py" in patch
+    assert "design snapshot" not in patch
+    assert is_critique_artifact(".impeccable/critique/snap.md")
 
 
 def test_skill_s2_sidecar_and_order() -> None:
@@ -450,9 +510,14 @@ def test_skill_s2_sidecar_and_order() -> None:
     assert "commit só depois dos dois" in text
 
 
-def test_hooks_matcher_covers_named_reviewers() -> None:
-    hooks = json.loads(HOOKS.read_text(encoding="utf-8"))
+def test_account_registration_matcher_covers_named_reviewers(monkeypatch, tmp_path: Path) -> None:
+    # `subagentStop` is registered in the operator account (`~/.cursor/hooks.json` from `install.sh --account`), not in
+    # the consumer: the matcher, loop limit and non-blocking policy are checked on what `account_install` generates.
+    registered_account(monkeypatch, tmp_path, ["cursor"])
+    hooks = registered_document("cursor")
     destape = hooks["hooks"]["subagentStop"]
+    assert shim_call(destape[0]["command"]) == ("cursor", "subagent-stop")
+    assert ENTRYPOINTS["cursor"]["subagent-stop"] == ["bash", ".cursor/hooks/process-fsm-subagent-stop.sh"]
     matcher = destape[0]["matcher"]
     assert "generalPurpose" in matcher
     assert "diff-reviewer" in matcher

@@ -10,7 +10,7 @@ Complementa `covenant-flow`. Decide **onde agir**: `DEV`, `PROD` ou `DEV->PROD`.
 Valores de topologia vêm de `.covenant-flow/overlay.yaml`:
 
 - `environments.dev` (obrigatório se o projeto tem runtime DEV): `source`, `url`, `db`, `services[]`
-- `environments.prod` (omitir se o projeto é só DEV)
+- `environments.prod` (omitir se o projeto é só DEV): `services[]`, `oneshot_services[]` (subconjunto de `services`; jobs de uma execução fora da janela do publish)
 - `canonical_paths` / `forbidden_worktrees` (two-path)
 - `release.restart` / `migrate` / `build` / `health_url`
 
@@ -30,7 +30,7 @@ Operar só os paths em `canonical_paths`. Não usar entradas de `forbidden_workt
 
 - Done técnico DEV: comando em `release.restart` no `environments.dev.source`.
 - Validação intermédia: só o unit afetado de `environments.*.services`.
-- PROD: só com pedido explícito; units de `environments.prod.services`; evidência em `release.health_url`.
+- PROD: só com pedido explícito; na janela do publish reinicie `environments.prod.services` menos `environments.prod.oneshot_services` (não reinicie oneshot por simetria); evidência em `release.health_url`.
 
 ## Release
 

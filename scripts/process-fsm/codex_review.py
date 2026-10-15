@@ -14,6 +14,7 @@ from typing import Any
 
 from codex_fs import atomic_write_bytes
 from codex_models import ModelRoutingError, pair_from_capture
+from codex_evidence import EvidenceError, verify_proxy
 from model_selection import compare_wave, validate_capture
 
 
@@ -282,6 +283,19 @@ def verify_wave(
 
     if child_ids[0] == child_ids[1]:
         raise ReviewDiffError("diff-reviewer and code-reviewer must be distinct child tasks")
+    parents = set()
+    for activity in REVIEWERS:
+        try:
+            proof = verify_proxy(by_activity[activity])
+        except EvidenceError as exc:
+            raise ReviewDiffError(f"{activity} runtime provenance rejected: {exc}") from exc
+        if proof["qualification"]:
+            raise ReviewDiffError(f"{activity} qualification evidence cannot prove product review")
+        if proof["parent_sandbox"] != "read-only":
+            raise ReviewDiffError(f"{activity} spawning session was not read-only")
+        parents.add((proof["parent_thread"], proof["birth"]["parent_turn"]))
+    if len(parents) != 1:
+        raise ReviewDiffError("reviewers must be born in the same read-only session and turn")
     return expected_digest, (child_ids[0], child_ids[1])
 
 

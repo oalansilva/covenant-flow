@@ -121,6 +121,15 @@ def _nonempty_str(raw: Any, label: str) -> str:
     return raw.strip()
 
 
+def _normalize_service_name(raw: str) -> str:
+    name = raw.strip()
+    if not name:
+        return name
+    if not name.endswith(".service"):
+        name = f"{name}.service"
+    return name
+
+
 def _filled_env(raw: Any, label: str) -> None:
     env = _as_mapping(raw, label)
     for key in ENV_KEYS:
@@ -134,6 +143,17 @@ def _filled_env(raw: Any, label: str) -> None:
         raise OverlayInvalid(f"{label}.services must be a non-empty list")
     if not all(isinstance(item, str) and item.strip() for item in services):
         raise OverlayInvalid(f"{label}.services items must be non-empty strings")
+    oneshot = env.get("oneshot_services")
+    if oneshot is not None:
+        oneshot_list = _as_list(oneshot, f"{label}.oneshot_services")
+        if not all(isinstance(item, str) and item.strip() for item in oneshot_list):
+            raise OverlayInvalid(f"{label}.oneshot_services items must be non-empty strings")
+        service_names = {_normalize_service_name(str(item)) for item in services}
+        for item in oneshot_list:
+            if _normalize_service_name(str(item)) not in service_names:
+                raise OverlayInvalid(
+                    f"{label}.oneshot_services must be a subset of {label}.services"
+                )
 
 
 def join_status_options(data: Mapping[str, Any], fsm: Mapping[str, Any] | None = None) -> dict[str, str]:

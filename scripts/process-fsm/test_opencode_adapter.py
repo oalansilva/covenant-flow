@@ -14,14 +14,17 @@ sys.path.insert(0, str(ROOT))
 
 from opencode_stubs import stub_errors  # noqa: E402
 from paging import page  # noqa: E402
+from shim_fixtures import opencode_module, registered_account  # noqa: E402
 from test_overlay_fixtures import write_overlay  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 TODO_STUB = "Próximo evento = iniciar_design. Não apply. Não /opsx:new ainda."
 PLAYBOOK = ("release-guard", "subir lote", "deploy PROD")
-PLUGIN_GUARD = REPO / ".opencode" / "plugin" / "process-fsm-guard.js"
-PLUGIN_HOOK = REPO / ".opencode" / "plugin" / "impeccable-hook.js"
+# The adapter modules sit in `.opencode/adapter/` once a consumer is pinned (the account shim loads them; the host
+# no longer auto-loads them from `.opencode/plugin/`) and in `.opencode/plugin/` in the nucleus source tree.
+PLUGIN_GUARD = opencode_module("process-fsm-guard.js")
+PLUGIN_HOOK = opencode_module("impeccable-hook.js")
 PLUGIN_LIB = REPO / "scripts" / "process-fsm" / "opencode_plugin_lib.js"
 
 
@@ -230,6 +233,21 @@ process.stdout.write(JSON.stringify(Object.keys(ns).sort()));
         assert "export function" not in text
         assert "export const" not in text
         assert "export {" not in text
+
+
+def test_account_plugin_exports_only_default_and_loads_the_installed_shim(monkeypatch, tmp_path: Path):
+    """The file OpenCode auto-loads after a pin is the account plugin, not a project module."""
+    home = registered_account(monkeypatch, tmp_path, ["opencode"])
+    plugin = home / ".config" / "opencode" / "plugin" / "covenant-flow-shim.js"
+    text = plugin.read_text(encoding="utf-8")
+    assert "cf_shim_opencode.js" in text and (home / ".config" / "covenant-flow" / "shim" / "current" / "cf_shim_opencode.js").is_file()
+    code = f"""
+import * as ns from {json.dumps(str(plugin))};
+process.stdout.write(JSON.stringify(Object.keys(ns).sort()));
+"""
+    proc = _node(code)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == ["default"]
 
 
 def test_g16_opencode_tree_has_no_opsx_or_second_law():

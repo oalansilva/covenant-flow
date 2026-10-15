@@ -12,12 +12,14 @@ ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(ROOT))
 
+from adapter_manifest import ENTRYPOINTS  # noqa: E402
 from fsm import load_fsm  # noqa: E402
 from grok_stubs import stub_errors  # noqa: E402
 from overlay import render_agents  # noqa: E402
 from graphql_quota import GraphQLQuotaError  # noqa: E402
 from paging import UNBOUND_PAGE, page, unread_page, write_grok_page  # noqa: E402
 from resolve import UNBOUND  # noqa: E402
+from shim_fixtures import registered_account, registered_document, shim_call  # noqa: E402
 from test_overlay_fixtures import filled_overlay_dict  # noqa: E402
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -326,7 +328,10 @@ def test_harness_mdc_body_budget():
     lines = _harness_body_lines()
     text = "\n".join(lines)
     assert 4 <= len(lines) <= 12
-    assert "inherit" in text or ".cursor/hooks.json" in text
+    assert "juízo" in text and "execução" in text
+    assert "Task `inherit`" not in text
+    assert "every Task inherits" not in text
+    assert "herdar o picker" not in text
     assert "T1/T7/T15" not in text
     assert "diff-reviewer" not in text
     assert "release-guard" not in text
@@ -373,8 +378,8 @@ def test_agents_md_is_stub():
     generated = render_agents(filled_overlay_dict())
     assert filled_overlay_dict()["clients"]["cursor"]["auto"] is True
     assert (
-        "Clientes: Cursor Agent (cooperativo); Codex CLI (cooperativo; hooks só após trust review); Grok Build, OpenCode e dsh "
-        "(cooperativos até ensaio deny na branch de integração)."
+        "Clientes: Cursor Agent (cooperativo); Codex CLI (cooperativo; hooks só após trust review); "
+        "Grok Build, OpenCode e dsh (cooperativos até ensaio deny na branch de integração)."
     ) in generated
     assert (
         "Não reivindique modo Auto no Cursor, no Codex, no Grok, no OpenCode nem no dsh."
@@ -384,6 +389,15 @@ def test_agents_md_is_stub():
     assert "Auto OpenCode" not in generated
     assert "Auto dsh" not in generated
     assert len([ln for ln in generated.splitlines() if ln.strip()]) <= 40
+
+
+def test_skill_t18_destape_resume_and_release_picker():
+    text = (REPO / ".cursor" / "skills" / "covenant-flow" / "SKILL.md").read_text(encoding="utf-8")
+    assert "Destape/resume mantém captura de nascimento" in text
+    assert "Release/lote — chat pai execução" in text
+    assert ".cursor/model-map.yaml" in text
+    assert "composer-2.5-fast" in text
+    assert "lista fechada isolada" in text
 
 
 def test_skill_priority_anchor():
@@ -418,37 +432,41 @@ def test_qa_closeout_skill_is_client_labeled():
     assert "T0–T17" not in plugin and "T0-T17" not in plugin
 
 
-def test_hooks_json_session_start():
-    hooks = json.loads((REPO / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
-    start = hooks["hooks"]["sessionStart"]
-    assert start[0]["command"] == ".cursor/hooks/process-fsm-session-start.sh"
+def test_account_registration_session_start(monkeypatch, tmp_path: Path):
+    # The consumer has no `.cursor/hooks.json` of Covenant Flow after the account-registration pin: the entries live in
+    # the operator's `~/.cursor/hooks.json` (written by `install.sh --account`, here in a tmp HOME) and call the shim,
+    # which runs the pinned `.cursor/hooks/*.sh` the manifest names for the event.
+    registered_account(monkeypatch, tmp_path, ["cursor"])
+    hooks = registered_document("cursor")["hooks"]
+    start = hooks["sessionStart"]
+    assert shim_call(start[0]["command"]) == ("cursor", "session-start")
     assert start[0].get("failClosed") is not True
-    pre = hooks["hooks"]["preToolUse"]
-    assert pre[0]["command"] == ".cursor/hooks/process-fsm-guard.sh"
+    assert ENTRYPOINTS["cursor"]["session-start"] == ["bash", ".cursor/hooks/process-fsm-session-start.sh"]
+    pre = hooks["preToolUse"]
+    assert shim_call(pre[0]["command"]) == ("cursor", "guard")
     assert pre[0]["failClosed"] is True
-    assert hooks["hooks"]["beforeShellExecution"][0]["command"] == ".cursor/hooks/process-fsm-guard.sh"
-    after = hooks["hooks"]["afterFileEdit"][0]["command"]
-    stop = hooks["hooks"]["stop"][0]["command"]
-    assert ".cursor/hooks/impeccable.sh" in after
-    assert "afterFileEdit" in after
-    assert ".cursor/hooks/impeccable.sh" in stop
-    assert " stop" in f" {stop}"
-    assert start[0]["command"] == ".cursor/hooks/process-fsm-session-start.sh"
-    assert pre[0]["command"] == ".cursor/hooks/process-fsm-guard.sh"
-    assert hooks["hooks"]["beforeShellExecution"][0]["command"] == ".cursor/hooks/process-fsm-guard.sh"
+    assert ENTRYPOINTS["cursor"]["guard"] == ["bash", ".cursor/hooks/process-fsm-guard.sh"]
+    assert shim_call(hooks["beforeShellExecution"][0]["command"]) == ("cursor", "guard")
+    after = hooks["afterFileEdit"][0]["command"]
+    stop = hooks["stop"][0]["command"]
+    assert shim_call(after) == ("cursor", "impeccable-after-file-edit")
+    assert shim_call(stop) == ("cursor", "impeccable-stop")
+    assert ENTRYPOINTS["cursor"]["impeccable-after-file-edit"] == ["bash", ".cursor/hooks/impeccable.sh", "afterFileEdit"]
+    assert ENTRYPOINTS["cursor"]["impeccable-stop"] == ["bash", ".cursor/hooks/impeccable.sh", "stop"]
     assert (REPO / ".cursor" / "hooks" / "impeccable.sh").is_file()
     adapter = REPO / ".cursor" / "hooks" / "process-fsm-session-start.sh"
     assert adapter.is_file()
     assert adapter.stat().st_mode & stat.S_IXUSR
-    destape = hooks["hooks"]["subagentStop"]
-    assert destape[0]["command"] == ".cursor/hooks/process-fsm-subagent-stop.sh"
+    destape = hooks["subagentStop"]
+    assert shim_call(destape[0]["command"]) == ("cursor", "subagent-stop")
+    assert ENTRYPOINTS["cursor"]["subagent-stop"] == ["bash", ".cursor/hooks/process-fsm-subagent-stop.sh"]
     matcher = destape[0]["matcher"]
     assert "generalPurpose" in matcher
     assert "diff-reviewer" in matcher
     assert "code-reviewer" in matcher
     assert destape[0]["loop_limit"] == 32
     assert destape[0].get("failClosed") is not True
-    assert "subagentStart" not in hooks["hooks"]
+    assert "subagentStart" not in hooks
     stop_adapter = REPO / ".cursor" / "hooks" / "process-fsm-subagent-stop.sh"
     assert stop_adapter.is_file()
     assert stop_adapter.stat().st_mode & stat.S_IXUSR

@@ -47,8 +47,8 @@ def _metadata(skill_file: Path) -> tuple[str, str]:
     return name, description.strip()
 
 
-def render_bridge(name: str, description: str) -> str:
-    canonical = f".cursor/skills/{name}/SKILL.md"
+def render_bridge(name: str, description: str, canonical: str | None = None) -> str:
+    canonical = canonical or f".cursor/skills/{name}/SKILL.md"
     return (
         "---\n"
         f"name: {name}\n"
@@ -110,13 +110,19 @@ def install_bridges(
     *,
     check_only: bool = False,
     preflight_only: bool = False,
+    skills_dir: tuple[str, ...] = (".agents", "skills"),
+    bridges: dict[str, str] | None = None,
 ) -> list[str]:
-    """Install generated bridges; preserve non-Covenant skills and refuse edits."""
+    """Install generated bridges; preserve non-Covenant skills and refuse edits.
+
+    `skills_dir`/`bridges` let another client (Claude Code) reuse the same
+    drift-refusing installer for its own bridge directory and bridge set.
+    """
 
     source = Path(source_root)
     target = Path(target_root)
-    bridges = expected_bridges(source)
-    skills_root = target / ".agents" / "skills"
+    bridges = bridges if bridges is not None else expected_bridges(source)
+    skills_root = target.joinpath(*skills_dir)
     manifest_path = skills_root / MANIFEST
     previous = _read_manifest(manifest_path)
     old_files = previous["files"] if previous else {}
@@ -174,11 +180,11 @@ def install_bridges(
     changed: list[str] = []
     for name, destination, content, action in planned:
         _atomic_write(destination, content)
-        changed.append(f"{action}: .agents/skills/{name}/SKILL.md")
+        changed.append(f"{action}: {Path(*skills_dir).as_posix()}/{name}/SKILL.md")
     manifest_bytes = (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     if not manifest_path.exists() or manifest_path.read_bytes() != manifest_bytes:
         _atomic_write(manifest_path, manifest_bytes)
-        changed.append("updated .agents/skills/" + MANIFEST)
+        changed.append(f"updated {Path(*skills_dir).as_posix()}/{MANIFEST}")
     return changed
 
 

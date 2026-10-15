@@ -891,13 +891,155 @@ def test_fechar_release_rejects_without_m_lote():
         mover=mover,
         t16_closer=closer,
         m_lote=None,
-        m_lote_measurer=lambda: False,
+        m_lote_measurer=lambda **_k: False,
         **{k: v for k, v in _t16_kwargs().items() if k != "m_lote"},
     )
     assert out["result"] == "reject"
     assert str(out["reason"] or "").startswith("guard:")
     assert "covenant-flow-environments" in (out.get("message") or "")
     assert "release-guard" in (out.get("message") or "")
+    assert mover.calls == []
+    assert closer.calls == []
+
+
+def test_fechar_release_message_includes_post_blockers():
+    from t16 import LoteMeasurement, RecordingT16Closer
+
+    mover = FakeMover()
+    closer = RecordingT16Closer()
+    measurement = LoteMeasurement(
+        ok=False,
+        blockers=("OpenSpec completed change of Homologado package card is still active",),
+        fail_class="post_failed",
+    )
+    out = process_event(
+        "fechar_release",
+        mover=mover,
+        t16_closer=closer,
+        m_lote=None,
+        m_lote_measurer=lambda **_k: measurement,
+        **{k: v for k, v in _t16_kwargs().items() if k != "m_lote"},
+    )
+    assert out["result"] == "reject"
+    assert out["reason"] == "guard:M_lote"
+    assert "OpenSpec completed change of Homologado package card is still active" in (
+        out.get("message") or ""
+    )
+    assert "fail_class=post_failed" in (out.get("message") or "")
+    assert mover.calls == []
+    assert closer.calls == []
+
+
+def test_fechar_release_raw_env_same_context_post_pass_is_accepted(monkeypatch):
+    import os
+    import subprocess
+
+    from t16 import RecordingT16Closer, measure_m_lote
+
+    monkeypatch.setenv("RELEASE_CARDS", " 0617, 618 ")
+    workdir = ROOT.parents[1]
+    seen: dict[str, object] = {}
+
+    def measurer(*, cwd=None, package=None, **_k):
+        seen["cwd"] = cwd
+        seen["package"] = package
+        return measure_m_lote(
+            cwd=cwd,
+            package=package,
+            runner=lambda *a, **k: subprocess.CompletedProcess(
+                ["scripts/release-guard", "post"], 0, "", ""
+            ),
+        )
+
+    mover = FakeMover()
+    closer = RecordingT16Closer()
+    extra = {k: v for k, v in _t16_kwargs().items() if k not in {"m_lote", "package_cards"}}
+    out = process_event(
+        "fechar_release",
+        cwd=workdir,
+        mover=mover,
+        t16_closer=closer,
+        m_lote=None,
+        m_lote_measurer=measurer,
+        package_cards=None,
+        **extra,
+    )
+    assert seen["package"] == "617,618"
+    assert Path(seen["cwd"]).resolve() == workdir.resolve()
+    assert os.environ["RELEASE_CARDS"] == " 0617, 618 "
+    assert out["result"] == "transition"
+    assert out["to"] == "Pronto"
+    assert mover.calls == [(617, "Pronto"), (618, "Pronto")]
+    assert closer.cards == ["617", "618"]
+
+
+def test_fechar_release_card_without_env_same_context_post_pass_is_accepted(monkeypatch):
+    import subprocess
+
+    from t16 import RecordingT16Closer, measure_m_lote
+
+    monkeypatch.delenv("RELEASE_CARDS", raising=False)
+    workdir = ROOT.parents[1]
+    seen: dict[str, object] = {}
+
+    def measurer(*, cwd=None, package=None, **_k):
+        seen["cwd"] = cwd
+        seen["package"] = package
+        return measure_m_lote(
+            cwd=cwd,
+            package=package,
+            runner=lambda *a, **k: subprocess.CompletedProcess(
+                ["scripts/release-guard", "post"], 0, "", ""
+            ),
+        )
+
+    mover = FakeMover()
+    closer = RecordingT16Closer()
+    out = process_event(
+        "fechar_release",
+        cwd=workdir,
+        card="617",
+        mover=mover,
+        t16_closer=closer,
+        m_lote=None,
+        m_lote_measurer=measurer,
+        status="Homologado",
+        q_git="develop",
+        bound_card=UNBOUND,
+        package_cards=None,
+        status_provider=_status_of({"617": "Homologado"}),
+    )
+    assert seen["package"] == "617"
+    assert Path(seen["cwd"]).resolve() == workdir.resolve()
+    assert out["result"] == "transition"
+    assert out["to"] == "Pronto"
+    assert mover.calls == [(617, "Pronto")]
+    assert closer.cards == ["617"]
+
+
+def test_fechar_release_refuses_pass_from_other_context():
+    from release_closeout import ContextIdentity
+    from t16 import RecordingT16Closer
+
+    mover = FakeMover()
+    closer = RecordingT16Closer()
+    other = ContextIdentity(
+        package="617,618",
+        cwd="/tmp/other-worktree",
+        head="deadbeef",
+        refs=("origin/develop=aaaa",),
+        branch="release-2026-09-27",
+    )
+    out = process_event(
+        "fechar_release",
+        mover=mover,
+        t16_closer=closer,
+        lote_pass_context=other,
+        **_t16_kwargs(),
+    )
+    assert out["result"] == "reject"
+    assert out["reason"] == "guard:M_lote"
+    assert "context divergence" in (out.get("message") or "")
     assert mover.calls == []
     assert closer.calls == []
 
@@ -1026,7 +1168,23 @@ def test_fechar_release_unbound_non_lote_git_rejected():
         **_t16_kwargs(q_git="main"),
     )
     assert out["result"] == "reject"
-    assert out["reason"] == "unbound"
+    assert out["reason"] == "guard:lote_git"
+    assert "develop" in out.get("message", "")
+    assert "release-*" in out.get("message", "")
+    assert mover.calls == []
+
+
+@pytest.mark.parametrize("q_git", ["docs-release-2026-07-01", "sync-main-develop"])
+def test_fechar_release_wrong_lote_git_docs_or_sync_rejected(q_git: str):
+    mover = FakeMover()
+    out = process_event(
+        "fechar_release",
+        mover=mover,
+        t16_closer=None,
+        **_t16_kwargs(q_git=q_git),
+    )
+    assert out["result"] == "reject"
+    assert out["reason"] == "guard:lote_git"
     assert mover.calls == []
 
 

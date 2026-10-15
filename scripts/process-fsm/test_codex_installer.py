@@ -97,10 +97,12 @@ def test_pin_merges_codex_without_overwriting_cursor_map_or_vendor_skills(tmp_pa
     assert (target / ".cursor" / "model-policy.yaml").is_file()
     assert (target / "scripts" / "process-fsm" / "model_selection.py").is_file()
     assert local_selection.read_bytes() == selection_bytes
+    # The account-registration pin writes no Codex hook registration: the operator's own file is untouched.
     merged_hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
     assert merged_hooks["operator_key"] == "keep"
     assert merged_hooks["hooks"]["Notification"][0]["hooks"][0]["command"] == "python operator-hook.py"
-    assert {"SessionStart", "PreToolUse", "PostToolUse", "Stop"} <= set(merged_hooks["hooks"])
+    assert set(merged_hooks["hooks"]) == {"Notification"} and "codex_adapter.py" not in json.dumps(merged_hooks)
+    assert (target / ".covenant-flow" / "adapters.json").is_file()
     assert vendor.read_bytes() == b"operator-installed provider bytes\n"
     assert local_skill.read_bytes() == b"operator playwright bytes\n"
     assert config_toml.read_text(encoding="utf-8") == '[agents]\ndefault_subagent_model = "operator-default"\n'
@@ -112,29 +114,40 @@ def test_pin_merges_codex_without_overwriting_cursor_map_or_vendor_skills(tmp_pa
     second = _pin(target)
     assert second.returncode == 0, second.stderr
     assert (target / ".cursor" / "model-map.yaml").read_bytes() == pinned_map
-    assert hooks_path.read_bytes() == json.dumps(merged_hooks, indent=2, ensure_ascii=False).encode() + b"\n"
+    assert json.loads(hooks_path.read_text(encoding="utf-8")) == merged_hooks
     assert vendor.read_bytes() == b"operator-installed provider bytes\n"
     assert local_skill.read_bytes() == b"operator playwright bytes\n"
     assert local_selection.read_bytes() == selection_bytes
 
 
-def test_codex_hook_collision_aborts_pin_before_any_tree_is_written(tmp_path: Path):
+def test_unsafe_codex_hook_registration_aborts_pin_before_any_tree_is_written(tmp_path: Path):
     target, original_map = _target(tmp_path / "consumer")
     codex = target / ".codex"
     codex.mkdir(exist_ok=True)
-    config = codex / "config.toml"
-    config.write_text('[[hooks.PreToolUse]]\nmatcher = "Bash"\n', encoding="utf-8")
     hooks = codex / "hooks.json"
-    hooks.write_text('{"hooks":{"Notification":[]}}\n', encoding="utf-8")
+    hooks.write_text('{"hooks":{"Notification":"not-a-list"}}\n', encoding="utf-8")
 
     result = _pin(target)
 
     assert result.returncode != 0
-    assert "defines [hooks]" in result.stderr
-    assert hooks.read_text(encoding="utf-8") == '{"hooks":{"Notification":[]}}\n'
+    assert "project registration error" in result.stderr
+    assert hooks.read_text(encoding="utf-8") == '{"hooks":{"Notification":"not-a-list"}}\n'
     assert (target / ".cursor" / "model-map.yaml").read_bytes() == original_map
     assert not (target / ".cursor" / "process-fsm.yaml").exists()
     assert not (target / ".codex" / "agents" / "diff-reviewer.toml").exists()
+    assert not (target / ".covenant-flow" / "adapters.json").exists()
+
+
+def test_an_inline_codex_hooks_table_is_not_a_pin_conflict_because_the_pin_writes_no_registration(tmp_path: Path):
+    target, _original_map = _target(tmp_path / "consumer")
+    config = target / ".codex" / "config.toml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text('[[hooks.PreToolUse]]\nmatcher = "Bash"\n', encoding="utf-8")
+
+    result = _pin(target)
+
+    assert result.returncode == 0, result.stderr
+    assert config.read_text(encoding="utf-8") == '[[hooks.PreToolUse]]\nmatcher = "Bash"\n'
 
 
 def test_skill_bridge_conflict_aborts_pin_before_any_tree_is_written(tmp_path: Path):
@@ -191,7 +204,8 @@ def test_pin_installs_functional_resolver_and_selection_hooks(tmp_path, monkeypa
     payload = {"tool_name": "Agent", "cwd": str(target), "tool_input": {**birth["arguments"], "description": "same-card-search", "prompt": f"model_selection_capture: {capture}"}}
     allowed = subprocess.run([sys.executable, str(target / "scripts/process-fsm/codex_adapter.py"), "pre-tool-use"], input=json.dumps(payload), env=env, capture_output=True, text=True)
     assert allowed.returncode == 0, allowed.stderr
-    assert allowed.stdout.strip() == ""  # Native hook allow is no denial output.
+    # The matching pair is accepted, but since #1095 a spawn also needs a prepared birth receipt.
+    assert "birth_receipt_missing" in json.loads(allowed.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
     payload["tool_input"]["model"] = "other"
     denied = subprocess.run([sys.executable, str(target / "scripts/process-fsm/codex_adapter.py"), "pre-tool-use"], input=json.dumps(payload), env=env, capture_output=True, text=True)
     assert json.loads(denied.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
