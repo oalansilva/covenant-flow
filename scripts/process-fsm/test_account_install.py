@@ -215,6 +215,44 @@ def test_the_test_only_fixture_helper_is_outside_the_tree_the_manifest_and_diges
     adapter_manifest.check(root)
 
 
+def test_tool_caches_inside_the_trees_stay_out_of_the_manifest_and_never_diverge(tmp_path):
+    root = make_consumer(tmp_path / "c")
+    caches = [
+        "scripts/process-fsm/.pytest_cache/v/cache/nodeids",
+        "scripts/process-fsm/.pytest_cache/README.md",
+        "scripts/process-fsm/.pytest_cache/CACHEDIR.TAG",
+        "scripts/process-fsm/.pytest_cache/.gitignore",
+        "scripts/process-fsm/sub/.pytest_cache/v/cache/lastfailed",
+        "scripts/process-fsm/__pycache__/other_module.cpython-312.pyc",
+        "scripts/process-fsm/stray.pyc",
+        ".agents/skills/impeccable/scripts/.pytest_cache/v/cache/nodeids",
+        ".cursor/hooks/.pytest_cache/v/cache/nodeids",
+        ".opencode/adapter/.pytest_cache/v/cache/nodeids",
+        ".opencode/adapter/node_modules/pkg/index.js",
+    ]
+    for relative in caches:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("[]\n")
+    adapter_manifest.write(root, "v1.2.0")
+    manifest = json.loads((root / cf_shim.MANIFEST).read_text())
+    for client in ("claude", "codex", "cursor", "opencode"):
+        listed = manifest["clients"][client]["files"]
+        assert not any(".pytest_cache" in f or "__pycache__" in f or "node_modules" in f or f.endswith((".pyc", ".pyo")) for f in listed), client
+    for client in ("claude", "codex", "cursor", "opencode"):
+        entry = manifest["clients"][client]
+        assert not cf_shim.adapter_state(root, entry).divergent, client
+    for relative in caches:
+        (root / relative).write_text('["changed"]\n')
+    (root / "scripts/process-fsm/.pytest_cache/v/cache/new_file").write_text("new\n")
+    for client in ("claude", "codex", "cursor", "opencode"):
+        state = cf_shim.adapter_state(root, manifest["clients"][client])
+        assert not state.divergent and not state.missing, client
+    adapter_manifest.check(root)
+    (root / "scripts/process-fsm/other_module.py").write_text("VALUE = 9\n")
+    assert cf_shim.adapter_state(root, manifest["clients"]["claude"]).divergent
+
+
 def test_manifest_never_declares_account_for_a_host_without_a_proven_mechanism(tmp_path, monkeypatch):
     monkeypatch.setitem(cf_shim.HOST_REGISTRATION, "opencode", "unproven")
     root = make_consumer(tmp_path / "c")

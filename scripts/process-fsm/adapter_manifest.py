@@ -17,20 +17,38 @@ from typing import Any
 
 import cf_shim
 
+# Tool caches are not adapter code: a pytest run rewrites `.pytest_cache/v/cache/nodeids`, and listing it would make the
+# shim deny every hook with `adapter_divergent`. `cf_shim.enumerate_tree` already skips `__pycache__`, `node_modules`,
+# `.git` and `*.pyc`/`*.pyo`; `.pytest_cache` is excluded per tree with a pattern the shim applies too (`fnmatch`
+# lets `*` cross `/`), at any depth, so both sides of the comparison agree.
+CACHE_EXCLUDE = "*/.pytest_cache/*"
+CACHE_DIRECTORIES = frozenset({".pytest_cache", "__pycache__", "node_modules", ".git"})
+
 CORE_TREES = (
     {
         "path": "scripts/process-fsm",
-        "exclude": ["scripts/process-fsm/test_*", "scripts/process-fsm/fixtures/*", "scripts/process-fsm/conftest.py", "scripts/process-fsm/shim_fixtures.py"],
+        "exclude": [
+            "scripts/process-fsm/test_*",
+            "scripts/process-fsm/fixtures/*",
+            "scripts/process-fsm/conftest.py",
+            "scripts/process-fsm/shim_fixtures.py",
+            CACHE_EXCLUDE,
+        ],
     },
     # A vendored Impeccable without hook scripts has nothing to execute; scripts added later show up as divergent.
-    {"path": ".agents/skills/impeccable/scripts", "exclude": [], "optional": True},
+    {"path": ".agents/skills/impeccable/scripts", "exclude": [CACHE_EXCLUDE], "optional": True},
 )
 CLIENT_TREES = {
     "claude": (),
     "codex": (),
-    "cursor": ({"path": ".cursor/hooks", "exclude": []},),
-    "opencode": ({"path": ".opencode/adapter", "exclude": []},),
+    "cursor": ({"path": ".cursor/hooks", "exclude": [CACHE_EXCLUDE]},),
+    "opencode": ({"path": ".opencode/adapter", "exclude": [CACHE_EXCLUDE]},),
 }
+
+
+def _is_cache_file(relative: str) -> bool:
+    parts = relative.split("/")
+    return bool(CACHE_DIRECTORIES.intersection(parts[:-1])) or relative.endswith((".pyc", ".pyo"))
 
 
 def _python_entries(adapter: str, events: tuple[str, ...]) -> dict[str, list[str]]:
@@ -61,7 +79,7 @@ def client_entry(root: Path, client: str) -> dict[str, Any]:
     trees = [dict(tree) for tree in (*CORE_TREES, *CLIENT_TREES[client])]
     files: list[str] = []
     for tree in trees:
-        listed = cf_shim.enumerate_tree(root, tree)
+        listed = [path for path in cf_shim.enumerate_tree(root, tree) if not _is_cache_file(path)]
         if not listed and not tree.get("optional"):
             raise ManifestBuildError(f"{client}: adapter tree {tree['path']} is empty or missing under {root}")
         files.extend(listed)
