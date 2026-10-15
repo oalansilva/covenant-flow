@@ -57,6 +57,22 @@ def parse_surface(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def design_token_gap(text: str) -> str | None:
+    """Name of the first gate token a `design.md` lacks (`UI impact`, `live_route`, `surface`), or None when all parse.
+
+    One predicate for the precommit checklist and for the T5 event, so the two never disagree (R28).
+    """
+
+    for name, value in (
+        ("UI impact", parse_ui_impact(text)),
+        ("live_route", parse_live_route(text)[0]),
+        ("surface", parse_surface(text)),
+    ):
+        if value is None:
+            return name
+    return None
+
+
 def copied_utf8_sum(html: str) -> int:
     events: list[tuple[str, int, int]] = []
     pos = 0

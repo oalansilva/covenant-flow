@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from design_clone_gate import clone_gate_ok  # noqa: E402
+from design_clone_gate import clone_gate_ok, design_token_gap  # noqa: E402
 from overlay import (  # noqa: E402
     board_owner_number,
     board_project_id,
@@ -271,9 +271,17 @@ PREFLIGHT_EVENTS = frozenset({"iniciar_design", "recriticar", "submeter_design",
 AGENT_CLIENT_NAMES = {"codex": "codex", "claude": "claude"}
 
 
-def nearest_agent_client(pid: int | None = None, proc_root: Path = Path("/proc")) -> str | None:
-    """Innermost Codex/Claude Code ancestor of this process, from the process tree."""
+HOST_CLIENT_NAMES = {**AGENT_CLIENT_NAMES, "opencode": "opencode", "cursor-agent": "cursor"}
+HOST_ENVIRONMENT = {
+    "cursor": ("CURSOR_AGENT", "CURSOR_VERSION", "CURSOR_PROJECT_DIR"),
+    "opencode": ("OPENCODE",),
+}
 
+
+def nearest_agent_client(pid: int | None = None, proc_root: Path = Path("/proc"), names: dict[str, str] | None = None) -> str | None:
+    """Innermost Codex/Claude Code ancestor of this process, from the process tree (`names` widens the set)."""
+
+    client_names = AGENT_CLIENT_NAMES if names is None else names
     current = os.getpid() if pid is None else pid
     for _ in range(64):
         try:
@@ -281,9 +289,9 @@ def nearest_agent_client(pid: int | None = None, proc_root: Path = Path("/proc")
             stat = (proc_root / str(current) / "stat").read_text()
         except OSError:
             return None
-        names = {Path(argument).name for argument in argv[:2]}
-        for name, client_name in AGENT_CLIENT_NAMES.items():
-            if name in names:
+        found = {Path(argument).name for argument in argv[:2]}
+        for name, client_name in client_names.items():
+            if name in found:
                 return client_name
         try:
             current = int(stat.rsplit(")", 1)[1].split()[1])
@@ -304,6 +312,49 @@ def native_client() -> str | None:
     if codex and claude:
         return nearest_agent_client() or "ambiguous"
     return "codex" if codex else ("claude" if claude else None)
+
+
+def host_client() -> str | None:
+    """Native identity of the clients that have no `--client` of their own to carry (R10): `cursor` or `opencode`.
+
+    Only when exactly one of them is demonstrable, from its environment or from the innermost agent ancestor. It is
+    consulted after Codex and Claude Code (which win) and never overrides an explicit `--client`/`COVENANT_CLIENT`.
+    """
+
+    present = {client for client, names in HOST_ENVIRONMENT.items() if any(os.environ.get(n) for n in names)}
+    if len(present) == 1:
+        return next(iter(present))
+    if len(present) > 1:
+        innermost = nearest_agent_client(names=HOST_CLIENT_NAMES)
+        return innermost if innermost in present else None
+    return None
+
+
+def claude_closeout_parent_refusal(root: Path, capture: dict[str, Any] | None = None, checker: Callable[..., Any] | None = None) -> str | None:
+    """T16 in Claude Code: the observed parent must be on the captured `claude/execucao` pair; None when it is.
+
+    Reuses `observe-parent` and `load_execucao_pair` through `check_claude_parent`. Without a given capture the pair is
+    the one the local selection resolves now for the `fecho-lote` role, the same one its child is born with.
+    """
+
+    from claude_evidence import EvidenceError, observe_parent
+    from model_selection import SelectionError, resolve as resolve_selection
+    from release_model_selection import check_claude_parent, load_execucao_pair
+
+    try:
+        capture = capture if capture is not None else resolve_selection("claude", "execucao", role="fecho-lote")
+        captured = load_execucao_pair(root, "claude", capture)
+    except SelectionError as exc:
+        return f"claude/execucao capture unavailable ({exc}); T16 refused, Status unchanged"
+    result = (checker or check_claude_parent)(root=root, capture=capture)
+    if result.ok:
+        return None
+    try:
+        seen = observe_parent()
+        observed = f"{seen['model']}/{seen['effort']}"
+    except (EvidenceError, OSError, ValueError):
+        observed = "unavailable"
+    return f"{result.message}; observed parent {observed} vs captured claude/execucao {captured['slug']}/{captured['effort']}; T16 refused, Status unchanged"
 
 
 def _payload(
@@ -374,6 +425,8 @@ def process_event(
     change_dir: Path | None = None,
     prototype_dir: Path | None = None,
     client: str | None = None,
+    parent_capture: dict[str, Any] | None = None,
+    parent_checker: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     if event == "criar_card":
         return _payload(
@@ -399,7 +452,7 @@ def process_event(
     native = native_client()
     if native == "ambiguous":
         return _payload(result="reject", state=q, to=None, reason="claude_evidence:ambiguous_client")
-    active_client = client or os.environ.get("COVENANT_CLIENT") or native
+    active_client = client or os.environ.get("COVENANT_CLIENT") or native or host_client()
     if native and active_client != native:
         return _payload(result="reject", state=q, to=None, reason=f"{native}_evidence:ambiguous_client")
     if active_client in ("cursor", "opencode", "codex") and event in PREFLIGHT_EVENTS:
@@ -424,6 +477,11 @@ def process_event(
             claude_preflight(root=workdir)
         except (EvidenceError, OSError, ValueError) as exc:
             return _payload(result="reject", state=q, to=None, reason=f"claude_evidence:{getattr(exc, 'code', 'invalid_input')}", message=str(exc))
+    if active_client == "claude" and event == "fechar_release":
+        # The closeout rule of the Claude Code adapter applies where the event happens, not only in the runbook (R26).
+        refusal = claude_closeout_parent_refusal(workdir, parent_capture, parent_checker)
+        if refusal:
+            return _payload(result="reject", state=q, to=None, reason="claude_evidence:parent_model", message=_fechar_message(refusal))
     if event in HUMAN_EVENTS:
         return _payload(result="reject", state=q, to=None, reason="actor")
     provider = status_provider if status_provider is not None else github_status_provider
@@ -483,6 +541,18 @@ def process_event(
         proto = REPO_ROOT / "frontend" / "public" / "prototypes" / inferred_change
         resolved_proto = proto if proto.is_dir() else None
 
+    if event == "submeter_design" and g_design is None and resolved_change_dir is not None:
+        # T5 anticipates the checklist the precommit runs anyway: the three gate tokens must parse (R28).
+        design_file = resolved_change_dir / "design.md"
+        gap = design_token_gap(design_file.read_text(encoding="utf-8")) if design_file.is_file() else None
+        if gap:
+            return _payload(
+                result="reject",
+                state=q,
+                to=None,
+                reason="guard:design_tokens",
+                message=f"T5 refused: design.md has no parseable `{gap}` line (needs `UI impact`, `live_route` and `surface`); fix it and submit again",
+            )
     if g_design is None:
         g_design = (
             files_g_design(resolved_change_dir, resolved_proto)
@@ -715,13 +785,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--change")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--client", choices=("cursor", "codex", "grok", "opencode", "dsh", "claude"))
+    parser.add_argument("--capture", type=Path, help="fechar_release in Claude Code: immutable birth capture of the claude/execucao pair (default: the local selection)")
     args = parser.parse_args(argv)
+    parent_capture = None
+    if args.capture is not None:
+        from model_selection import SelectionError, load_capture
+
+        try:
+            parent_capture = load_capture(args.capture)
+        except (OSError, ValueError, SelectionError) as exc:
+            json.dump(_payload(result="reject", state=None, to=None, reason="claude_evidence:parent_model", message=f"capture unreadable: {exc}"), sys.stdout, ensure_ascii=True)
+            sys.stdout.write("\n")
+            return 1
     payload = process_event(
         args.event,
         card=args.card,
         change=args.change,
         dry_run=args.dry_run,
         client=args.client,
+        parent_capture=parent_capture,
         mover=None if args.dry_run else GhBoardMover(),
         checks_green_measurer=measure_checks_green,
         checks_green_classifier=classify_qa_gate,

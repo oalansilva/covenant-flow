@@ -586,18 +586,27 @@ def test_cursor_impeccable_resolves_from_workspace_and_cursor_dir_through_the_sh
     # consumer from the event's cwd and runs the pinned wrapper with the consumer root as cwd.
     registered_account(monkeypatch, tmp_path / "operator", ["cursor"])
     root = make_consumer(tmp_path / "consumer-1101")
+    # The real wrapper is fail-open: if the shim never reached it the test would still pass. A logging stub at the same
+    # pinned path proves it ran, with which argument and from which directory, and that nothing was said on stderr (R22).
     wrapper = root / ".cursor" / "hooks" / "impeccable.sh"
-    shutil.copyfile(REPO / ".cursor" / "hooks" / "impeccable.sh", wrapper)
+    wrapper.write_text('#!/usr/bin/env bash\nprintf \'%s cwd=%s\\n\' "$*" "$(pwd)" >> "${CF_TEST_LOG:?}"\n')
     wrapper.chmod(0o755)
     adapter_manifest.write(root, "v1.2.0")  # the pin writes the manifest after the files are in place
     trust_all(root, ["cursor"])
     hooks = registered_document("cursor")["hooks"]
     events = [shim_call(hooks["afterFileEdit"][0]["command"])[1], shim_call(hooks["stop"][0]["command"])[1]]
+    log = tmp_path / "impeccable.log"
+    expected = {"impeccable-after-file-edit": "afterFileEdit", "impeccable-stop": "stop"}
     for event in events:
         for cwd in (root, root / ".cursor", root / ".cursor" / "hooks"):
-            result = shim_command("cursor", event, {"conversation_id": "c1", "cwd": str(cwd), "file_path": "frontend/src/x.tsx"})
+            result = shim_command("cursor", event, {"conversation_id": "c1", "cwd": str(cwd), "file_path": "frontend/src/x.tsx"}, log=log)
             assert result.returncode == 0, (event, cwd, result.stderr)
+            assert result.stderr == "", (event, cwd, result.stderr)
             assert "deny" not in result.stdout and "hooks_unreviewed" not in result.stdout, (event, cwd, result.stdout)
+    lines = log.read_text().splitlines()
+    assert len(lines) == 6, lines  # the wrapper really ran, once per event and directory
+    assert sorted(line.split(" cwd=")[0] for line in lines) == sorted([expected[e] for e in events for _ in range(3)])
+    assert {line.split(" cwd=")[1] for line in lines} == {str(root.resolve())}  # always from the consumer root
 
 
 def test_impeccable_wrappers_stay_fail_open():

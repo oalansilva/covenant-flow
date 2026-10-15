@@ -240,11 +240,29 @@ def read_heartbeat(session_id: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) and value.get("version") == 1 else None
 
 
-def shim_verified() -> str | None:
-    """Digest the account shim just verified for this very run, or None when not running under the shim."""
+def shim_verified(root: Path | None = None, scripts_dir: Path = HERE) -> str | None:
+    """Adapter digest the account shim verified for this run, proven against the account trust record (R15).
 
-    digest = os.environ.get("CF_SHIM_ADAPTER_DIGEST")
-    return digest if os.environ.get("CF_SHIM_ACTIVE") == "1" and digest else None
+    `CF_SHIM_ACTIVE` and `CF_SHIM_ADAPTER_DIGEST` are only a claim: any process can set them. The claim counts only when
+    the digest equals the one computed now from the pinned worktree and both the registration and that adapter digest
+    are in the operator's trust record. Otherwise None, as if the adapter were not running under the shim.
+    """
+
+    claimed = os.environ.get("CF_SHIM_ADAPTER_DIGEST")
+    if os.environ.get("CF_SHIM_ACTIVE") != "1" or not claimed:
+        return None
+    repo = Path(root) if root is not None else project_root(scripts_dir)
+    try:
+        state = cf_shim.status("claude", repo)
+    except (OSError, ValueError):
+        return None
+    adapter = state.get("adapter") or {}
+    verified = bool(
+        state["shim_installed"] and state["registered"] and state["registration"]["reviewed"]
+        and adapter.get("manifest") and adapter.get("reviewed") and not adapter.get("missing") and not adapter.get("divergent")
+        and adapter.get("digest") == claimed
+    )
+    return claimed if verified else None
 
 
 def account_pin(root: Path | None = None, scripts_dir: Path = HERE) -> bool:
@@ -262,10 +280,10 @@ def account_pin(root: Path | None = None, scripts_dir: Path = HERE) -> bool:
 def status(root: Path | None = None, scripts_dir: Path = HERE) -> dict[str, Any]:
     """Review state of the hooks in use. The shim already verified the adapter when it ran this process."""
 
-    verified = shim_verified()
+    repo = Path(root) if root is not None else project_root(scripts_dir)
+    verified = shim_verified(repo, scripts_dir)
     if verified is not None:
         return {"reviewed": True, "digest": verified, "reason": "", "via": "account-shim"}
-    repo = Path(root) if root is not None else project_root(scripts_dir)
     if account_pin(repo):
         state = cf_shim.status("claude", repo)
         adapter = state.get("adapter") or {}

@@ -15,7 +15,8 @@ manifest runs the adapter. Standard library only: it runs before any consumer co
 
 Trust is the operator's explicit act (`cf_shim.py trust --record`), in two parts: `registration`
 (the Covenant Flow entries of the host's account config plus the shim files) and `adapter` (every
-file of the pinned manifest). Installing or pinning never records trust.
+file of the pinned manifest plus the `entrypoints`/`modules` it runs). Installing or pinning never
+records trust, and recording needs a terminal, a typed confirmation and no agent session behind it.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-SHIM_VERSION = "1.0.0"
+SHIM_VERSION = "1.1.0"
 SHIM_PROTOCOL = 1
 SUPPORTED_PROTOCOLS = (1,)
 CLIENTS = ("claude", "cursor", "codex", "opencode")
@@ -51,6 +52,7 @@ HOOK_TIMEOUT = 28
 PIN_PATTERN = re.compile(r"^pin:\s*[\"']?([^\s\"'#]+)", re.MULTILINE)
 SESSION_ID = re.compile(r"[A-Za-z0-9_.:-]{8,128}\Z")
 UNAVAILABLE = "unavailable"
+MAX_NESTING = 8
 
 RECOVERY = {
     "shim_incompatible": "update the account shim with `install.sh --account` from the same covenant-flow checkout, then start a new session",
@@ -181,21 +183,48 @@ def load_manifest(root: Path) -> dict[str, Any] | None:
     return document
 
 
+def is_cache_file(relative: str) -> bool:
+    """Only `__pycache__/` and the `.pyc` inside it are cache (R5). A loose `.pyc` can be imported, so it belongs to A."""
+
+    parts = relative.split("/")
+    return "__pycache__" in parts[:-1] and parts[-1].endswith(".pyc")
+
+
 def enumerate_tree(root: Path, tree: Mapping[str, Any]) -> list[str]:
-    """Repo-relative POSIX paths of one declared tree, minus its exclusions."""
+    """Repo-relative POSIX paths of one declared tree, minus its exclusions.
+
+    A directory symlink is followed and its target listed under the link path (R4): a module reached through it can
+    be imported, so its bytes belong to the digest. A link whose target leaves the repository, or that loops back
+    into a directory already being walked, raises `ManifestError`: the pin fails and the shim refuses visibly.
+    """
 
     base = root / str(tree["path"])
     excludes = [str(item) for item in tree.get("exclude", [])]
     found: list[str] = []
     if not base.is_dir():
         return found
-    for current, directories, names in os.walk(base):
-        directories[:] = sorted(d for d in directories if d not in {"__pycache__", "node_modules", ".git"})
-        for name in sorted(names):
-            relative = (Path(current) / name).relative_to(root).as_posix()
-            if name.endswith((".pyc", ".pyo")) or any(fnmatch.fnmatch(relative, pattern) for pattern in excludes):
+    real_root = root.resolve()
+
+    def walk(directory: Path, chain: tuple[Path, ...]) -> None:
+        real = directory.resolve()
+        if real in chain:
+            raise ManifestError(f"directory symlink loop at {directory.relative_to(root).as_posix()}")
+        chain = (*chain, real)
+        for entry in sorted(os.scandir(directory), key=lambda item: item.name):
+            path = directory / entry.name
+            relative = path.relative_to(root).as_posix()
+            if entry.is_dir():  # follows symlinks
+                if entry.is_symlink():
+                    target = path.resolve()
+                    if target != real_root and real_root not in target.parents:
+                        raise ManifestError(f"{relative}: directory symlink leaves the repository ({target})")
+                walk(path, chain)
+                continue
+            if is_cache_file(relative) or any(fnmatch.fnmatch(relative, pattern) for pattern in excludes):
                 continue
             found.append(relative)
+
+    walk(base, ())
     return found
 
 
@@ -208,6 +237,13 @@ def hash_files(root: Path, files: list[str]) -> dict[str, str | None]:
         except OSError:
             actual[relative] = None
     return actual
+
+
+def adapter_digest(entry: Mapping[str, Any], actual: Mapping[str, str | None]) -> str:
+    """A: the bytes of every listed file plus what the manifest says is executed (`entrypoints`/`modules`, R3)."""
+
+    run = {"entrypoints": entry.get("entrypoints"), "modules": entry.get("modules")}
+    return sha256_bytes(canonical({"files": dict(actual), "run": run}))
 
 
 @dataclass
@@ -231,7 +267,7 @@ def adapter_state(root: Path, entry: Mapping[str, Any]) -> AdapterState:
         for extra in enumerate_tree(root, tree):
             if extra not in pinned:
                 state.divergent.append(f"{extra} (not in manifest)")
-    state.digest = sha256_bytes(canonical({p: actual[p] for p in listed}))
+    state.digest = adapter_digest(entry, {p: actual[p] for p in listed})
     return state
 
 
@@ -369,6 +405,16 @@ def _installed_version() -> str:
     return found.group(1) if found else UNAVAILABLE
 
 
+def _adapter_state_or_none(root: Path | None, client: str) -> AdapterState | None:
+    try:
+        manifest, entry = consumer_manifest_entry(root, client)
+        if manifest is not None and entry is not None and isinstance(entry.get("files"), dict):
+            return adapter_state(root, entry)  # type: ignore[arg-type]
+    except (ManifestError, OSError):
+        pass
+    return None
+
+
 def record(client: str, root: Path | None) -> list[dict[str, Any]]:
     """Operator act: remember the digests just reviewed, registration and (with a pinned consumer) adapter."""
 
@@ -426,13 +472,47 @@ def host_version(client: str, payload: Mapping[str, Any], environ: Mapping[str, 
     return UNAVAILABLE
 
 
+def touched_roots(known: Any, root: Path | None) -> list[dict[str, str]]:
+    """Consumer roots a session has worked in, each with the pin it carried when first touched (R16)."""
+
+    roots = [dict(item) for item in known if isinstance(item, dict) and item.get("root")] if isinstance(known, list) else []
+    if root is not None and str(root) not in {item["root"] for item in roots}:
+        roots.append({"root": str(root), "pin": pin_of(root) or UNAVAILABLE})
+    return roots
+
+
+def mixed_pins(roots: Any) -> dict[str, str]:
+    """root -> pin for the touched roots, only when more than one distinct pin is involved."""
+
+    found = {str(item["root"]): str(item.get("pin")) for item in roots if isinstance(item, dict) and item.get("root") and item.get("pin") not in (None, UNAVAILABLE)} if isinstance(roots, list) else {}
+    return found if len(set(found.values())) > 1 else {}
+
+
+def session_source(payload: Mapping[str, Any]) -> str:
+    """SessionStart `source` (`startup`, `resume`, `clear`, `compact`); a host that sends none starts a new session."""
+
+    return (_text(payload.get("source")) or "startup").lower()
+
+
+def ssh_session(environ: Mapping[str, str]) -> bool:
+    """True when the host was started by the desktop app's SSH daemon (`CLAUDE_SSH_DAEMON_CHILD`); a plain SSH login is not it."""
+
+    return bool(environ.get("CLAUDE_SSH_DAEMON_CHILD"))
+
+
 def write_heartbeat(client: str, payload: Mapping[str, Any], cwd: str, root: Path | None, environ: Mapping[str, str]) -> None:
-    """SessionStart in any folder: a private record, never output. It anchors the registration the host loaded."""
+    """SessionStart in any folder: a private record, never output. It anchors the registration the host loaded.
+
+    Only `startup` anchors the registration digest. `compact`, `clear` and `resume` keep the recorded one, so a
+    registration that changed after the session started still ends in `hooks_changed` (R8). The surface (`entrypoint`),
+    the host version and, for the desktop app, its version and the SSH mark are recorded for the receipt, the evidence,
+    the proxy and the handoff (design 1).
+    """
 
     session = session_of(client, payload)
     if session is None:
         return
-    _private_write(heartbeat_path(client, session), {
+    beat: dict[str, Any] = {
         "version": 2, "client": client, "session_id": session,
         "transcript_path": _text(payload.get("transcript_path")) or UNAVAILABLE,
         "cwd": cwd, "last_root": str(root) if root else None,
@@ -440,7 +520,16 @@ def write_heartbeat(client: str, payload: Mapping[str, Any], cwd: str, root: Pat
         "entrypoint": environ.get("CLAUDE_CODE_ENTRYPOINT") or UNAVAILABLE if client == "claude" else UNAVAILABLE,
         "registration_digest": registration_digest(client) or UNAVAILABLE,
         "recorded_at": _now(), "updated_at": _now(),
-    })
+        "roots": touched_roots(None, root),
+    }
+    if client == "claude":
+        beat.update(desktop_app_version=environ.get("CLAUDE_CODE_DESKTOP_APP_VERSION") or UNAVAILABLE, ssh=ssh_session(environ))
+    previous = read_heartbeat(client, session)
+    if previous is not None and session_source(payload) != "startup":
+        beat.update(registration_digest=previous.get("registration_digest", beat["registration_digest"]),
+                    recorded_at=previous.get("recorded_at", beat["recorded_at"]),
+                    roots=touched_roots(previous.get("roots"), root))
+    _private_write(heartbeat_path(client, session), beat)
 
 
 def refresh_heartbeat(client: str, payload: Mapping[str, Any], cwd: str, root: Path | None) -> bool:
@@ -452,9 +541,10 @@ def refresh_heartbeat(client: str, payload: Mapping[str, Any], cwd: str, root: P
         return False
     transcript = _text(payload.get("transcript_path")) or beat.get("transcript_path")
     last_root = str(root) if root else beat.get("last_root")
-    if beat.get("transcript_path") == transcript and beat.get("cwd") == cwd and beat.get("last_root") == last_root:
+    roots = touched_roots(beat.get("roots"), root)
+    if beat.get("transcript_path") == transcript and beat.get("cwd") == cwd and beat.get("last_root") == last_root and beat.get("roots") == roots:
         return False
-    beat.update(transcript_path=transcript, cwd=cwd, last_root=last_root, updated_at=_now())
+    beat.update(transcript_path=transcript, cwd=cwd, last_root=last_root, roots=roots, updated_at=_now())
     _private_write(heartbeat_path(client, session or ""), beat)
     return True
 
@@ -488,13 +578,33 @@ def event_cwd(payload: Mapping[str, Any]) -> list[str]:
     return [os.getcwd()]
 
 
+def consumer_root_of(candidate: str | Path) -> Path | None:
+    """The Git top-level of `candidate` that carries an overlay, climbing out of nested repositories without one (R11).
+
+    A nested repository (a scratch clone, a submodule checkout) inside a pinned consumer has its own top-level and no
+    overlay; the consumer around it still governs the session. The climb stops at the first overlay found, at the
+    filesystem root, or at the first parent that is not in any repository.
+    """
+
+    top = git_toplevel(candidate)
+    for _ in range(MAX_NESTING):
+        if top is None:
+            return None
+        if (top / OVERLAY).is_file():
+            return top
+        if top.parent == top:
+            return None
+        top = git_toplevel(top.parent)
+    return None
+
+
 def discover(candidates: list[str]) -> tuple[Path | None, bool]:
     """(consumer root, ambiguous). A consumer is a Git top-level that carries an overlay."""
 
     consumers = []
     for candidate in candidates:
-        top = git_toplevel(candidate)
-        if top is not None and (top / OVERLAY).is_file() and top not in consumers:
+        top = consumer_root_of(candidate)
+        if top is not None and top not in consumers:
             consumers.append(top)
     if len(consumers) > 1:
         return None, True
@@ -577,10 +687,29 @@ def _emit(value: Mapping[str, Any]) -> None:
     sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
-def _foreign_cursor_call(client: str, environ: Mapping[str, str]) -> bool:
-    """Cursor also loads `~/.claude/settings.json`: the claude entry must stay quiet there."""
+CURSOR_ENVIRONMENT = ("CURSOR_VERSION", "CURSOR_PROJECT_DIR")
 
-    return client == "claude" and any(environ.get(name) for name in ("CURSOR_VERSION", "CURSOR_PROJECT_DIR"))
+
+def claude_code_identity(environ: Mapping[str, str]) -> bool:
+    """The process is a Claude Code session of its own (terminal or desktop app), whatever else it inherited."""
+
+    return (
+        environ.get("CLAUDECODE") == "1"
+        or bool(environ.get("CLAUDE_CODE_ENTRYPOINT"))
+        or environ.get("AI_AGENT", "").lower().startswith("claude-code")
+    )
+
+
+def _foreign_cursor_call(client: str, environ: Mapping[str, str]) -> bool:
+    """Cursor also loads `~/.claude/settings.json`: the claude entry must stay quiet there (R9).
+
+    Decided by the registration that called the shim (the client in its argv) and by who is really behind it: only the
+    `claude` registration can be a foreign call, and only when the process carries Cursor's environment and no Claude
+    Code identity. Codex, OpenCode and Cursor itself never are, and a Claude Code session started from a Cursor
+    terminal (it inherits `CURSOR_*`) is not either, so its gate does not go quiet.
+    """
+
+    return client == "claude" and any(environ.get(name) for name in CURSOR_ENVIRONMENT) and not claude_code_identity(environ)
 
 
 def run_adapter(root: Path, entry: Mapping[str, Any], event: str, raw: bytes, decision: Decision, environ: Mapping[str, str]) -> subprocess.CompletedProcess[bytes] | None:
@@ -726,6 +855,57 @@ def opencode_decide(directory: str, tool: str | None = None) -> dict[str, Any]:
 # --------------------------------------------------------------------------- CLI
 
 
+AGENT_PROCESSES = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "opencode": "opencode"}
+CONFIRMATION_WORD = "record"
+
+
+def agent_session(environ: Mapping[str, str] | None = None, proc_root: Path = Path("/proc"), pid: int | None = None) -> str | None:
+    """The account-registered client whose agent session this process belongs to, or None for the operator's own shell (R15).
+
+    Environment first (`CLAUDECODE`, the Claude Code entrypoint, `CODEX_THREAD_ID`, `CURSOR_AGENT`, `OPENCODE`), then the
+    process tree: an ancestor named like an agent is enough, so unsetting a variable does not turn an agent into an operator.
+    """
+
+    env = os.environ if environ is None else environ
+    if claude_code_identity(env):
+        return "claude"
+    if env.get("CODEX_THREAD_ID"):
+        return "codex"
+    if env.get("CURSOR_AGENT"):
+        return "cursor"
+    if env.get("OPENCODE"):
+        return "opencode"
+    current = os.getpid() if pid is None else pid
+    for _ in range(64):
+        try:
+            argv = [a for a in (proc_root / str(current) / "cmdline").read_bytes().decode("utf-8", "replace").split("\0") if a]
+            stat = (proc_root / str(current) / "stat").read_text()
+        except OSError:
+            return None
+        for name in {Path(argument).name for argument in argv[:2]}:
+            if name in AGENT_PROCESSES:
+                return AGENT_PROCESSES[name]
+        try:
+            current = int(stat.rsplit(")", 1)[1].split()[1])
+        except (IndexError, ValueError):
+            return None
+        if current <= 1:
+            return None
+    return None
+
+
+def operator_confirmed(summary: str, stdin: Any = None, stdout: Any = None) -> bool:
+    """Interactive confirmation of the operator: both ends are a terminal and the word is typed back."""
+
+    source = sys.stdin if stdin is None else stdin
+    sink = sys.stdout if stdout is None else stdout
+    if not (source.isatty() and sink.isatty()):
+        return False
+    sink.write(f"{summary}\nYou are about to record these digests as reviewed. Type `{CONFIRMATION_WORD}` to confirm: ")
+    sink.flush()
+    return source.readline().strip() == CONFIRMATION_WORD
+
+
 def _cli_trust(argv: list[str]) -> int:
     clients: list[str] = []
     cwd = Path.cwd()
@@ -753,6 +933,22 @@ def _cli_trust(argv: list[str]) -> int:
     top = git_toplevel(cwd)
     root = top if top is not None and (top / OVERLAY).is_file() else None
     if mode == "record":
+        agent = agent_session()
+        if agent is not None:
+            print(
+                f"cf_shim trust: refused inside a {agent} agent session. Trust is the operator's own act: "
+                "run `python3 ~/.config/covenant-flow/shim/current/cf_shim.py trust --record` in a plain terminal, outside any agent.",
+                file=sys.stderr,
+            )
+            return 2
+        summary = "Review: " + ", ".join(
+            f"{client} registration={(registration_digest(client) or UNAVAILABLE)[:12]}"
+            + (f" adapter={state.digest[:12]}" if (state := _adapter_state_or_none(root, client)) is not None else "")
+            for client in clients
+        )
+        if not operator_confirmed(summary):
+            print("cf_shim trust: needs the operator's interactive confirmation in a terminal; nothing was recorded", file=sys.stderr)
+            return 2
         try:
             recorded = [item for client in clients for item in record(client, root)]
         except (ValueError, OSError) as exc:

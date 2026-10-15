@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from shim_fixtures import record_trust_as_operator
 from test_codex_installer import INSTALL, ROOT, _pin, _target
 
 pytestmark = pytest.mark.skipif(
@@ -141,7 +142,7 @@ def _shim(home: Path, client: str, event: str, payload: dict, cwd: Path) -> subp
     return subprocess.run([sys.executable, str(shim), client, event], input=json.dumps(payload), env=env, cwd=cwd, capture_output=True, text=True, check=False)
 
 
-def test_pinned_consumer_through_the_installed_shim_denies_a_product_write_on_develop(tmp_path: Path):
+def test_pinned_consumer_through_the_installed_shim_denies_a_product_write_on_develop(tmp_path: Path, monkeypatch):
     home = tmp_path / "operator-home"
     (home / ".claude").mkdir(parents=True)
     target, _map = _target(tmp_path / "consumer")
@@ -156,10 +157,9 @@ def test_pinned_consumer_through_the_installed_shim_denies_a_product_write_on_de
     assert json.loads(unreviewed.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "hooks_unreviewed" in unreviewed.stdout  # installing and pinning are not review
 
-    shim = home / ".config" / "covenant-flow" / "shim" / "current" / "cf_shim.py"
-    env = {**os.environ, "HOME": str(home)}
-    recorded = subprocess.run([sys.executable, str(shim), "trust", "--record", "--client", "claude", "--cwd", str(target)], env=env, capture_output=True, text=True)
-    assert recorded.returncode == 0, recorded.stderr
+    # The record is the operator's act (terminal + typed confirmation, refused inside an agent session): the test stands in for those two only.
+    monkeypatch.setenv("HOME", str(home))
+    assert record_trust_as_operator(monkeypatch, "claude", target) == 0
 
     denied = _shim(home, "claude", "pre-tool-use", payload, tmp_path)  # launched outside the repo: the cwd of the event decides
     out = json.loads(denied.stdout)["hookSpecificOutput"]

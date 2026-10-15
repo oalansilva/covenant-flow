@@ -40,7 +40,7 @@ from graphql_quota import (  # noqa: E402
     raise_if_cached_exhausted,
     write_cache,
 )
-from resolve import UNBOUND, resolve  # noqa: E402
+from resolve import UNBOUND, app_folder_note, resolve  # noqa: E402
 from t16 import parse_package_cards  # noqa: E402
 
 REPO_ROOT = ROOT.parents[1]
@@ -245,11 +245,49 @@ def _strip_quotes(token: str) -> str:
     return text
 
 
+def _repo_top(start: Path | str | None) -> Path | None:
+    """Closest directory at or above `start` that holds a `.git` entry (directory or worktree file)."""
+
+    if start is None:
+        return None
+    try:
+        current = Path(start).resolve()
+    except OSError:
+        return None
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _destination_outside_repos(target: str, cwd: Path | None) -> bool:
+    """R33: the redirect destination resolves to an absolute path outside the repository and inside no other one.
+
+    A path under another checkout (for example the integration checkout) keeps being judged by the product globs, so a
+    card worktree still cannot write `backend/` there; a scratchpad, `/tmp` or the home directory is not a product write.
+    Anything not resolvable here (`$VAR`, command substitution) stays undecided and is judged as before.
+    """
+
+    text = _strip_quotes(target)
+    if cwd is None or not text or text.startswith("&") or any(mark in text for mark in ("$", "`", "*", "?")):
+        return False
+    expanded = Path(os.path.expanduser(text))
+    try:
+        absolute = (expanded if expanded.is_absolute() else Path(cwd) / expanded).resolve()
+    except OSError:
+        return False
+    top = _repo_top(cwd)
+    if top is None or absolute == top or top in absolute.parents:
+        return False  # the repository is unknown, or the destination is inside it: judged by the product globs
+    return _repo_top(absolute.parent) is None
+
+
 def _is_allowlisted_sink(target: str, cwd: Path | None = None) -> bool:
     """Card #625: /dev/null and /tmp sinks outside the worktree are not product writes.
 
     Paths under the envelope cwd still count as product even when pytest uses /tmp
-    for the fixture repo (absolute tee into the worktree must remain deny).
+    for the fixture repo (absolute tee into the worktree must remain deny). Any other destination that resolves
+    outside every repository (scratchpad, home) is a sink too (R33).
     """
     text = _strip_quotes(target)
     if text == "/dev/null":
@@ -262,7 +300,36 @@ def _is_allowlisted_sink(target: str, cwd: Path | None = None) -> bool:
         except ValueError:
             return True
         return False
-    return False
+    return _destination_outside_repos(text, cwd)
+
+
+HEREDOC_MARKER = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# A heredoc fed to one of these is executed, not stored: its body is code and keeps being scanned.
+HEREDOC_EXECUTORS = re.compile(
+    r"(?:^|[\s;&|(])(?:bash|sh|zsh|dash|ksh|csh|fish|python[0-9.]*|node|nodejs|deno|bun|perl|ruby|php|lua|eval|source|ssh|sudo|su|xargs)\b"
+)
+
+
+def strip_heredoc_bodies(command: str) -> str:
+    """Remove the body of every heredoc that only stores text, so `>`/`>>` inside it is text, not a redirection (R33)."""
+
+    lines = command.split("\n")
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        out.append(line)
+        index += 1
+        markers = HEREDOC_MARKER.findall(line)
+        if not markers or HEREDOC_EXECUTORS.search(line):  # `cat <<EOF | bash` executes its body too
+            continue
+        for dash, _quote, delimiter in markers:
+            while index < len(lines):
+                body_line = lines[index]
+                index += 1
+                if (body_line.lstrip("\t") if dash else body_line) == delimiter:
+                    break
+    return "\n".join(out)
 
 
 def _redirect_file_targets(command: str) -> list[str]:
@@ -281,6 +348,7 @@ def _redirect_file_targets(command: str) -> list[str]:
 def _path_from_command(
     command: str, cwd: Path | None = None, overlay: Mapping[str, Any] | None = None
 ) -> str | None:
+    command = strip_heredoc_bodies(command)
     if not MUTATION_RE.search(command):
         return None
 
@@ -744,7 +812,25 @@ def _empty_path_deny() -> dict[str, str]:
     return emit("deny", message)
 
 
-def decide(
+def decide(payload: Mapping[str, Any], **kwargs: Any) -> dict[str, str]:
+    """Guard decision; a deny in a folder the desktop app created also says so and how to leave it (design 3).
+
+    The binding is unchanged: the app's branch is not `card-<id>-*`, so the folder is already "no card" and the deny is
+    the existing `fail_closed`/`unbound`. Only the message is new.
+    """
+
+    result = _decide_core(payload, **kwargs)
+    if result.get("permission") == "deny" and f"bound_card={UNBOUND}" in str(result.get("reason")):
+        cwd = normalize(payload).get("cwd")
+        note = app_folder_note(str(cwd), UNBOUND) if cwd else None
+        if note:
+            result = dict(result)
+            for key in ("reason", "agent_message", "user_message"):
+                result[key] = f"{result.get(key, '')} {note}".strip()
+    return result
+
+
+def _decide_core(
     payload: Mapping[str, Any],
     *,
     fsm: dict[str, Any] | None = None,

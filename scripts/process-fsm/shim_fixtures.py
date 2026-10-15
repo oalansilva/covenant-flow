@@ -105,7 +105,9 @@ def isolate_account(monkeypatch, tmp_path: Path) -> Path:
     home = tmp_path / "account-home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
-    for name in ("CURSOR_VERSION", "CURSOR_PROJECT_DIR", "CF_SHIM_ACTIVE", "CF_SHIM_ADAPTER_DIGEST", "CF_SHIM_REGISTRATION_DIGEST"):
+    for name in ("CURSOR_VERSION", "CURSOR_PROJECT_DIR", "CURSOR_AGENT", "CF_SHIM_ACTIVE", "CF_SHIM_ADAPTER_DIGEST", "CF_SHIM_REGISTRATION_DIGEST",
+                 "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_DESKTOP_APP_VERSION", "CLAUDE_SSH_DAEMON_CHILD",
+                 "AI_AGENT", "CODEX_THREAD_ID", "OPENCODE", "COVENANT_CLIENT"):
         monkeypatch.delenv(name, raising=False)
     return home
 
@@ -134,6 +136,18 @@ def shim_command(client: str, event: str, payload: dict | str, *, env: dict | No
 def last_json(result: subprocess.CompletedProcess) -> dict | None:
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     return json.loads(lines[-1]) if lines else None
+
+
+def record_trust_as_operator(monkeypatch, client: str, cwd: Path) -> int:
+    """`cf_shim.py trust --record` as the operator's own act: no agent session behind it and the confirmation typed.
+
+    The real command needs a terminal and refuses inside an agent session, so a test that must go through the CLI
+    stands in for exactly those two checks and nothing else.
+    """
+
+    monkeypatch.setattr(cf_shim, "agent_session", lambda *a, **k: None)
+    monkeypatch.setattr(cf_shim, "operator_confirmed", lambda *a, **k: True)
+    return cf_shim.main(["trust", "--record", "--client", client, "--cwd", str(cwd)])
 
 
 def registered_account(monkeypatch, tmp_path: Path, hosts: Iterable[str] = ALL_HOSTS) -> Path:

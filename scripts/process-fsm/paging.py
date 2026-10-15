@@ -16,7 +16,7 @@ from fsm import enabled_events, load_fsm  # noqa: E402
 from graphql_quota import GraphQLQuotaError  # noqa: E402
 from guard import github_status_provider  # noqa: E402
 from overlay import try_load_overlay  # noqa: E402
-from resolve import UNBOUND, resolve  # noqa: E402
+from resolve import UNBOUND, app_folder_note, resolve  # noqa: E402
 
 UNBOUND_PAGE = (
     "bound_card=⊥. Write produto deny. Playbook de release não é always-on. "
@@ -65,7 +65,12 @@ CLAUDE_CLIENT_CONTEXT = (
     "ausente ou não revisado não é proteção. Status avança só por `process_event --client claude`. "
     "Se o card do pedido ou do título da sessão (`#<id>`) difere do `bound_card`, entre sozinho no "
     "worktree `card-<id>-*` com `EnterWorktree` (path; antes `git worktree add`, empilhado se o card "
-    "pedir), sem pedir ao operador para trocar de pasta; `process_event` e filhos só com `bound_card=<id>`."
+    "pedir), sem pedir ao operador para trocar de pasta; `process_event` e filhos só com `bound_card=<id>`. "
+    "Superfícies: terminal (`cli`) e app desktop por SSH (`claude-desktop`); a sessão do app abre em `/source` com a "
+    "opção *worktree* desligada, leva `#<id>` no título e o modo de permissão do app (`auto`) não autoriza processo. "
+    "Filho de etapa nasce só por `Agent` (ferramentas `mcp__ccd_*` de sessão são negadas com card vinculado); cada filho "
+    "tem `description` `<papel> <id> <único>` e, ao terminar, uma linha de handoff com cliente, superfície e "
+    "modelo/esforço observados, tirada do proxy (`claude_proxy.py --handoff`)."
 )
 
 ResolveFn = Callable[..., dict[str, str | None]]
@@ -133,9 +138,11 @@ def page(
         q_display = q
         bound_display = bound
 
+    app_note = app_folder_note(workdir, str(bound) if bound is not None else None) if client == "claude" else None
     lines = [
         "process-fsm page",
         f"q={q_display if q_display is not None else 'None'} bound_card={bound_display} q_git={git}",
+        *([app_note] if app_note else []),
         *([CODEX_CLIENT_CONTEXT] if client == "codex" else []),
         *([CLAUDE_CLIENT_CONTEXT] if client == "claude" else []),
         f"enabled_events: {events}",
