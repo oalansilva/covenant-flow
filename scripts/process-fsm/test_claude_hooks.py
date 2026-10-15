@@ -7,42 +7,69 @@ import pytest
 
 import claude_hooks
 from codex_hooks import HookConfigError
+from shim_fixtures import install_account, registered_account, registered_document, shim_call
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
-SETTINGS = REPO / ".claude/settings.json"
+
+# Since the account-registration pin a consumer carries no `.claude/settings.json` entries of Covenant Flow:
+# the registration is what `install.sh --account` writes to the operator's `~/.claude/settings.json`.
+# These tests run `account_install` in a tmp HOME and read that file.
 
 
-def test_settings_declare_the_required_events_matchers_timeouts_and_blocking_gate():
-    hooks = json.loads(SETTINGS.read_text())["hooks"]
+@pytest.fixture
+def claude_account(monkeypatch, tmp_path):
+    return registered_account(monkeypatch, tmp_path, ["claude"])
+
+
+def test_account_registration_declares_the_required_events_matchers_timeouts_and_blocking_gate(claude_account):
+    hooks = registered_document("claude")["hooks"]
     assert {"SessionStart", "PreToolUse", "PostToolUse", "SubagentStop", "Stop"} <= set(hooks)
     assert hooks["SessionStart"][0]["matcher"] == "startup|resume|clear|compact"
     pre = hooks["PreToolUse"][0]
     assert set(pre["matcher"].split("|")) == {"Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Agent"}
     assert pre["hooks"][0]["onFailure"] == "block"
     post = {g["matcher"]: g for g in hooks["PostToolUse"]}
-    assert set(post) == {"Edit|Write|MultiEdit|NotebookEdit|Bash", "Agent"}
+    # EnterWorktree does not reload settings and fires no SessionStart: the account entry reinjects the card page.
+    assert set(post) == {"Edit|Write|MultiEdit|NotebookEdit|Bash", "Agent", "EnterWorktree"}
     for event, groups in hooks.items():
         for group in groups:
             for handler in group["hooks"]:
                 assert handler["type"] == "command" and isinstance(handler["timeout"], int) and handler["timeout"] > 0
-                assert 'python3 "$CLAUDE_PROJECT_DIR/scripts/process-fsm/claude_adapter.py"' in handler["command"]
+                # one entry calling the account shim: no path of a repository and no project variable
+                assert shim_call(handler["command"])[0] == "claude"
+                assert "CLAUDE_PROJECT_DIR" not in handler["command"] and "claude_adapter.py" not in handler["command"]
     assert "block" not in json.dumps(hooks["SubagentStop"])
 
 
-def test_every_command_names_an_event_the_adapter_dispatches():
+def test_every_registered_command_names_an_event_the_adapter_dispatches(claude_account):
     import claude_adapter
-    for groups in json.loads(SETTINGS.read_text())["hooks"].values():
+    from adapter_manifest import ENTRYPOINTS
+    seen = set()
+    for groups in registered_document("claude")["hooks"].values():
         for group in groups:
             for handler in group["hooks"]:
-                event = handler["command"].rsplit(" ", 1)[1]
+                client, event = shim_call(handler["command"])
                 assert event in {"session-start", "pre-tool-use", "post-tool-use", "subagent-stop", "stop"}
+                # the pinned manifest maps the event to the adapter file the shim runs
+                assert ENTRYPOINTS[client][event] == ["python3", "scripts/process-fsm/claude_adapter.py", event]
+                seen.add(event)
+    assert seen == set(ENTRYPOINTS["claude"])
+    assert (REPO / ENTRYPOINTS["claude"]["pre-tool-use"][1]).is_file()
     assert claude_adapter.dispatch("bogus", {}) == 2
 
 
-def test_repository_hooks_merge_is_current_and_codex_hooks_untouched():
-    assert claude_hooks.install(REPO, REPO, check_only=True) is False
-    assert not (REPO / ".claude/settings.local.json").exists()
+def test_account_registration_is_current_idempotent_and_leaves_other_hosts_and_local_settings_untouched(claude_account):
+    import account_install
+    home = claude_account
+    path = home / ".claude" / "settings.json"
+    planned_path, planned = account_install.plan_host("claude")
+    assert planned_path == path and path.read_bytes() == planned  # current: re-running would change nothing
+    before = path.read_bytes()
+    install_account(["claude"])
+    assert path.read_bytes() == before
+    assert not (home / ".claude" / "settings.local.json").exists()
+    assert not (home / ".codex").exists() and not (home / ".cursor").exists()
 
 
 def source(root: Path) -> Path:

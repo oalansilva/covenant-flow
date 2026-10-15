@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from adapter_manifest import ENTRYPOINTS
 from model_selection_fixtures import machine_models
 from model_selection import resolve, save_capture
 
@@ -17,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 import codex_adapter  # noqa: E402
 from guard import extract_paths, normalize  # noqa: E402
 from paging import page as shared_page  # noqa: E402
+from shim_fixtures import registered_account, registered_document, shim_call  # noqa: E402
 from test_overlay_fixtures import COLUMN_IDS, FIELD_ID, write_overlay  # noqa: E402
 
 
@@ -391,7 +393,8 @@ def test_session_start_with_missing_overlay_is_bound_but_unread_and_fail_closed(
     assert "Pretend" not in context
 
 
-def test_unknown_hosted_tool_fails_closed_if_adapter_is_invoked(tmp_path: Path):
+def test_unknown_hosted_tool_fails_closed_if_adapter_is_invoked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    registered_account(monkeypatch, tmp_path / "operator", ["codex"])
     repo = _repo(tmp_path, "card-1042-codex-adapter")
 
     decision = codex_adapter.pre_tool_use(
@@ -401,7 +404,7 @@ def test_unknown_hosted_tool_fails_closed_if_adapter_is_invoked(tmp_path: Path):
             "cwd": str(repo),
         }
     )
-    hooks = json.loads((ROOT.parents[1] / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+    hooks = registered_document("codex")
     contract = json.loads((ROOT / "fixtures" / "codex-hook-contract.json").read_text(encoding="utf-8"))
 
     assert decision is not None
@@ -415,19 +418,24 @@ def test_unknown_hosted_tool_fails_closed_if_adapter_is_invoked(tmp_path: Path):
     assert "trust review" in hooks["description"]
 
 
-def test_codex_config_has_the_required_events_and_git_root_commands():
-    config_path = ROOT.parents[1] / ".codex" / "hooks.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    hooks = config["hooks"]
+def test_account_registration_has_the_required_events_and_resolves_the_repo_through_the_shim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The pin writes no `.codex/hooks.json` in the consumer: `install.sh --account` registers one shim entry per
+    # event in the operator's `~/.codex/hooks.json`, and the shim (not a `git rev-parse` in the command) finds the repo.
+    registered_account(monkeypatch, tmp_path / "operator", ["codex"])
+    hooks = registered_document("codex")["hooks"]
 
-    assert {"SessionStart", "PreToolUse", "PostToolUse", "Stop"} <= set(hooks)
+    assert {"SessionStart", "PreToolUse", "PostToolUse", "Stop"} == set(hooks)
     pre = hooks["PreToolUse"][0]
     assert "Bash" in pre["matcher"] and "apply_patch" in pre["matcher"] and "Agent" in pre["matcher"]
-    for event in ("SessionStart", "PreToolUse", "PostToolUse", "Stop"):
-        command = hooks[event][0]["hooks"][0]["command"]
-        assert "git rev-parse --show-toplevel" in command
-        assert "scripts/process-fsm/codex_adapter.py" in command
-        assert hooks[event][0]["hooks"][0]["timeout"] == 30
+    for event, shim_event in (("SessionStart", "session-start"), ("PreToolUse", "pre-tool-use"), ("PostToolUse", "post-tool-use"), ("Stop", "stop")):
+        handler = hooks[event][0]["hooks"][0]
+        assert shim_call(handler["command"]) == ("codex", shim_event)
+        assert "git rev-parse" not in handler["command"] and "codex_adapter.py" not in handler["command"]
+        assert ENTRYPOINTS["codex"][shim_event] == ["python3", "scripts/process-fsm/codex_adapter.py", shim_event]
+        assert handler["timeout"] == 30
+    assert (ROOT.parents[1] / ENTRYPOINTS["codex"]["pre-tool-use"][1]).is_file()
 
 
 def test_post_and_stop_forward_codex_events_to_existing_impeccable_hook(

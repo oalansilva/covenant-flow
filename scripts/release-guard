@@ -347,6 +347,45 @@ closeout_allowlist_path() {
   esac
 }
 
+package_card_referenced_on_main() {
+  # 0 = at least one origin/main commit references #<id> as a word; 1 = missing
+  local id="$1" line
+  [[ -n "$id" ]] || return 1
+  if ! git rev-parse --verify -q origin/main >/dev/null; then
+    return 1
+  fi
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if grep -qE "(^|[^#0-9])#${id}([^0-9]|$)" <<< "$line"; then
+      return 0
+    fi
+  done < <(git log origin/main --format='%s%n%b' 2>/dev/null)
+  return 1
+}
+
+release_frontend_preflight_compile() {
+  # Read-only compile gate for release-* code PRs (no tracked frontend/dist writes).
+  local repo_root="${repo_root:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  if [[ ! -f "$repo_root/frontend/package.json" ]]; then
+    printf 'Skipped (no frontend/package.json in repo).\n'
+    return 0
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    issue "release pre frontend compile requires npm on PATH"
+    return 0
+  fi
+  printf 'Running frontend typecheck (tsc -b --noEmit; no dist write)...\n'
+  if ! npm --prefix "$repo_root/frontend" ci --ignore-scripts >/dev/null 2>&1; then
+    issue "release pre frontend npm ci failed; fix dependencies before gh pr create"
+    return 0
+  fi
+  if ! (cd "$repo_root/frontend" && npm exec -- tsc -b --pretty false --noEmit) >/dev/null 2>&1; then
+    issue "release pre frontend compile failed (missing module or type error); do not run gh pr create until fixed"
+  else
+    printf 'Frontend preflight compile passed.\n'
+  fi
+}
+
 unpublished_is_code_pr() {
   # 0 = code PR, 1 = documental or unknown (fail-closed documental)
   local from="origin/main" to unpublished line
@@ -383,6 +422,31 @@ evidence_abbreviation_in_doc() {
     fi
   done < <(grep -oE '\b[0-9a-fA-F]{7,40}\b' "$doc" 2>/dev/null | tr 'A-F' 'a-f')
   return 1
+}
+
+validate_prod_deploy_evidence_window() {
+  [[ -z "$prod_evidence" ]] && return 0
+  [[ ! -f "$overlay_file" ]] && return 0
+  local line msg
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    case "$line" in
+      BLOCKER:*)
+        msg="${line#BLOCKER: }"
+        issue "$msg"
+        ;;
+      WARN:*)
+        msg="${line#WARN: }"
+        warn "$msg"
+        ;;
+    esac
+  done < <(
+    python3 "${repo_root}/scripts/release_guard_prod_evidence.py" \
+      --repo-root "$repo_root" \
+      --overlay-file "$overlay_file" \
+      --evidence "$prod_evidence" \
+      --strict "$strict"
+  )
 }
 
 validate_prod_evidence_this_lote() {
@@ -490,16 +554,19 @@ if [[ "$mode" == "post" ]] &&
 
   if [[ "$develop_commit" == "$main_commit" ]]; then
     printf 'Post-release refs aligned: origin/develop and origin/main reference the same commit.\n'
-  elif ! git merge-base --is-ancestor origin/develop origin/main >/dev/null 2>&1; then
-    issue "post-release requires origin/develop to equal or be an ancestor of origin/main"
-  else
-    develop_tree="$(git rev-parse 'origin/develop^{tree}')"
-    main_tree="$(git rev-parse 'origin/main^{tree}')"
-    if [[ "$develop_tree" == "$main_tree" ]]; then
-      printf 'Post-release refs aligned: origin/develop is an ancestor of origin/main with identical trees.\n'
-    else
-      issue "post-release requires origin/develop and origin/main to have identical content trees"
+  elif git merge-base --is-ancestor origin/main origin/develop >/dev/null 2>&1; then
+    printf 'Post-release refs aligned: origin/main is an ancestor of origin/develop (production contained in develop).\n'
+    if [[ "$develop_commit" != "$main_commit" ]]; then
+      extra_paths="$(git diff --name-only origin/main..origin/develop 2>/dev/null || true)"
+      if [[ -n "$extra_paths" ]]; then
+        warn "origin/develop has commits or files not in origin/main (expected after Caso A sync); inventory:"
+        printf '%s\n' "$extra_paths" | indent
+      else
+        warn "origin/develop is ahead of origin/main with no file diff (extra commits only)"
+      fi
     fi
+  else
+    issue "post-release requires origin/main to be an ancestor of origin/develop (develop must contain production)"
   fi
 fi
 
@@ -525,6 +592,31 @@ if [[ "$mode" == "pre" || "$mode" == "post" || "$mode" == "audit" ]]; then
   fi
 else
   printf 'Skipped (release cards canonicalization runs in pre/post/audit).\n'
+fi
+
+section "Package cards on origin/main (post)"
+if [[ "$mode" == "post" && -n "$CANONICAL_CARDS" ]]; then
+  if [[ -n "$RELEASE_CARDS_INVALID" || -n "$RELEASE_CARDS_OUT_OF_RANGE" ]]; then
+    printf 'Skipped (RELEASE_CARDS invalid; blocker already emitted).\n'
+  elif ! git rev-parse --verify -q origin/main >/dev/null; then
+    issue "cannot verify package cards on origin/main without origin/main"
+  else
+    missing=""
+    for card_id in $CANONICAL_CARDS; do
+      if package_card_referenced_on_main "$card_id"; then
+        printf 'Package card #%s referenced on origin/main.\n' "$card_id"
+      else
+        missing="${missing} #${card_id}"
+      fi
+    done
+    if [[ -n "$missing" ]]; then
+      issue "RELEASE_CARDS package missing commit on origin/main referencing:${missing}"
+    fi
+  fi
+elif [[ "$mode" == "post" ]]; then
+  printf 'Skipped (set RELEASE_CARDS to enforce per-card origin/main references).\n'
+else
+  printf 'Skipped (package card origin/main check runs in post).\n'
 fi
 
 section "Remote snapshots (post/audit)"
@@ -566,6 +658,13 @@ if [[ "$release_published" -eq 1 ]]; then
   fi
 else
   printf 'PROD deploy evidence not required yet (release not published; checked in pre only after merge, required in post).\n'
+fi
+
+section "PROD deploy evidence publish window"
+if [[ "$release_published" -eq 1 && -n "$prod_evidence" ]]; then
+  validate_prod_deploy_evidence_window
+else
+  printf 'Skipped (overlay publish-window services check runs when release is published and PROD_DEPLOY_EVIDENCE is set).\n'
 fi
 
 section "Worktrees"
@@ -940,6 +1039,27 @@ openspec_terminal_changes_check() {
           warn "$detail"
         fi
         ;;
+      Homologado)
+        # Card #1059: completed Homologado package changes must be archived
+        # before post PASS. In-progress stays informational. Cards outside
+        # RELEASE_CARDS are not archived by this check.
+        if [[ "$progress" == "complete" ]]; then
+          local in_package=0
+          if [[ -n "$CANONICAL_CARDS" ]] && printf ' %s ' " $CANONICAL_CARDS " | grep -q " $card_num "; then
+            in_package=1
+          fi
+          if [[ "$in_package" -eq 1 ]]; then
+            terminal_pending=$((terminal_pending + 1))
+            local homologado_detail
+            homologado_detail="OpenSpec completed change of Homologado package card is still active (sync and archive): $change_name (card #$card_num is Homologado, progress=complete, mapping=$mapping, $package_set)"
+            if [[ "$strict" -eq 1 ]]; then
+              blocker "$homologado_detail"
+            else
+              warn "$homologado_detail"
+            fi
+          fi
+        fi
+        ;;
       "")
         ambiguity_pending=$((ambiguity_pending + 1))
         warn "OpenSpec change mapped to card without status in snapshot: $change_name (card #$card_num, progress=$progress, mapping=$mapping, $package_set)"
@@ -1166,6 +1286,10 @@ if git rev-parse --verify -q origin/develop >/dev/null &&
     if [[ "$mode" == "pre" && "$current_branch" == release-* && "$branch" == "develop" ]]; then
       continue
     fi
+    # Card #759/#927: local main tracks origin/main; branch_merged only tests develop.
+    if [[ "$mode" == "pre" && "$current_branch" == release-* && "$branch" == "main" ]]; then
+      continue
+    fi
 
     if [[ "$branch" == "$current_branch" ]]; then
       continue
@@ -1227,6 +1351,16 @@ validate_release_doc() {
   fi
 }
 if [[ "$mode" == "pre" ]]; then
+  section "Release frontend preflight (pre)"
+  if [[ "$current_branch" == release-* ]] && unpublished_is_code_pr; then
+    release_frontend_preflight_compile
+  else
+    if [[ "$current_branch" == release-* ]]; then
+      printf 'Skipped (documental or allowlist-only diff; no code PR compile gate).\n'
+    else
+      printf 'Skipped (frontend preflight compile runs on release-* with a code PR only).\n'
+    fi
+  fi
   if [[ -f "$canonical_doc" ]]; then
     if unpublished_is_code_pr; then
       warn "canonical release doc already exists for $RELEASE_DATE while unpublished diff still has code; update the same $canonical_doc after this package's deploy (do not reuse previous-lote PROD_DEPLOY_EVIDENCE)"

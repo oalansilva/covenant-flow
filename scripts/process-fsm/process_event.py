@@ -51,12 +51,21 @@ from t14 import (  # noqa: E402
 )
 from t16 import (  # noqa: E402
     LiveT16Closer,
+    LoteMeasurement,
     T16Closer,
     T16Error,
     classify_package,
+    FECHAR_RELEASE_WRONG_GIT_MESSAGE,
     lote_git,
+    wrong_fechar_release_git,
     measure_m_lote,
     parse_package_cards,
+)
+from release_closeout import (  # noqa: E402
+    ContextIdentity,
+    capture_context,
+    format_t16_blockers,
+    refuse_pass_from_other_context,
 )
 
 REPO_ROOT = ROOT.parents[1]
@@ -314,8 +323,21 @@ def _payload(
     return out
 
 
-def _fechar_message(base: str | None) -> str:
+def _fechar_message(
+    base: str | None,
+    *,
+    blockers: list[str] | tuple[str, ...] | None = None,
+    fail_class: str | None = None,
+    extra: str | None = None,
+) -> str:
     text = base or "reject"
+    if fail_class:
+        text = f"{text}; fail_class={fail_class}"
+    blocker_text = format_t16_blockers(blockers or ())
+    if blocker_text:
+        text = f"{text}; blockers: {blocker_text}"
+    if extra:
+        text = f"{text}; {extra}"
     if AMBIENTES not in text:
         text = f"{text}; see {AMBIENTES} and {RELEASE_GUARD}"
     elif RELEASE_GUARD not in text:
@@ -337,7 +359,8 @@ def process_event(
     digest_changed: bool | None = None,
     g_design: bool | None = None,
     m_lote: bool | None = None,
-    m_lote_measurer: Callable[[], bool] | None = None,
+    m_lote_measurer: Callable[..., Any] | None = None,
+    lote_pass_context: ContextIdentity | None = None,
     checks_green: bool | None = None,
     checks_green_measurer: Callable[..., bool] | None = None,
     checks_green_classifier: Callable[..., dict[str, Any]] | None = None,
@@ -428,6 +451,14 @@ def process_event(
         if _unbound(bound):
             return _payload(result="reject", state=q, to=None, reason="unbound")
     else:
+        if wrong_fechar_release_git(git):
+            return _payload(
+                result="reject",
+                state=q,
+                to=None,
+                reason="guard:lote_git",
+                message=_fechar_message(FECHAR_RELEASE_WRONG_GIT_MESSAGE),
+            )
         if _unbound(bound) and not lote_git(git):
             return _payload(result="reject", state=q, to=None, reason="unbound")
         if parsed_package is None or len(parsed_package) == 0:
@@ -460,16 +491,49 @@ def process_event(
         )
     if digest_changed is None:
         digest_changed = measure_digest_changed(resolved_change_dir, resolved_proto, q)
+    lote_report: LoteMeasurement | None = None
+    canonical_package = ",".join(str(n) for n in (parsed_package or []))
+    current_lote_context = capture_context(
+        workdir,
+        package=canonical_package,
+    )
     if event == "fechar_release" and m_lote is None:
         if m_lote_measurer is None:
             m_lote = False
+            lote_report = LoteMeasurement(ok=False, fail_class="measure_absent")
         else:
             try:
-                m_lote = bool(m_lote_measurer())
+                measured = m_lote_measurer(cwd=workdir, package=canonical_package)
             except (OSError, RuntimeError, TypeError, ValueError):
                 m_lote = False
+                lote_report = LoteMeasurement(ok=False, fail_class="measure_failed")
+            else:
+                lote_report = measured if isinstance(measured, LoteMeasurement) else None
+                m_lote = bool(measured)
+                recorded = lote_report.context if lote_report is not None else None
+                mismatch = refuse_pass_from_other_context(recorded, current_lote_context)
+                if mismatch:
+                    m_lote = False
+                    lote_report = LoteMeasurement(
+                        ok=False,
+                        blockers=lote_report.blockers if lote_report else (),
+                        output=lote_report.output if lote_report else "",
+                        fail_class="context_divergence",
+                        context=recorded,
+                    )
     elif m_lote is None:
         m_lote = False
+    if event == "fechar_release" and m_lote:
+        mismatch = refuse_pass_from_other_context(lote_pass_context, current_lote_context)
+        if mismatch:
+            m_lote = False
+            lote_report = LoteMeasurement(
+                ok=False,
+                blockers=(),
+                output=mismatch,
+                fail_class="context_divergence",
+                context=lote_pass_context,
+            )
     classified_reason: str | None = None
     if event == "aceitar_sha":
         rows: list = []
@@ -560,7 +624,15 @@ def process_event(
     enabled = enabled_events(table, eval_state if event == "fechar_release" else q)
     message = None
     if event == "fechar_release":
-        message = _fechar_message(result.reason)
+        extra_ctx = None
+        if lote_report is not None and lote_report.fail_class == "context_divergence":
+            extra_ctx = lote_report.output or "context divergence; re-run post in the T16 context"
+        message = _fechar_message(
+            result.reason,
+            blockers=lote_report.blockers if lote_report is not None else (),
+            fail_class=lote_report.fail_class if lote_report is not None else None,
+            extra=extra_ctx,
+        )
     if result.result != "transition":
         extra = enabled if event in {"request_implement", "pular_coluna", "Agent.aprovar_design"} or result.reason in {
             "illegal_event",

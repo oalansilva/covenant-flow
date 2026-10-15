@@ -62,7 +62,10 @@ CLAUDE_CLIENT_CONTEXT = (
     "mensagem, só com `Read|Grep|Glob`, e `claude_review.py verify-wave` confere a onda. "
     "Proxies: `claude_proxy.py --birth <receipt>`, nunca observação manual. Hooks só valem "
     "depois da revisão de confiança do operador (`claude_adapter.py trust --record`); hook "
-    "ausente ou não revisado não é proteção. Status avança só por `process_event --client claude`."
+    "ausente ou não revisado não é proteção. Status avança só por `process_event --client claude`. "
+    "Se o card do pedido ou do título da sessão (`#<id>`) difere do `bound_card`, entre sozinho no "
+    "worktree `card-<id>-*` com `EnterWorktree` (path; antes `git worktree add`, empilhado se o card "
+    "pedir), sem pedir ao operador para trocar de pasta; `process_event` e filhos só com `bound_card=<id>`."
 )
 
 ResolveFn = Callable[..., dict[str, str | None]]

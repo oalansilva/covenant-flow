@@ -16,6 +16,8 @@ Usage:
            It writes NO hook registration for Claude Code, Cursor, Codex or OpenCode and
            removes only Covenant Flow's entries from their project registration files; the
            Grok Build and dsh registrations are copied as before.
+           scripts/process-fsm/route-landmarks.yaml (the T5 clone-gate catalog) is consumer data:
+           copied as a seed only when absent, never overwritten or deleted.
            Requires a valid filled overlay. Refuses submodule / empty overlay.
 --account  Install the account shim (~/.config/covenant-flow/shim/) and merge one hook
            registration into the global config of each of Claude Code, Cursor, Codex and
@@ -229,10 +231,23 @@ copy_tree "$SOURCE/.dsh/cordis.patch.yml" "$TARGET/.dsh/cordis.patch.yml"
 copy_tree_if_missing "$SOURCE/.agents/skills/impeccable/" "$TARGET/.agents/skills/impeccable/"
 copy_tree_if_missing "$SOURCE/.agents/skills/playwright-cli/" "$TARGET/.agents/skills/playwright-cli/"
 
-copy_tree "$SOURCE/scripts/process-fsm/" "$TARGET/scripts/process-fsm/"
+# route-landmarks.yaml is consumer data (the catalog of the T5 clone gate): the nucleus ships a seed that is
+# copied only when the consumer has none, and the --delete of the tree sync never reaches the consumer's file.
+rsync_process_fsm() {
+  mkdir -p "$TARGET/scripts"
+  rsync -a --delete --exclude='/route-landmarks.yaml' "$SOURCE/scripts/process-fsm/" "$TARGET/scripts/process-fsm/"
+}
+rsync_process_fsm
+if [[ -f "$SOURCE/scripts/process-fsm/route-landmarks.yaml" ]]; then
+  copy_tree_if_missing "$SOURCE/scripts/process-fsm/route-landmarks.yaml" "$TARGET/scripts/process-fsm/route-landmarks.yaml"
+fi
 copy_tree "$SOURCE/scripts/release-guard" "$TARGET/scripts/release-guard"
 if [[ -f "$SOURCE/scripts/post-card-evidence-comment.sh" ]]; then
   copy_tree "$SOURCE/scripts/post-card-evidence-comment.sh" "$TARGET/scripts/post-card-evidence-comment.sh"
+fi
+# release-guard calls this helper beside itself when PROD_DEPLOY_EVIDENCE is set (#968).
+if [[ -f "$SOURCE/scripts/release_guard_prod_evidence.py" ]]; then
+  copy_tree "$SOURCE/scripts/release_guard_prod_evidence.py" "$TARGET/scripts/release_guard_prod_evidence.py"
 fi
 
 python_overlay "$TARGET/scripts/process-fsm/codex_skills.py" install --source "$TARGET" --target "$TARGET"

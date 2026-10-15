@@ -4,8 +4,16 @@ from __future__ import annotations
 
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
+
+from release_closeout import (
+    ContextIdentity,
+    capture_context,
+    parse_post_blockers,
+    pronto_evidence_args,
+)
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
@@ -14,6 +22,18 @@ COMMENT_SCRIPT = REPO_ROOT / "scripts" / "post-card-evidence-comment.sh"
 MAX_CARD = 2147483647
 HOMOLOGADO = "Homologado"
 PRONTO = "Pronto"
+
+
+@dataclass(frozen=True)
+class LoteMeasurement:
+    ok: bool
+    blockers: tuple[str, ...] = ()
+    output: str = ""
+    fail_class: str | None = None
+    context: ContextIdentity | None = None
+
+    def __bool__(self) -> bool:
+        return self.ok
 
 
 class T16Error(RuntimeError):
@@ -74,24 +94,55 @@ def lote_git(q_git: str | None) -> bool:
     return name == "develop" or name.startswith("release-")
 
 
+def wrong_fechar_release_git(q_git: str | None) -> bool:
+    name = str(q_git or "")
+    if name == "main":
+        return True
+    return name.startswith("docs-") or name.startswith("sync-")
+
+
+FECHAR_RELEASE_WRONG_GIT_MESSAGE = (
+    "Switch git to develop or release-* and repeat process_event fechar_release."
+)
+
+
 def measure_m_lote(
     *,
     cwd: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> bool:
+    package: str | None = None,
+) -> LoteMeasurement:
+    work = Path(cwd) if cwd is not None else Path.cwd()
+    package_id = package if package is not None else os.environ.get("RELEASE_CARDS", "")
+    context = capture_context(work, package=package_id)
     script = RELEASE_GUARD
     try:
         proc = runner(
             [str(script), "post"],
-            cwd=str(cwd) if cwd is not None else str(REPO_ROOT),
+            cwd=str(work),
             capture_output=True,
             text=True,
             check=False,
             timeout=180,
         )
-    except (OSError, subprocess.TimeoutExpired, TypeError, ValueError):
-        return False
-    return proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired, TypeError, ValueError) as exc:
+        return LoteMeasurement(
+            ok=False,
+            blockers=(),
+            output=str(exc),
+            fail_class="measure_failed",
+            context=context,
+        )
+    output = (proc.stdout or "") + (proc.stderr or "")
+    blockers = tuple(parse_post_blockers(output))
+    ok = proc.returncode == 0
+    return LoteMeasurement(
+        ok=ok,
+        blockers=blockers,
+        output=output,
+        fail_class=None if ok else "post_failed",
+        context=context,
+    )
 
 
 def classify_package(
@@ -144,24 +195,22 @@ class LiveT16Closer:
     def comment_pronto(self, *, card: str, package: list[int]) -> None:
         if not self.commit:
             self.commit = self._origin_main()
+        package_name = (
+            os.environ.get("RELEASE_PACKAGE") or os.environ.get("RELEASE_DATE") or ""
+        ).strip()
+        branches = os.environ.get("RELEASE_BRANCHES", "").strip()
         deploy = os.environ.get("PROD_DEPLOY_EVIDENCE", "").strip()
         cards = ",".join(str(n) for n in package)
-        args = [
-            "bash",
-            str(self.comment_script),
-            "--transition",
-            "pronto",
-            "--card",
-            str(card),
-            "--commit",
-            self.commit,
-            "--package",
-            "release-guard post",
-            "--cards",
-            cards,
-        ]
-        if deploy:
-            args.extend(["--deploy", deploy])
+        extra, error = pronto_evidence_args(
+            package=package_name,
+            branches=branches,
+            deploy=deploy,
+            cards=cards,
+            commit=self.commit,
+        )
+        if error:
+            raise T16Error(f"comment_pronto: {error}")
+        args = ["bash", str(self.comment_script), "--card", str(card), *extra]
         try:
             proc = self._run(
                 args,

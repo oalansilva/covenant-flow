@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ import adapter_manifest
 import cf_shim
 
 HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
 ALL_HOSTS = list(cf_shim.CLIENTS)
 
 CLAUDE_STUB = '''
@@ -132,3 +134,40 @@ def shim_command(client: str, event: str, payload: dict | str, *, env: dict | No
 def last_json(result: subprocess.CompletedProcess) -> dict | None:
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     return json.loads(lines[-1]) if lines else None
+
+
+def registered_account(monkeypatch, tmp_path: Path, hosts: Iterable[str] = ALL_HOSTS) -> Path:
+    """An empty tmp account with the Covenant Flow registration `install.sh --account` writes for `hosts`.
+
+    HOME points into `tmp_path`, so nothing here can touch the real operator account.
+    """
+
+    home = isolate_account(monkeypatch, tmp_path)
+    install_account(hosts)
+    return home
+
+
+def registered_document(client: str) -> dict:
+    """The host configuration `account_install` generated in the (isolated) account."""
+
+    return json.loads(cf_shim.host_config_path(client).read_text(encoding="utf-8"))
+
+
+def shim_call(command: str) -> tuple[str, str]:
+    """(client, event) a registered hook command passes to the account shim."""
+
+    words = shlex.split(command)
+    assert words[0] == "python3" and words[1].endswith("/covenant-flow/shim/current/cf_shim.py"), command
+    assert len(words) == 4, command
+    return words[2], words[3]
+
+
+def opencode_module(name: str, root: Path = REPO) -> Path:
+    """An OpenCode adapter module as the shim loads it: `.opencode/adapter/` after a pin (the pin moves it out
+    of the host's auto-load path), `.opencode/plugin/` in the nucleus source tree."""
+
+    for folder in ("adapter", "plugin"):
+        path = root / ".opencode" / folder / name
+        if path.is_file():
+            return path
+    raise FileNotFoundError(f"OpenCode adapter module {name} not found under {root / '.opencode'}")

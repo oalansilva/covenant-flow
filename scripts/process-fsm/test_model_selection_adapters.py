@@ -7,6 +7,7 @@ import yaml
 from model_selection_fixtures import machine_models
 from model_selection import resolve, save_capture, validate_spawn, SelectionError
 from model_selection_adapter import pre_tool
+from shim_fixtures import opencode_module
 
 ROOT = Path(__file__).resolve().parents[2]
 LIB = ROOT / "scripts/process-fsm/model_selection_lib.js"
@@ -121,7 +122,7 @@ process.stdout.write(JSON.stringify(applyCapturedDshRequest({{}},cap)));
 def test_opencode_refusal_is_before_task_execution(tmp_path):
     args, _, _=args_for(tmp_path,"opencode")
     result=node(f'''
-import plugin from {json.dumps(str(ROOT / ".opencode/plugin/process-fsm-guard.js"))};
+import plugin from {json.dumps(str(opencode_module("process-fsm-guard.js", ROOT)))};
 const hooks=await plugin({{directory:{json.dumps(str(tmp_path))}}});
 let refusal="";try{{await hooks["tool.execute.before"]({{tool:"task"}},{{args:{json.dumps(args)}}});}}catch(e){{refusal=e.message;}}
 process.stdout.write(JSON.stringify({{refusal}}));
