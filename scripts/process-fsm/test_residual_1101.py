@@ -63,6 +63,30 @@ def test_append_markers_inside_a_heredoc_body_are_text(tmp_path):
     assert "main.py" not in strip_heredoc_bodies('cat <<"EOT"\necho a >> backend/app/main.py\nEOT')
 
 
+def test_here_strings_shifts_and_unterminated_heredocs_never_hide_lines(tmp_path):
+    repo = repo_on(tmp_path, "develop")
+    here_string = 'cat <<< "ok"\ncp /tmp/a backend/app/main.py'
+    assert "cp /tmp/a backend/app/main.py" in strip_heredoc_bodies(here_string)
+    assert extract_path({"command": 'cat <<< "ok"\necho x > backend/app/main.py', "cwd": str(repo)}) == "backend/app/main.py"
+    assert decide(_shell_payload(repo, 'cat <<< "ok"\necho x > backend/app/main.py', status="Em desenvolvimento"), status_provider=SILENT)["permission"] == "deny"
+    for command in (
+        "echo $((1 << n))\necho x > backend/app/main.py",
+        "echo $((1<<n))\necho x > backend/app/main.py",
+        'echo "a << b"\necho x > backend/app/main.py',
+        "echo $((1 << 2))\necho x > backend/app/main.py",
+        "x=$((1 << n))\necho x > backend/app/main.py\nn",
+        "cat << EOF\necho x > backend/app/main.py",  # no terminator
+        "cat <<'EOF'\necho x > backend/app/main.py\nEOFX",  # wrong terminator
+    ):
+        assert "echo x > backend/app/main.py" in strip_heredoc_bodies(command), command
+        assert extract_path({"command": command, "cwd": str(repo)}) == "backend/app/main.py", command
+    # a shift whose operand happens to match a later line still keeps the lines before it
+    assert "main.py" in strip_heredoc_bodies("echo $((1 << n))\necho x > backend/app/main.py\nn")
+    # real heredocs keep working, also next to a here-string
+    assert "main.py" not in strip_heredoc_bodies("cat <<< hi; cat <<EOF\necho a >> backend/app/main.py\nEOF")
+    assert "main.py" not in strip_heredoc_bodies("cat <<'A' <<B\necho a >> backend/app/main.py\nA\necho b >> backend/app/main.py\nB")
+
+
 def test_a_heredoc_fed_to_an_interpreter_is_code_and_keeps_being_judged(tmp_path):
     repo = repo_on(tmp_path, "develop")
     for runner in ("bash", "sh", "python3", "node"):

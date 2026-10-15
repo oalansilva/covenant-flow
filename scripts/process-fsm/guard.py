@@ -303,15 +303,71 @@ def _is_allowlisted_sink(target: str, cwd: Path | None = None) -> bool:
     return _destination_outside_repos(text, cwd)
 
 
-HEREDOC_MARKER = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# `<<` alone: `<<<` (here-string) is not a heredoc, and the delimiter must be a heredoc word (never a number).
+HEREDOC_MARKER = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 # A heredoc fed to one of these is executed, not stored: its body is code and keeps being scanned.
 HEREDOC_EXECUTORS = re.compile(
     r"(?:^|[\s;&|(])(?:bash|sh|zsh|dash|ksh|csh|fish|python[0-9.]*|node|nodejs|deno|bun|perl|ruby|php|lua|eval|source|ssh|sudo|su|xargs)\b"
 )
 
 
+def _literal_spans(line: str) -> list[tuple[int, int]]:
+    """Spans of `line` where `<<` is not a heredoc: inside single/double quotes or arithmetic (`$(( ))`, `(( ))`)."""
+
+    spans: list[tuple[int, int]] = []
+    quote = ""
+    quote_start = 0
+    arith: list[int] = []
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                spans.append((quote_start, i + 1))
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            # a quote glued to `<<` is the delimiter's own quoting (`<<"EOT"`), not a quoted string
+            if line[max(0, i - 2) : i] == "<<" or line[max(0, i - 3) : i] in ("<<-", "<< "):
+                end = line.find(ch, i + 1)
+                i = (end + 1) if end != -1 else len(line)
+                continue
+            quote, quote_start = ch, i
+        elif line.startswith("((", i):
+            arith.append(i)
+            i += 2
+            continue
+        elif arith and line.startswith("))", i):
+            spans.append((arith.pop(), i + 2))
+            i += 2
+            continue
+        i += 1
+    if quote:
+        spans.append((quote_start, len(line)))
+    spans.extend((start, len(line)) for start in arith)
+    return spans
+
+
+def _heredoc_markers(line: str) -> list[tuple[str, str]]:
+    spans = _literal_spans(line)
+    found: list[tuple[str, str]] = []
+    for match in HEREDOC_MARKER.finditer(line):
+        if any(start <= match.start() < end for start, end in spans):
+            continue
+        found.append((match.group(1), match.group(3)))
+    return found
+
+
 def strip_heredoc_bodies(command: str) -> str:
-    """Remove the body of every heredoc that only stores text, so `>`/`>>` inside it is text, not a redirection (R33)."""
+    """Remove the body of every heredoc that only stores text, so `>`/`>>` inside it is text, not a redirection (R33).
+
+    Fail-closed: a marker without a matching delimiter line to the end of the command removes nothing.
+    """
 
     lines = command.split("\n")
     out: list[str] = []
@@ -320,15 +376,18 @@ def strip_heredoc_bodies(command: str) -> str:
         line = lines[index]
         out.append(line)
         index += 1
-        markers = HEREDOC_MARKER.findall(line)
+        markers = _heredoc_markers(line)
         if not markers or HEREDOC_EXECUTORS.search(line):  # `cat <<EOF | bash` executes its body too
             continue
-        for dash, _quote, delimiter in markers:
-            while index < len(lines):
-                body_line = lines[index]
-                index += 1
-                if (body_line.lstrip("\t") if dash else body_line) == delimiter:
+        for dash, delimiter in markers:
+            end = None
+            for probe in range(index, len(lines)):
+                if (lines[probe].lstrip("\t") if dash else lines[probe]) == delimiter:
+                    end = probe
                     break
+            if end is None:
+                continue  # no terminator: keep every line visible to the Guard
+            index = end + 1
     return "\n".join(out)
 
 
