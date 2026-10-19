@@ -12,7 +12,8 @@ from adapter_manifest import ENTRYPOINTS
 from model_selection_fixtures import machine_models
 from model_selection import resolve, save_capture
 
-ROOT = Path(__file__).resolve().parent
+ROOT = next(ancestor / "scripts/process-fsm" for ancestor in Path(__file__).resolve().parents
+            if (ancestor / ".cursor/process-fsm.yaml").is_file())
 sys.path.insert(0, str(ROOT))
 
 import codex_adapter  # noqa: E402
@@ -337,10 +338,13 @@ def test_codex_code_review_session_does_not_route_reviewers_through_cursor(
     assert "Cliente ativo: Codex CLI" in context
     assert "`diff-reviewer` e `code-reviewer`" in context
     assert "Agents nativos do Codex" in context
-    assert "o turno que fará os spawns está `read-only`" in context
+    assert "read-only desde o nascimento" in context
     assert "recuse visivelmente antes de qualquer spawn" in context
     assert "não prova nem altera o sandbox do turno pai" in context
-    assert "`/permissions` → `Read Only`" in context
+    assert "sem alternância manual de permissões" in context
+    assert "`/permissions`" not in context
+    assert "cadeia principal/coordenador/filhos" in context
+    assert "Coordenador novo qualifica contexto opção 2" in context
     assert "`codex exec --sandbox read-only`" in context
     assert "registra proxies via `codex_proxy.py`" in context
     assert "metadados observados de runtime/trace e retorno, nunca inferidos" in context
@@ -479,3 +483,110 @@ def test_post_and_stop_forward_codex_events_to_existing_impeccable_hook(
     )
     stopped = json.loads(calls[1][1]["input"])
     assert stopped["hook_event_name"] == "Stop"
+
+
+def _reason(decision):
+    assert decision is not None
+    return decision["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("field", ["cmd", "command"])
+def test_native_command_variants_with_subdirectory_workdir_use_bound_card(tmp_path, monkeypatch, field):
+    repo = _repo(tmp_path, "card-1098-adapter")
+    (repo / "backend").mkdir()
+    target = repo / "backend" / "probe.txt"
+    target.write_text("before")
+    event = {"tool_name": "exec_command", "cwd": str(repo), "tool_input": {field: "printf after > probe.txt", "workdir": str(repo / "backend")}}
+    monkeypatch.setattr(codex_adapter, "github_status_provider", lambda card: "Em desenvolvimento" if card == "1098" else None)
+    assert codex_adapter.pre_tool_use(event) is None
+    subprocess.run(["bash", "-c", event["tool_input"][field]], cwd=event["tool_input"]["workdir"], check=True)
+    assert target.read_text() == "after"
+
+
+@pytest.mark.parametrize("status", ["Todo", "Design", "Pronto para Dev"])
+def test_all_shell_targets_are_guarded_before_fixture_mutation(tmp_path, monkeypatch, status):
+    repo = _repo(tmp_path, "card-1098-adapter")
+    design = repo / "openspec/changes/card-1098-adapter/design.md"
+    product = repo / "backend/probe.txt"
+    design.parent.mkdir(parents=True)
+    product.parent.mkdir()
+    design.write_text("design before")
+    product.write_text("product before")
+    monkeypatch.setattr(codex_adapter, "github_status_provider", lambda card: status)
+    event = {"tool_name": "exec_command", "cwd": str(repo), "status": "Em desenvolvimento", "tool_input": {"cmd": "printf changed > openspec/changes/card-1098-adapter/design.md; printf changed > backend/probe.txt"}}
+    decision = codex_adapter.pre_tool_use(event)
+    assert "deny" in _reason(decision)
+    # The fixture executes the command only on an allow, just like PreToolUse.
+    if decision is None:
+        subprocess.run(["bash", "-c", event["tool_input"]["cmd"]], cwd=repo, check=True)
+    assert design.read_text() == "design before"
+    assert product.read_text() == "product before"
+
+
+@pytest.mark.parametrize("route", ["workdir", "patch", "redirect", "symlink", "copy_option", "change_card"])
+def test_tool_input_cannot_grant_another_card_or_escape_binding(tmp_path, monkeypatch, route):
+    repo = _repo(tmp_path, "card-1098-adapter")
+    other = _repo(tmp_path, "card-9999-other")
+    target = other / "backend/probe.txt"
+    target.parent.mkdir()
+    target.write_text("unchanged")
+    (repo / "escape").symlink_to(other / "backend", target_is_directory=True)
+    monkeypatch.setattr(codex_adapter, "github_status_provider", lambda card: "Em desenvolvimento")
+    tool, data = "exec_command", {"cmd": f"printf changed > {target}"}
+    if route == "workdir":
+        data = {"cmd": "printf changed > backend/probe.txt", "workdir": str(other)}
+    elif route == "patch":
+        tool, data = "apply_patch", {"command": f"*** Begin Patch\n*** Update File: openspec/changes/card-1098-adapter/design.md\n*** Update File: {target}\n*** End Patch"}
+    elif route == "symlink":
+        data = {"cmd": "printf changed > escape/probe.txt"}
+    elif route == "copy_option":
+        data = {"cmd": f"cp --target-directory={target.parent} tracked.txt"}
+    elif route == "change_card":
+        tool, data = "apply_patch", {"command": "*** Begin Patch\n*** Add File: openspec/changes/card-9999-other/design.md\n*** End Patch"}
+    decision = codex_adapter.pre_tool_use({"tool_name": tool, "cwd": str(repo), "tool_input": data})
+    assert any(reason in _reason(decision) for reason in ("worktree_mismatch", "target_outside_binding", "target_card_mismatch"))
+    assert target.read_text() == "unchanged"
+
+
+def test_source_identity_cannot_be_replaced_by_workdir_and_missing_cwd_is_denied(tmp_path, monkeypatch):
+    source = _repo(tmp_path, "develop")
+    card = _repo(tmp_path, "card-1098-adapter")
+    monkeypatch.setattr(codex_adapter, "github_status_provider", lambda card: "Em desenvolvimento")
+    event = {"tool_name": "exec_command", "cwd": str(source), "tool_input": {"cmd": "printf x > backend/probe.txt", "workdir": str(card)}}
+    assert "worktree_mismatch" in _reason(codex_adapter.pre_tool_use(event))
+    event.pop("cwd")
+    monkeypatch.chdir(card)
+    assert "binding_unavailable" in _reason(codex_adapter.pre_tool_use(event))
+
+
+@pytest.mark.parametrize("command", ["cd backend; printf x > probe.txt", "printf x > $TARGET", "printf x > `pwd`/backend/probe.txt"])
+def test_dynamic_shell_mutation_refuses_unsupported_target_coverage(tmp_path, command):
+    repo = _repo(tmp_path, "card-1098-adapter")
+    event = {"tool_name": "exec_command", "cwd": str(repo), "tool_input": {"cmd": command}}
+    assert "unsupported_targets" in _reason(codex_adapter.pre_tool_use(event))
+
+
+def test_conflicting_native_command_fields_are_not_silently_selected(tmp_path):
+    repo = _repo(tmp_path, "card-1098-adapter")
+    event = {"tool_name": "exec_command", "cwd": str(repo), "tool_input": {"cmd": "true", "command": "false"}}
+    assert "ambiguous_command" in _reason(codex_adapter.pre_tool_use(event))
+
+
+def test_normalization_preserves_original_native_event_and_ignores_injected_status(tmp_path, monkeypatch):
+    repo = _repo(tmp_path, "card-1098-adapter")
+    event = {"tool_name": "exec_command", "cwd": str(repo), "status": "Em desenvolvimento", "tool_input": {"cmd": "printf x > backend/probe.txt", "workdir": str(repo)}}
+    original = json.loads(json.dumps(event))
+    monkeypatch.setattr(codex_adapter, "github_status_provider", lambda card: "Todo")
+    assert "todo-write" in _reason(codex_adapter.pre_tool_use(event))
+    assert event == original
+
+
+def test_hook_context_must_match_authoritative_current_turn(tmp_path, monkeypatch):
+    import codex_evidence
+    repo = _repo(tmp_path, "card-1098-adapter")
+    event = {"tool_name": "exec_command", "cwd": str(repo), "session_id": "same-chat", "tool_input": {"cmd": "printf x > backend/probe.txt"}}
+    monkeypatch.setenv("CODEX_THREAD_ID", "same-chat")
+    monkeypatch.setattr(codex_evidence.Rollout, "session", lambda self, tid: (None, [], {}, [{"cwd": "/historical-source"}]))
+    assert "binding_mismatch" in _reason(codex_adapter.pre_tool_use(event))
+    event["session_id"] = "other-chat"
+    assert "hook session differs" in _reason(codex_adapter.pre_tool_use(event))

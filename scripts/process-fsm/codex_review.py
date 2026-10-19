@@ -14,7 +14,7 @@ from typing import Any
 
 from codex_fs import atomic_write_bytes
 from codex_models import ModelRoutingError, pair_from_capture
-from codex_evidence import EvidenceError, verify_proxy
+from codex_evidence import EvidenceError, verify_proxy, require_review_guarantees, Rollout
 from model_selection import compare_wave, validate_capture
 
 
@@ -284,6 +284,9 @@ def verify_wave(
     if child_ids[0] == child_ids[1]:
         raise ReviewDiffError("diff-reviewer and code-reviewer must be distinct child tasks")
     parents = set()
+    diff_paths = set()
+    principals = set()
+    packages = set()
     for activity in REVIEWERS:
         try:
             proof = verify_proxy(by_activity[activity])
@@ -291,12 +294,61 @@ def verify_wave(
             raise ReviewDiffError(f"{activity} runtime provenance rejected: {exc}") from exc
         if proof["qualification"]:
             raise ReviewDiffError(f"{activity} qualification evidence cannot prove product review")
+        if not proof.get("dedicated_chain"):
+            raise ReviewDiffError(f"{activity} lacks the dedicated principal/coordinator chain")
         if proof["parent_sandbox"] != "read-only":
             raise ReviewDiffError(f"{activity} spawning session was not read-only")
-        parents.add((proof["parent_thread"], proof["birth"]["parent_turn"]))
+        try:
+            require_review_guarantees(proof)
+        except EvidenceError as exc:
+            raise ReviewDiffError(f"{activity} effective review guarantees rejected: {exc}") from exc
+        parents.add((proof["parent_thread"], proof.get("native_parent_turn", proof["birth"]["parent_turn"])))
+        diff_paths.add(proof.get("review_observation", {}).get("diff"))
+        if proof.get("dedicated_chain"):
+            chain = proof["dedicated_chain"]
+            if chain["coordinator_thread"] != proof["parent_thread"]:
+                raise ReviewDiffError("dedicated coordinator binding differs from native parent")
+            principals.add(chain["principal_thread"])
+            packages.add(proof["birth"]["dedicated_package"])
     if len(parents) != 1:
         raise ReviewDiffError("reviewers must be born in the same read-only session and turn")
+    if len(diff_paths) != 1 or None in diff_paths:
+        raise ReviewDiffError("reviewers must consume the same exact diff path")
+    session = next(iter(parents))[0]
+    if principals:
+        if len(principals) != 1 or len(packages) != 1 or any(not verify_proxy(by_activity[a]).get("dedicated_chain") for a in REVIEWERS):
+            raise ReviewDiffError("reviewers must share one dedicated package and principal")
+        from codex_review_session import binding, verify_route, read_package
+        dedicated = read_package(next(iter(packages)))
+        try:
+            binding(next(iter(packages)), complete=True)
+            verify_route(dedicated["bootstrap"])
+        except EvidenceError as exc:
+            raise ReviewDiffError(f"dedicated route rejected: {exc}") from exc
+        session = next(iter(principals))
+    if os.environ.get("CODEX_THREAD_ID") != session:
+        raise ReviewDiffError("review persistence must run in the source-bound writable principal chat")
+    _, _, _, turns = Rollout().session(session)
+    if turns[-1]["sandbox_policy"].get("type") not in {"workspace-write", "danger-full-access"}:
+        raise ReviewDiffError("review persistence requires an observed writable parent after both returns")
     return expected_digest, (child_ids[0], child_ids[1])
+
+
+def verify_latest_wave(*, root):
+    """Post-return preflight uses the latest recorded wave, never current RO."""
+    repo = Path(root).resolve()
+    card = re.match(r"card-(\d+)-", repo.name)
+    if not card:
+        raise ReviewDiffError("bound card unavailable")
+    entries = [json.loads(line) for line in (repo / DEFAULT_PROXY_LOG).read_text().splitlines() if line.strip()]
+    if any(not isinstance(e, dict) for e in entries):
+        raise ReviewDiffError("invalid proxy record: expected object")
+    matching = [e for e in entries if e.get("bound_card") == card[1] and e.get("activity") in REVIEWERS]
+    if not matching:
+        raise ReviewDiffError("no completed native review wave")
+    latest = matching[-1]
+    sha, children = verify_wave(root=repo, wave_id=latest["wave_id"], expected_sha256=latest["review_diff_sha256"], bound_card=card[1])
+    return {"result": "verified", "wave_id": latest["wave_id"], "diff_sha256": sha, "children": list(children)}
 
 
 def main(argv: list[str] | None = None) -> int:
