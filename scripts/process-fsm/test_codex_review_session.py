@@ -164,11 +164,10 @@ class Dedicated:
         if p["phase"] == "review":
             self.authorize(package)
         self.add_turn(self.coordinator, turn, p["coordinator_selection"]["arguments"])
-        if p["phase"] == "review":
-            self.monkeypatch.setenv("CODEX_THREAD_ID", self.coordinator)
-            ready = cs.preflight(package, runtime=self.rt)
-            self.command_event(self.coordinator, turn, cs.command(package, "preflight"), ready)
-            self.monkeypatch.setenv("CODEX_THREAD_ID", self.principal)
+        self.monkeypatch.setenv("CODEX_THREAD_ID", self.coordinator)
+        ready = cs.preflight(package, runtime=self.rt)
+        self.command_event(self.coordinator, turn, cs.command(package, "preflight"), ready)
+        self.monkeypatch.setenv("CODEX_THREAD_ID", self.principal)
         proofs = []
         for n, birth_path in enumerate(p["births"]):
             birth = ce.check_seal(json.loads(Path(birth_path).read_text()))
@@ -201,6 +200,7 @@ class Dedicated:
                     output.pop("diff_text")
                     output.update(rp.delivery(text.encode()))
                     output["read_command_template"] = rp.read_command(birth["review_probe_plan"], 0, runtime=self.rt).rsplit(" ", 1)[0] + " <chunk_index>"
+                    output["next_read_command"] = rp.read_command(birth["review_probe_plan"], 0, runtime=self.rt)
                 if fault == "write-allowed" and n == 0: output["denied_errno"] = None
                 if fault == "wrong-target" and n == 0: output["fixture"] += "-different"
                 if fault != "probe-absent" or n != 0:
@@ -450,7 +450,7 @@ def test_prepared_wave_requires_single_preflight_and_probe_with_bounded_outputs(
     for spawn in p["spawns"]:
         prompt = spawn["message"]
         assert "ONCE ONLY" in prompt and "FIRST command" in prompt
-        assert "NEVER rerun the probe" in prompt and "read_command_template" in prompt
+        assert "NEVER rerun the probe" in prompt and "next_read_command LITERALLY" in prompt
         assert "max_output_tokens=20000" in prompt and "max_output_tokens=32000" in prompt
         assert "no separate codex_review.py verify is required" in prompt
 
@@ -1198,7 +1198,7 @@ def test_shell_custom_tool_text_cannot_substitute_native_spawn_origin(dedicated)
         if row['type']=='response_item' and row['payload'].get('type')=='function_call')
     call.update(type='custom_tool_call', name='exec', input='shell code mentioning spawn_agent is not a native call')
     dedicated.flush(dedicated.coordinator)
-    with pytest.raises(ce.EvidenceError, match='birth_mismatch'):
+    with pytest.raises(ce.EvidenceError, match='review_preflight_order'):
         ce.collect(p['births'][0], wait_seconds=0, runtime=dedicated.rt)
 
 

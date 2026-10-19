@@ -27,7 +27,8 @@ def test_account_registration_declares_the_required_events_matchers_timeouts_and
     assert {"SessionStart", "PreToolUse", "PostToolUse", "SubagentStop", "Stop"} <= set(hooks)
     assert hooks["SessionStart"][0]["matcher"] == "startup|resume|clear|compact"
     pre = hooks["PreToolUse"][0]
-    assert set(pre["matcher"].split("|")) == {"Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Agent"}
+    # anchored regex: the file tools, Bash, Agent and the desktop app's `mcp__ccd_*` session tools (stage children only through Agent)
+    assert pre["matcher"] == "^(Bash|Edit|Write|MultiEdit|NotebookEdit|Agent|mcp__ccd_.*)$"
     assert pre["hooks"][0]["onFailure"] == "block"
     post = {g["matcher"]: g for g in hooks["PostToolUse"]}
     # EnterWorktree does not reload settings and fires no SessionStart: the account entry reinjects the card page.

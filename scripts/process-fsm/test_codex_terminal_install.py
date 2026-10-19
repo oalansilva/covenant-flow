@@ -22,6 +22,13 @@ def test_clean_pin_delivers_terminal_modules_docs_and_manifest_without_trust(tmp
         assert (target / path).read_bytes() == (ROOT / path).read_bytes()
         assert files[path] == hashlib.sha256((target / path).read_bytes()).hexdigest()
     assert (target / 'docs/codex-terminal-flow.md').read_bytes() == (ROOT / 'docs/codex-terminal-flow.md').read_bytes()
+    assert (target / 'docs/claude-runtime-evidence.md').read_bytes() == (ROOT / 'docs/claude-runtime-evidence.md').read_bytes()
+    for name in ('cf_shim', 'claude_evidence', 'codex_review_probe', 'codex_binding'):
+        relative = 'scripts/process-fsm/' + name + '.py'
+        assert (target / relative).read_bytes() == (ROOT / relative).read_bytes()
+    assert (target / 'scripts/process-fsm/test_claude_desktop_surface.py').is_file()
+    assert (target / 'scripts/process-fsm/test_residual_1101.py').is_file()
+    assert (target / 'scripts/process-fsm/test_pin_correction.py').is_file()
     operator_home = tmp_path / 'operator-home'
     assert not list(operator_home.glob('**/*trust*.json'))
     # The installed verifier really reopens the original controlled rollout.

@@ -79,6 +79,8 @@ def _read_plan(path, *, runtime=None):
         if not isinstance(plan.get(key), str) or not plan[key] or plan[key] == ce.UNAVAILABLE:
             fail("review_probe_plan_invalid", key)
     root = Path(plan["root"]).resolve()
+    if plan.get("plan_path") != str(Path(path).resolve()):
+        fail("review_probe_plan_invalid", "plan_path")
     if inside(root, path) != Path(path).resolve():
         fail("review_probe_path_unsafe")
     for key in ("helper", "diff", "fixture", "capture_path"):
@@ -118,7 +120,12 @@ def read_command(path, index, *, runtime=None):
 
 
 def _read_command(plan, path, index):
-    return shlex.join([plan["interpreter"], "-I", plan["helper"], "read", "--plan", str(Path(path).resolve()), "--chunk", str(index)])
+    # Relative operands keep the literal command short. Native cwd is checked
+    # independently at collection; equivalent/reconstructed paths never count.
+    root = Path(plan["root"])
+    helper = Path(plan["helper"]).relative_to(root).as_posix()
+    relative = Path(path).resolve().relative_to(root).as_posix()
+    return shlex.join([plan["interpreter"], "-I", helper, "read", "--plan", relative, "--chunk", str(index)])
 
 
 def delivery(raw):
@@ -216,7 +223,7 @@ def prepare(*, root, capture, diff, wave_id, runtime=None, pending_package=None)
     with os.fdopen(fd, "wb") as stream:
         stream.write(os.urandom(32))
     helper = inside(root, Path(__file__).resolve())
-    plan_body = {"schema": SCHEMA, "root": str(root), "parent_thread": session if not pending_package else ce.UNAVAILABLE,
+    plan_body = {"schema": SCHEMA, "root": str(root), "plan_path": str(plan_file), "parent_thread": session if not pending_package else ce.UNAVAILABLE,
                       "host": meta["originator"], "host_version": meta["cli_version"],
                       "role": cap["role"], "attempt_id": cap["attempt_id"], "wave_id": wave_id,
                       "capture_path": str(capture), "capture_sha256": ce.digest(cap),
@@ -261,6 +268,7 @@ def run(plan_path):
     else:
         result.update(delivery(raw))
         result["read_command_template"] = _read_command(plan, plan_path, 0).rsplit(" ", 1)[0] + " <chunk_index>"
+        result["next_read_command"] = _read_command(plan, plan_path, 0)
     return require_bounded(result)
 
 
@@ -382,8 +390,8 @@ def observe(birth, proof, *, runtime=None):
         argv = item.get("command")
         if isinstance(argv, list) and len(argv) == 3 and argv[0] in {"/bin/bash", "/usr/bin/bash"} and argv[1] in {"-lc", "-c"} and argv[2] in expected_reads:
             index = expected_reads[argv[2]]
-            if not chunked or len(matches) != 1 or index in chunks:
-                fail("review_diff_chunk_order", "chunks require one preceding probe and unique indexes")
+            if not chunked or len(matches) != 1 or index != len(chunks):
+                fail("review_diff_chunk_order", "chunks require one preceding probe and consecutive indexes")
             if (value.get("thread_id") != proof["child_thread"] or value.get("turn_id") != active_turn
                     or active_turn != matches[0]["turn_id"] or Path(_native_cwd(item.get("cwd", ""))).resolve() != Path(birth["root"])
                     or item.get("status") != "completed" or item.get("exit_code") != 0
@@ -429,7 +437,8 @@ def observe(birth, proof, *, runtime=None):
         chunked = result.get("delivery") == DELIVERY
         if chunked:
             template = _read_command(plan, path, 0).rsplit(" ", 1)[0] + " <chunk_index>"
-            if any(result.get(k) != v for k, v in layout.items()) or "diff_text" in result or result.get("read_command_template") != template:
+            if (any(result.get(k) != v for k, v in layout.items()) or "diff_text" in result
+                    or result.get("read_command_template") != template or result.get("next_read_command") != _read_command(plan, path, 0)):
                 fail("review_probe_output_mismatch")
         elif not isinstance(result.get("diff_text"), str) or ce.digest(result["diff_text"].encode()) != plan["diff_sha256"] or len(result["diff_text"]) > CHUNK_CHARS:
             fail("review_probe_output_mismatch")
@@ -464,6 +473,7 @@ def read_chunk_result(plan, child, index):
     start, end = ranges[index]
     return require_bounded({"schema": SCHEMA, "plan_sha256": plan["integrity_sha256"], "child_thread": child,
             "diff": plan["diff"], "diff_sha256": plan["diff_sha256"], "delivery": DELIVERY,
+            "next_read_command": _read_command(plan, plan["plan_path"], index + 1) if index + 1 < len(ranges) else None,
             "chunk_index": index, "start_char": start, "end_char": end, "diff_text": text[start:end]})
 
 

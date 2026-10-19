@@ -18,11 +18,13 @@ from typing import Any
 import cf_shim
 
 # Tool caches are not adapter code: a pytest run rewrites `.pytest_cache/v/cache/nodeids`, and listing it would make the
-# shim deny every hook with `adapter_divergent`. `cf_shim.enumerate_tree` already skips `__pycache__`, `node_modules`,
-# `.git` and `*.pyc`/`*.pyo`; `.pytest_cache` is excluded per tree with a pattern the shim applies too (`fnmatch`
-# lets `*` cross `/`), at any depth, so both sides of the comparison agree.
+# shim deny every hook with `adapter_divergent`. `.pytest_cache` is excluded per tree with a pattern the shim applies too
+# (`fnmatch` lets `*` cross `/`), at any depth, so both sides of the comparison agree. Beyond that, the only cache is
+# `__pycache__/` with the `.pyc` inside it (`cf_shim.is_cache_file`): a loose `.pyc`, `node_modules/` or `.git` inside a
+# declared tree can be imported or executed, so they belong to A (R5).
 CACHE_EXCLUDE = "*/.pytest_cache/*"
-CACHE_DIRECTORIES = frozenset({".pytest_cache", "__pycache__", "node_modules", ".git"})
+# Data and fixtures the hook never executes stay out of A (R1, R2): editing them must not deny every hook.
+DATA_EXCLUDES = ("scripts/process-fsm/route-landmarks.yaml", "scripts/process-fsm/*_fixtures.py")
 
 CORE_TREES = (
     {
@@ -31,7 +33,7 @@ CORE_TREES = (
             "scripts/process-fsm/test_*",
             "scripts/process-fsm/fixtures/*",
             "scripts/process-fsm/conftest.py",
-            "scripts/process-fsm/shim_fixtures.py",
+            *DATA_EXCLUDES,
             CACHE_EXCLUDE,
         ],
     },
@@ -47,8 +49,7 @@ CLIENT_TREES = {
 
 
 def _is_cache_file(relative: str) -> bool:
-    parts = relative.split("/")
-    return bool(CACHE_DIRECTORIES.intersection(parts[:-1])) or relative.endswith((".pyc", ".pyo"))
+    return cf_shim.is_cache_file(relative)
 
 
 def _python_entries(adapter: str, events: tuple[str, ...]) -> dict[str, list[str]]:
@@ -98,7 +99,11 @@ def client_entry(root: Path, client: str) -> dict[str, Any]:
         # An unproven host keeps only the visible failure: no entry points, no file list.
         return {"registration": entry["registration"]}
     digests = cf_shim.hash_files(root, sorted(set(files)))
-    entry["files"] = {path: digest for path, digest in digests.items() if digest is not None}
+    # A listed file that yields no digest (unreadable, or a symlink to a file) is a failure of the pin, never a silent drop (R6).
+    undigested = sorted(path for path, digest in digests.items() if digest is None)
+    if undigested:
+        raise ManifestBuildError(f"{client}: cannot compute a digest for adapter file(s): {', '.join(undigested[:5])}")
+    entry["files"] = dict(digests)
     return entry
 
 

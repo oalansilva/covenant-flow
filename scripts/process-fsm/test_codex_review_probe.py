@@ -19,7 +19,8 @@ from test_codex_evidence import Essay, essay
 def test_adaptive_pages_bound_actual_json_and_outer_return_for_escapes_unicode(tmp_path, unit):
     text=unit*20000
     diff=tmp_path/'adversarial.patch';diff.write_text(text)
-    plan={'diff':str(diff),'diff_sha256':ce.digest(text.encode()),'integrity_sha256':'a'*64}
+    plan={'diff':str(diff),'diff_sha256':ce.digest(text.encode()),'integrity_sha256':'a'*64,
+          'root':str(tmp_path),'helper':str(tmp_path/'probe.py'),'interpreter':sys.executable,'plan_path':str(tmp_path/'plan.json')}
     pages=[rp.read_chunk_result(plan,'review-child',i) for i in range(rp.delivery(text.encode())['chunk_count'])]
     assert ''.join(page['diff_text'] for page in pages)==text
     assert pages[0]['start_char']==0 and pages[-1]['end_char']==len(text)
@@ -137,14 +138,15 @@ def test_source_bound_probe_delivers_exact_diff_and_readback(tmp_path, monkeypat
         e.collect()
 
 
-def chunked_diagnostic(tmp_path, monkeypatch, *, chars=700740):
-    text = ("diff --git a/file.py b/file.py\n@@ -1 +1 @@\n-old = 'x'\n+new = 'y'\n" * (chars // 50 + 1))[:chars]
+def chunked_diagnostic(tmp_path, monkeypatch, *, chars=700740, diff_text=None):
+    text = diff_text if diff_text is not None else ("diff --git a/file.py b/file.py\n@@ -1 +1 @@\n-old = 'x'\n+new = 'y'\n" * (chars // 50 + 1))[:chars]
     e, path, prepared = prepare_diagnostic(tmp_path, monkeypatch, diff_text=text)
     e, path, event, result = finish_diagnostic(e, path, prepared)
     plan = rp.read_plan(path)
     result.pop("diff_text")
     result.update(rp.delivery(text.encode()))
     result["read_command_template"] = rp.read_command(path, 0).rsplit(" ", 1)[0] + " <chunk_index>"
+    result["next_read_command"] = rp.read_command(path, 0)
     event["payload"]["item"]["aggregated_output"] = json.dumps(result)
     next(row for row in e.c if row["payload"].get("type") == "custom_tool_call_output")["payload"] = native_delivery(e, event)[-1]["payload"]
     chunks = []
