@@ -150,7 +150,7 @@ def test_extra_fields_and_unused_record_kinds_are_ignored(world):
 
 def test_collect_names_the_missing_spawn_result_field_and_version(world):
     cap, _p, task, prepared = world.prepare()
-    world.spawn(cap, task)
+    world.spawn(cap, task, status="completed")  # only a background launch may omit the resolved model
     for row in world.rows:
         if isinstance(row.get("toolUseResult"), dict):
             row["toolUseResult"].pop("resolvedModel")

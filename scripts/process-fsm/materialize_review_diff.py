@@ -101,7 +101,52 @@ def list_untracked(repo: Path) -> list[str]:
     return [path for path in paths if not is_critique_artifact(path)]
 
 
-def materialize(repo: Path, mode: str, integration_branch: str) -> str:
+NUCLEUS_PREFIX = "covenant-flow/"
+NUCLEUS_INSTALLER = "install.sh"
+
+
+def _pin_at(repo: Path, ref: str) -> str | None:
+    """The `pin:` tag the overlay carries at `ref` (the pin the consumer reviewed before this card)."""
+
+    shown = _run_git(repo, "show", f"{ref}:.covenant-flow/overlay.yaml")
+    if shown.returncode != 0:
+        return None
+    for line in (shown.stdout or "").splitlines():
+        if line.startswith("pin:"):
+            value = line.split(":", 1)[1].strip().strip("\"'")
+            return value or None
+    return None
+
+
+def nucleus_installer_diff(nucleus: Path, base: str) -> str:
+    """Diff of the nucleus `install.sh` since the previously pinned tag, as part of the consumer's review diff (R21).
+
+    The installer is the only part of the pin that never reaches the consumer tree, so a diff of the consumer alone
+    would hide the code that writes the operator account. Paths are prefixed `covenant-flow/` to say whose file it is.
+    """
+
+    result = _run_git(nucleus, "diff", base, "--", NUCLEUS_INSTALLER)
+    if result.returncode not in (0, 1):
+        raise ValueError(f"cannot diff the nucleus {NUCLEUS_INSTALLER} against {base}: {(result.stderr or '').strip()}")
+    text = result.stdout or ""
+    return (
+        text.replace(f"a/{NUCLEUS_INSTALLER}", f"a/{NUCLEUS_PREFIX}{NUCLEUS_INSTALLER}")
+        .replace(f"b/{NUCLEUS_INSTALLER}", f"b/{NUCLEUS_PREFIX}{NUCLEUS_INSTALLER}")
+    )
+
+
+def materialize(repo: Path, mode: str, integration_branch: str, nucleus: Path | None = None, nucleus_base: str | None = None) -> str:
+    patch = _materialize_consumer(repo, mode, integration_branch)
+    if nucleus is None:
+        return patch
+    base = nucleus_base or _pin_at(repo, "HEAD" if mode == "pre-commit" else f"origin/{integration_branch}")
+    if not base:
+        raise ValueError("the nucleus diff needs --nucleus-base or a pinned overlay at the reviewed base")
+    extra = nucleus_installer_diff(nucleus, base)
+    return patch + ("" if not extra or patch.endswith("\n") or not patch else "\n") + extra
+
+
+def _materialize_consumer(repo: Path, mode: str, integration_branch: str) -> str:
     if mode == "pre-commit":
         tracked = _run_git(repo, "diff", "HEAD")
         if tracked.returncode not in (0, 1):
@@ -135,9 +180,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", default=str(REPO_ROOT))
     parser.add_argument("--integration-branch", default="develop")
     parser.add_argument("--out", default=str(PATCH_REL))
+    parser.add_argument("--nucleus", help="covenant-flow checkout: its install.sh diff since the previously pinned tag joins the review diff")
+    parser.add_argument("--nucleus-base", help="tag/ref of the nucleus to diff against (default: the pin of the reviewed base)")
     args = parser.parse_args(argv)
     repo = Path(args.root)
-    text = materialize(repo, args.mode, args.integration_branch)
+    try:
+        text = materialize(repo, args.mode, args.integration_branch, Path(args.nucleus) if args.nucleus else None, args.nucleus_base)
+    except ValueError as exc:
+        print(f"materialize_review_diff: {exc}", file=sys.stderr)
+        return 2
     out = repo / args.out
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")

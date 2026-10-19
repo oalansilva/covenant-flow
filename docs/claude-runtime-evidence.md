@@ -76,11 +76,16 @@ Onda de review: `claude_review.py verify-wave --wave-id <id> --sha256 <diff> --b
 | Superfície | Estado neste card |
 | --- | --- |
 | Terminal (CLI) na VM | referência (formato ensaiado no `2.1.296`; qualquer versão com o mesmo formato segue) |
-| IDE por Remote-SSH, Desktop SSH, web por Remote Control | `unverified` até o ensaio do piloto (task 9.4); falha visível, sem fallback |
+| App desktop do Claude no Windows por SSH (`claude-desktop`) | referência sanitizada `APP_SESSION_2_1_295`: host 2.1.295, app 2.37337.1; piso de esforço 2.1.292, hooks 2.1.295. Driver preservado; pasta do app (sem card) permanece recusada; cada nascimento exige suas próprias provas |
+| IDE por Remote-SSH e web por Remote Control | `unverified` até ensaio próprio; falha visível, sem fallback |
 | Desktop local sem VM | sem seleção local, board nem transcripts: falha visível |
 | Sessão de nuvem (claude.ai/code em ambiente de nuvem) | **não suportada** por este card: o Claude Code roda sempre local, pelo CLI; sem Guard, seleção, board nem transcripts, falha visível no resolver e no `process_event` |
 
 ## Recuperação
+
+Nascimentos e transições dependentes de hooks exigem host ≥ 2.1.295 (`onFailure=block`); o piso de esforço por invocação permanece 2.1.292. A versão vem da sessão e de seu transcript, sem consultar outro binário no PATH de uma sessão ativa. Retornos background `async_launched` sem `resolvedModel` são comprovados pelos turnos reais do filho e pela `<task-notification>` vinculada a task-id/tool-use-id; falha, interrupção e payload vazio continuam falhas. Fixtures sanitizadas não qualificam outra sessão. Ferramentas `mcp__ccd_*` que criam ou dirigem sessões são interceptadas e recusadas com card vinculado; filhos de etapa usam `Agent` com captura/receipt.
+
+O driver declara `QUALIFIED_ENTRYPOINTS = ("cli", "claude-desktop")`. `AI_AGENT` deve coincidir com a versão registrada no transcript da sessão; a consulta do binário no PATH só vale fora de sessão. O retorno em segundo plano usa a notificação nativa vinculada ao nascimento. Trust exige confirmação digitada em terminal, com recusa dentro de sessão de agente; instalar ou pinar não grava revisão.
 
 Limpeza automática de transcripts (`cleanupPeriodDays`), arquivo truncado, formato que mudou (`unsupported_schema`), filho de outra sessão ou registro/adapter alterado: coletar de novo no mesmo turno enquanto a fonte existir; origem irrecuperável ou divergente exige **nascimento novo**, nunca receipt retroativo. O trabalho e os artefatos do filho são preservados.
 

@@ -333,3 +333,16 @@ def test_landing_declared_without_head_key_refuses(tmp_path: Path):
     catalog.write_text(SEEDED, encoding="utf-8")
     assert "landing" not in routes_from_catalog(load_head_catalog(repo))
     assert clone_gate_ok(change, proto, repo) is False
+
+
+def test_the_cripto_catalog_requires_combo_results():
+    # The catalog is consumer data: the nucleus ships a seed without the Cripto routes, so this holds only where the
+    # Cripto's own overlay document lives. Absent here = an explicit skip, never a silent pass (R23).
+    overlay_doc = ROOT.parents[1] / "docs" / "crypto-overlay.md"
+    if not overlay_doc.is_file():
+        import pytest
+
+        pytest.skip("route-landmarks.yaml is the Cripto's consumer data here only; no docs/crypto-overlay.md in this tree")
+    routes = routes_from_catalog(load_catalog_file(default_catalog_path()))
+    assert "/combo/results" in routes
+    assert routes["/combo/results"].get("kind", "authenticated") == "authenticated" and routes["/combo/results"].get("selectors")

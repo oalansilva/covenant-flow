@@ -32,11 +32,53 @@ from guard import (  # noqa: E402
 from model_selection import validate_spawn  # noqa: E402
 from overlay import load_overlay  # noqa: E402
 from paging import page  # noqa: E402
+from resolve import UNBOUND, app_folder_note, resolve  # noqa: E402
 
 GUARDED_TOOLS = frozenset({"Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"})
 REVIEWERS = frozenset({"diff-reviewer", "code-reviewer"})
 # SubagentHandback is the host's return channel, not a way to read or write the repo.
 REVIEWER_TOOLS = frozenset({"Read", "Grep", "Glob", "SubagentHandback"})
+# Tools of the desktop app that open or drive another session (design 5). The names are the ones observed in the
+# app's launch arguments (2.1.295). With a bound card only the allowlist below passes: everything else, including a
+# `mcp__ccd_*` tool nobody classified yet, is treated as session-creating until it is classified.
+CCD_PREFIX = "mcp__ccd_"
+CCD_SESSION_TOOLS = frozenset({
+    "mcp__ccd_session__spawn_task",
+    "mcp__ccd_session__start_session",
+    "mcp__ccd_session_mgmt__send_message",
+    "mcp__ccd_window__open_session_in",
+})
+CCD_READ_LAYOUT_TOOLS = frozenset({
+    "mcp__ccd_host__get_storage_usage",
+    "mcp__ccd_pr__get_status",
+    "mcp__ccd_session__dismiss_task",
+    "mcp__ccd_session__list_start_targets",
+    "mcp__ccd_session__mark_chapter",
+    "mcp__ccd_session__read_widget_context",
+    "mcp__ccd_session_mgmt__detach_session",
+    "mcp__ccd_session_mgmt__export_transcript",
+    "mcp__ccd_session_mgmt__get_session",
+    "mcp__ccd_session_mgmt__get_usage",
+    "mcp__ccd_session_mgmt__list_events",
+    "mcp__ccd_session_mgmt__list_sessions",
+    "mcp__ccd_session_mgmt__search_session_transcripts",
+    "mcp__ccd_session_mgmt__set_session_title",  # the `#<id>` title of the card session (design 6)
+    "mcp__ccd_settings__get_settings",
+    "mcp__ccd_sidebar__create_group",
+    "mcp__ccd_sidebar__create_section",
+    "mcp__ccd_sidebar__list_groups",
+    "mcp__ccd_sidebar__list_sections",
+    "mcp__ccd_sidebar__set_view",
+    "mcp__ccd_turn__update_plan",
+    "mcp__ccd_turn__wrap_up",
+    "mcp__ccd_view__close_pane",
+    "mcp__ccd_view__get_layout",
+    "mcp__ccd_view__set_transcript_view",
+    "mcp__ccd_view__show_pane",
+    "mcp__ccd_window__close_split",
+    "mcp__ccd_window__get_window_layout",
+    "mcp__ccd_window__set_sidebar_collapsed",
+})
 OVERRIDE_VARIABLES = ("CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "CLAUDE_CODE_EFFORT_LEVEL")
 trust_status = claude_trust.status
 
@@ -117,7 +159,26 @@ def _touches_product(request: Mapping[str, Any]) -> bool:
     return any(glob_kind(repo_relative(cwd, item, overlay), overlay) == "product" for item in extract_paths(canonical, overlay))
 
 
+def _check_session_tool(tool: str, event: Mapping[str, Any]) -> dict[str, Any] | None:
+    """`mcp__ccd_*` with a bound card: nothing that creates work outside `Agent` passes (design 5)."""
+
+    cwd = _cwd(event)
+    if resolve(cwd, cwd).get("bound_card") in (None, "", UNBOUND):
+        return None  # no card, no stage to protect
+    if tool in CCD_READ_LAYOUT_TOOLS:
+        return None
+    why = "it opens or drives another session" if tool in CCD_SESSION_TOOLS else "it is not classified and is treated as session-creating until it is"
+    return _pretool_deny(
+        f"process-fsm-guard deny reason=stage_child_only_agent. Stage children are born only through `Agent` with capture and receipt; "
+        f"{tool} is denied while a card is bound: {why}. Read-only and layout tools of the app stay allowed."
+    )
+
+
 def _check_spawn(event: Mapping[str, Any], data: Mapping[str, Any], root: Path) -> dict[str, Any] | None:
+    cwd = _cwd(event)
+    note = app_folder_note(cwd, resolve(cwd, cwd).get("bound_card"))
+    if note:
+        return _pretool_deny(f"process-fsm-guard deny reason=app_folder. No stage child is born here. {note}")
     for name in OVERRIDE_VARIABLES:
         if str(os.environ.get(name, "")).strip():
             return _pretool_deny(
@@ -196,6 +257,10 @@ def pre_tool_use(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         agent_type = _text(event.get("agent_type")) or ""
         if agent_type in REVIEWERS and tool in REVIEWER_TOOLS:
             return None
+        if tool.startswith(CCD_PREFIX):
+            if agent_type in REVIEWERS:
+                return _pretool_deny(f"process-fsm-guard deny reason=reviewer_tools. {agent_type} may use only Read, Grep and Glob.")
+            return _check_session_tool(tool, event)
         if tool not in GUARDED_TOOLS and tool != "Agent":
             reason = "missing tool name" if not tool else f"unknown tool {tool!r}"
             return _pretool_deny(f"process-fsm-guard deny reason=unknown_tool. {reason}")
@@ -234,6 +299,26 @@ def pre_tool_use(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         return _pretool_deny(f"process-fsm-guard deny reason=evaluation_error. {getattr(exc, 'code', type(exc).__name__)}: {exc}")
 
 
+def _mixed_pin_notice(payload: Mapping[str, Any]) -> str:
+    """R16: the worktrees this session has touched carry different pins; say so, naming each root and pin."""
+
+    try:
+        import cf_shim
+
+        session_id = _text(payload.get("session_id")) or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+        beat = cf_shim.read_heartbeat("claude", session_id)
+        mixed = cf_shim.mixed_pins((beat or {}).get("roots"))
+    except Exception:
+        return ""
+    if not mixed:
+        return ""
+    listed = "; ".join(f"{root} = {pin}" for root, pin in sorted(mixed.items()))
+    return (
+        f"Pins mistos nesta sessão: {listed}. Os hooks e o adapter de cada worktree seguem o pin dele; "
+        "confira o pin do worktree do card antes de avançar e abra sessão nova se um deles mudou.\n"
+    )
+
+
 def session_start(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Inject the shared `paging.page()`, record the heartbeat; Status failures stay unread."""
 
@@ -265,7 +350,7 @@ def session_start(payload: Mapping[str, Any]) -> dict[str, Any]:
             "Status unread. Write produto deny. Não invente Status a partir do chat.\n"
             f"Paging error: {exc}\n"
         )
-    return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": notice + context}}
+    return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": notice + _mixed_pin_notice(payload) + context}}
 
 
 def _post_agent(event: Mapping[str, Any]) -> dict[str, Any] | None:

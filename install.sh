@@ -217,6 +217,7 @@ TERMINAL_MEMBERS=(
   docs/codex-runtime-evidence.md
   docs/codex-native-capabilities.md
   docs/codex-review-qualification.md
+  docs/claude-runtime-evidence.md
 )
 for terminal_member in "${TERMINAL_MEMBERS[@]}"; do
   [[ -f "$SOURCE/$terminal_member" ]] || die "terminal mechanism missing in source: $terminal_member"
@@ -227,7 +228,7 @@ from pathlib import Path
 from overlay import load_overlay
 root = Path(os.environ["TERMINAL_TARGET"])
 doc = load_overlay(root, require_filled=True).get("overlay_doc")
-generic_docs = {root / ("docs/" + name + ".md") for name in ("codex-terminal-flow", "codex-runtime-evidence", "codex-native-capabilities", "codex-review-qualification")}
+generic_docs = {root / ("docs/" + name + ".md") for name in ("codex-terminal-flow", "codex-runtime-evidence", "codex-native-capabilities", "codex-review-qualification", "claude-runtime-evidence")}
 if doc and (root / doc).resolve() in {path.resolve() for path in generic_docs}:
     raise SystemExit("implantar: terminal docs collide with consumer-owned overlay_doc")
 PY
@@ -264,7 +265,7 @@ rsync_process_fsm() {
   rsync -a --delete --exclude='/route-landmarks.yaml' "$SOURCE/scripts/process-fsm/" "$TARGET/scripts/process-fsm/"
 }
 rsync_process_fsm
-for terminal_doc in codex-terminal-flow codex-runtime-evidence codex-native-capabilities codex-review-qualification; do
+for terminal_doc in codex-terminal-flow codex-runtime-evidence codex-native-capabilities codex-review-qualification claude-runtime-evidence; do
   copy_tree "$SOURCE/docs/$terminal_doc.md" "$TARGET/docs/$terminal_doc.md"
 done
 if [[ -f "$SOURCE/scripts/process-fsm/route-landmarks.yaml" ]]; then

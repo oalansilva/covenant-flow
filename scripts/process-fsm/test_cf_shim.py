@@ -11,6 +11,7 @@ import adapter_manifest
 import cf_shim
 from shim_fixtures import (
     ALL_HOSTS,
+    record_trust_as_operator,
     install_account,
     isolate_account,
     last_json,
@@ -276,8 +277,10 @@ def test_trust_cli_reports_and_records(consumer, tmp_path):
     adapter_manifest.write(consumer, "v1.2.0")
     status = subprocess.run([sys.executable, shim, "trust", "--status", "--client", "claude", "--cwd", str(consumer)], capture_output=True, text=True)
     assert status.returncode == 1
-    recorded = subprocess.run([sys.executable, shim, "trust", "--record", "--client", "claude", "--cwd", str(consumer)], capture_output=True, text=True)
-    assert recorded.returncode == 0 and {r["part"] for r in json.loads(recorded.stdout)["recorded"]} == {"registration", "adapter"}
+    # no terminal behind a subprocess pipe: the record is refused and nothing is written
+    refused = subprocess.run([sys.executable, shim, "trust", "--record", "--client", "claude", "--cwd", str(consumer)], capture_output=True, text=True, input="record\n")
+    assert refused.returncode == 2 and "recorded" not in refused.stdout
+    assert not cf_shim.is_reviewed("adapter", "claude", cf_shim.status("claude", consumer)["adapter"]["digest"])
 
 
 def test_trust_record_without_client_and_without_a_registered_host_fails_visibly(tmp_path, account, capsys):
@@ -409,3 +412,189 @@ console.log(JSON.stringify(out));
     plain.mkdir()
     none = json.loads(subprocess.run(["node", str(runner), str(plain)], capture_output=True, text=True, env=env).stdout)
     assert none == ["bash:ok", "bash:ok", "read:ok"]
+
+
+# --- trust is the operator's act (R15) -----------------------------------------------------------------
+
+
+def test_the_operator_records_trust_with_a_terminal_and_a_typed_confirmation(consumer, monkeypatch, capsys):
+    (consumer / "scripts/process-fsm/other_module.py").write_text("VALUE = 9\n")
+    adapter_manifest.write(consumer, "v1.2.0")
+    assert not cf_shim.status("claude", consumer)["adapter"]["reviewed"]
+    assert record_trust_as_operator(monkeypatch, "claude", consumer) == 0
+    recorded = json.loads(capsys.readouterr().out)["recorded"]
+    assert {item["part"] for item in recorded} == {"registration", "adapter"}
+    assert cf_shim.status("claude", consumer)["adapter"]["reviewed"]
+
+
+@pytest.mark.parametrize("environ,agent", [
+    ({"CLAUDECODE": "1"}, "claude"),
+    ({"CLAUDE_CODE_ENTRYPOINT": "claude-desktop"}, "claude"),
+    ({"AI_AGENT": "claude-code_2-1-295_agent"}, "claude"),
+    ({"CODEX_THREAD_ID": "thread-1"}, "codex"),
+    ({"CURSOR_AGENT": "1"}, "cursor"),
+    ({"OPENCODE": "1"}, "opencode"),
+])
+def test_trust_record_is_refused_inside_an_agent_session_of_any_registered_client(consumer, monkeypatch, capsys, environ, agent):
+    before = cf_shim.trust_path().read_bytes()
+    for name, value in environ.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(cf_shim, "operator_confirmed", lambda *a, **k: True)  # even a typed confirmation does not make an agent the operator
+    assert cf_shim.main(["trust", "--record", "--client", "claude", "--cwd", str(consumer)]) == 2
+    err = capsys.readouterr().err
+    assert f"refused inside a {agent} agent session" in err and "plain terminal" in err
+    assert cf_shim.trust_path().read_bytes() == before
+
+
+def test_an_agent_ancestor_in_the_process_tree_is_an_agent_session_even_without_environment(tmp_path):
+    for pid, ppid, argv in ((40, 30, ["python3", "cf_shim.py"]), (30, 20, ["bash"]), (20, 10, ["node", "/home/u/.local/bin/claude"]), (10, 1, ["init"])):
+        directory = tmp_path / str(pid)
+        directory.mkdir()
+        (directory / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+        (directory / "stat").write_text(f"{pid} (proc) S {ppid} 0 0\n")
+    assert cf_shim.agent_session({}, tmp_path, 40) == "claude"
+    assert cf_shim.agent_session({}, tmp_path, 10) is None
+    assert cf_shim.agent_session({}, tmp_path / "missing", 40) is None
+
+
+def test_the_confirmation_needs_a_terminal_at_both_ends_and_the_typed_word():
+    class Stream:
+        def __init__(self, tty, line=""):
+            self.tty, self.line, self.out = tty, line, ""
+
+        def isatty(self):
+            return self.tty
+
+        def readline(self):
+            return self.line
+
+        def write(self, text):
+            self.out += text
+
+        def flush(self):
+            pass
+
+    assert cf_shim.operator_confirmed("s", Stream(False, "record\n"), Stream(True)) is False
+    assert cf_shim.operator_confirmed("s", Stream(True, "record\n"), Stream(False)) is False
+    assert cf_shim.operator_confirmed("s", Stream(True, "yes\n"), Stream(True)) is False
+    assert cf_shim.operator_confirmed("s", Stream(True, "record\n"), Stream(True)) is True
+
+
+# --- the registration digest is anchored at startup only (R8) ---------------------------------------------
+
+
+@pytest.mark.parametrize("source", ["compact", "clear", "resume"])
+def test_compact_clear_and_resume_keep_the_startup_registration_digest(consumer, source):
+    shim_command("claude", "session-start", {"session_id": SESSION, "cwd": str(consumer), "source": "startup"})
+    anchor = cf_shim.read_heartbeat("claude", SESSION)
+    spawn = pretool(consumer, tool="Agent")
+    assert denial(shim_command("claude", "pre-tool-use", spawn)) is None
+    settings = Path.home() / ".claude/settings.json"
+    document = json.loads(settings.read_text())
+    document["hooks"]["Stop"][0]["hooks"][0]["timeout"] = 33
+    settings.write_text(json.dumps(document))
+    cf_shim.record("claude", consumer)  # the operator reviewed the new registration; the running session still holds the old one
+    shim_command("claude", "session-start", {"session_id": SESSION, "cwd": str(consumer), "source": source})
+    after = cf_shim.read_heartbeat("claude", SESSION)
+    assert after["registration_digest"] == anchor["registration_digest"] and after["recorded_at"] == anchor["recorded_at"]
+    reason = denial(shim_command("claude", "pre-tool-use", spawn))
+    assert reason and "hooks_changed" in reason
+    # a real startup is a new session: it anchors the registration it loaded
+    shim_command("claude", "session-start", {"session_id": SESSION, "cwd": str(consumer), "source": "startup"})
+    assert cf_shim.read_heartbeat("claude", SESSION)["registration_digest"] == cf_shim.registration_digest("claude")
+    assert denial(shim_command("claude", "pre-tool-use", spawn)) is None
+
+
+# --- who called the shim decides, not what the process inherited (R9) -------------------------------------
+
+
+def test_codex_registration_called_from_a_process_that_inherited_cursor_variables_is_a_codex_call(consumer, tmp_path):
+    log = tmp_path / "log"
+    result = shim_command("codex", "pre-tool-use", pretool(consumer, "deny-me"), log=log, env={"CURSOR_VERSION": "2026.10.01", "CURSOR_PROJECT_DIR": str(consumer)})
+    assert denial(result) == "stub deny"
+    assert [call["client"] for call in calls(log)] == ["codex"]
+
+
+def test_claude_code_started_from_a_cursor_terminal_keeps_its_gate(consumer, tmp_path):
+    log = tmp_path / "log"
+    inherited = {"CURSOR_VERSION": "2026.10.01", "CURSOR_PROJECT_DIR": str(consumer)}
+    for identity in ({"CLAUDECODE": "1"}, {"CLAUDE_CODE_ENTRYPOINT": "cli"}, {"AI_AGENT": "claude-code_2-1-300_agent"}):
+        result = shim_command("claude", "pre-tool-use", pretool(consumer, "deny-me"), log=log, env={**inherited, **identity})
+        assert denial(result) == "stub deny", identity
+    # Cursor itself loading ~/.claude/settings.json carries no Claude Code identity: still quiet there
+    quiet = shim_command("claude", "pre-tool-use", pretool(consumer, "deny-me"), log=log, env=inherited)
+    assert quiet.stdout == ""
+
+
+# --- nested repositories (R11) ----------------------------------------------------------------------------
+
+
+def test_a_nested_repository_without_overlay_inside_a_pinned_consumer_is_governed_by_the_consumer(consumer, tmp_path):
+    from shim_fixtures import init_git
+    nested = init_git(consumer / "vendor" / "scratch-clone")
+    assert not (nested / ".covenant-flow").exists()
+    log = tmp_path / "log"
+    result = shim_command("claude", "pre-tool-use", pretool(nested, "deny-me"), log=log)
+    assert denial(result) == "stub deny"
+    assert Path(calls(log)[0]["cwd"]) == consumer.resolve()
+    assert cf_shim.discover([str(nested)]) == (consumer.resolve(), False)
+    # a nested repository with no consumer around it still means no consumer
+    lone = init_git(tmp_path / "elsewhere" / "lone")
+    assert cf_shim.discover([str(lone)]) == (None, False)
+
+
+# --- the heartbeat records the surface and the app (4.1) and the roots the session touched (R16) -----------
+
+
+def test_the_heartbeat_records_the_desktop_app_surface_and_versions(tmp_path, account):
+    install_account()
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    env = {"AI_AGENT": "claude-code_2-1-295_agent", "CLAUDE_CODE_ENTRYPOINT": "claude-desktop", "CLAUDE_CODE_DESKTOP_APP_VERSION": "2.37337.1", "CLAUDE_SSH_DAEMON_CHILD": "1"}
+    shim_command("claude", "session-start", {"session_id": SESSION, "cwd": str(plain), "source": "startup"}, env=env)
+    beat = cf_shim.read_heartbeat("claude", SESSION)
+    assert (beat["entrypoint"], beat["host_version"], beat["desktop_app_version"], beat["ssh"]) == ("claude-desktop", "2.1.295", "2.37337.1", True)
+    terminal = "22222222-2222-3333-4444-555555555555"
+    shim_command("claude", "session-start", {"session_id": terminal, "cwd": str(plain)}, env={"AI_AGENT": "claude-code_2-1-300_agent", "CLAUDE_CODE_ENTRYPOINT": "cli"})
+    beat = cf_shim.read_heartbeat("claude", terminal)
+    assert (beat["entrypoint"], beat["host_version"], beat["desktop_app_version"], beat["ssh"]) == ("cli", "2.1.300", cf_shim.UNAVAILABLE, False)
+
+
+def test_the_heartbeat_follows_the_roots_a_session_touches_with_their_pins(consumer, tmp_path):
+    shim_command("claude", "session-start", {"session_id": SESSION, "cwd": str(consumer)})
+    other = make_consumer(tmp_path / "consumer-2000", pin="v1.3.0", branch="card-2000-other")
+    trust_all(other)
+    shim_command("claude", "pre-tool-use", pretool(other))
+    roots = {item["root"]: item["pin"] for item in cf_shim.read_heartbeat("claude", SESSION)["roots"]}
+    assert roots == {str(consumer.resolve()): "v1.2.0", str(other.resolve()): "v1.3.0"}
+    assert cf_shim.mixed_pins(cf_shim.read_heartbeat("claude", SESSION)["roots"]) == roots
+    assert cf_shim.mixed_pins([{"root": "/a", "pin": "v1.2.0"}, {"root": "/b", "pin": "v1.2.0"}]) == {}
+
+
+# --- OpenCode: an import() failure never blocks reading (R12) ----------------------------------------------
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required for the OpenCode plugin")
+def test_opencode_adapter_that_fails_to_import_blocks_write_shell_and_spawn_but_never_read(consumer, tmp_path):
+    import os
+    import subprocess
+
+    plugin_dir = Path.home() / ".config/opencode/plugin"
+    (consumer / ".opencode/adapter/impeccable-hook.js").write_text("throw new Error('cannot start');\n")
+    adapter_manifest.write(consumer, "v1.2.0")
+    cf_shim.record("opencode", consumer)
+    runner = tmp_path / "run.mjs"
+    runner.write_text(f"""
+import plugin from {json.dumps(str(plugin_dir / cf_shim.OPENCODE_PLUGIN_NAME))};
+const hooks = await plugin({{ directory: process.argv[2] }});
+const out = [];
+for (const tool of ["read", "glob", "grep", "write", "edit", "bash", "task"]) {{
+  try {{ await hooks["tool.execute.before"]({{ tool }}, {{ args: {{ command: "ls" }} }}); out.push(tool + ":ok"); }} catch (e) {{ out.push(tool + ":" + e.message); }}
+}}
+console.log(JSON.stringify(out));
+""")
+    env = {"HOME": str(Path.home()), "PATH": os.environ["PATH"]}
+    out = json.loads(subprocess.run(["node", str(runner), str(consumer)], capture_output=True, text=True, env=env).stdout)
+    assert out[:3] == ["read:ok", "glob:ok", "grep:ok"]
+    for denied in out[3:]:
+        assert "deny reason=adapter_missing" in denied and "cannot start" in denied, denied

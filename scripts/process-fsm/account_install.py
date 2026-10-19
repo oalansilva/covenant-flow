@@ -36,6 +36,9 @@ def atomic_write_bytes(path: str | Path, content: bytes) -> None:
     _atomic_write_bytes(target, content)
 
 
+# `mcp__ccd_*` are the desktop app's session tools (denied with a bound card, design 5). The anchored form keeps
+# tools that merely contain "Write" or "Agent" (TodoWrite, ...) away from the adapter.
+PRETOOL_MATCHER = "^(Bash|Edit|Write|MultiEdit|NotebookEdit|Agent|mcp__ccd_.*)$"
 HOST_BINARIES = {"claude": "claude", "cursor": "cursor-agent", "codex": "codex", "opencode": "opencode"}
 HOST_HOMES = {"claude": ".claude", "cursor": ".cursor", "codex": ".codex", "opencode": ".config/opencode"}
 CLAUDE_STATUS = {
@@ -65,7 +68,7 @@ def claude_document() -> dict[str, Any]:
 
     return {"hooks": {
         "SessionStart": [{"matcher": "startup|resume|clear|compact", "hooks": [h("session-start")]}],
-        "PreToolUse": [{"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Agent", "hooks": [h("pre-tool-use", onFailure="block")]}],
+        "PreToolUse": [{"matcher": PRETOOL_MATCHER, "hooks": [h("pre-tool-use", onFailure="block")]}],
         "PostToolUse": [
             {"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash", "hooks": [h("post-tool-use")]},
             {"matcher": "Agent", "hooks": [h("post-tool-use", message="Checking the child's resolved model")]},
@@ -177,7 +180,10 @@ def _merge_cursor(document: dict[str, Any] | None, desired: dict[str, Any] | Non
             del hooks[event]
     for event, entries in (desired or {}).get("hooks", {}).items():
         hooks.setdefault(event, []).extend(json.loads(json.dumps(entries)))
-    target["hooks"] = hooks
+    if hooks or desired is not None:
+        target["hooks"] = hooks
+    else:
+        target.pop("hooks", None)  # a removal never leaves (or creates) an empty `hooks` object (R19)
     return target
 
 
@@ -212,8 +218,8 @@ def plan_removal(client: str) -> tuple[Path, bytes | None, bool]:
         managed = path.read_text(encoding="utf-8", errors="replace").startswith(cf_shim.OPENCODE_PLUGIN_HEADER)
         return path, None, managed
     existing = _read_object(path)
-    if existing is None:
-        return path, None, False
+    if existing is None or cf_shim.host_entries(client) is None:
+        return path, None, False  # no Covenant Flow entry: the file is not ours to rewrite, byte for byte (R18, R19)
     if client == "cursor":
         stripped = _merge_cursor(existing, None, path)
     else:
@@ -221,10 +227,12 @@ def plan_removal(client: str) -> tuple[Path, bytes | None, bool]:
             stripped = _strip_nested(existing, path)
         except HookConfigError as exc:
             raise InstallError(f"{exc}; nothing was changed") from exc
+        if stripped.get("hooks") == {}:
+            del stripped["hooks"]  # the entries were all ours: do not leave `"hooks": {}` behind (R18)
     changed = stripped != existing
     ours = codex_document()["description"]
     leftovers = {k: v for k, v in stripped.items() if not (client == "codex" and k == "description" and v == ours)}
-    only_ours = not leftovers or leftovers == {"hooks": {}} or leftovers == {"version": 1, "hooks": {}}
+    only_ours = not leftovers or leftovers == {"hooks": {}} or leftovers in ({"version": 1}, {"version": 1, "hooks": {}})
     return path, (None if only_ours else _render(stripped)), changed
 
 
@@ -300,18 +308,46 @@ def run_remove(forced: list[str] | None) -> list[str]:
             lines.append(f"{client}: nothing to remove")
             continue
         if content is None:
-            path.unlink(missing_ok=True)
+            remove_with_target(path)
         else:
             atomic_write_bytes(path, content)
         lines.append(f"{client}: Covenant Flow entries removed from {path}")
     root = cf_shim.shim_root()
     remaining = managed_hosts()
-    if root.exists() and remaining:
+    if (root.exists() or root.is_symlink()) and remaining:
         lines.append(f"shim kept in {root}: entries remain for {', '.join(remaining)}")
-    elif root.exists():
-        shutil.rmtree(root)
+    elif root.exists() or root.is_symlink():
+        remove_shim(root)
         lines.append(f"shim removed from {root}")
     return lines
+
+
+def remove_with_target(path: Path) -> None:
+    """Delete a file the installer alone created, following a symlink: the link goes and so does its target (R20)."""
+
+    if path.is_symlink():
+        path.resolve().unlink(missing_ok=True)
+    path.unlink(missing_ok=True)
+
+
+def remove_shim(root: Path) -> None:
+    """Remove every versioned directory of the shim and the `current` link, leaving no orphan target (R20)."""
+
+    if root.is_symlink():
+        shutil.rmtree(root.resolve(), ignore_errors=True)
+        root.unlink(missing_ok=True)
+        return
+    for child in sorted(root.iterdir(), key=lambda item: not item.is_symlink()):
+        if child.is_symlink():
+            target = child.resolve()
+            child.unlink()
+            if target.is_dir() and root in target.parents:
+                shutil.rmtree(target, ignore_errors=True)
+        elif child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink(missing_ok=True)
+    root.rmdir()
 
 
 def managed_hosts() -> list[str]:

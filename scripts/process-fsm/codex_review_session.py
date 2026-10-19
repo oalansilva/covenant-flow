@@ -276,8 +276,38 @@ def binding(path, *, runtime=None, complete=False):
             _verify_launch_output(path, p, output, coordinator)
             phase_turn = _phase_turn(rt, coordinator, p)
             _completed_turn(rt, coordinator, turn_id=phase_turn)
+            # Every phase releases births only after a successful native
+            # preflight in that same continuation turn, never retroactively.
+            observed, preflight_ref = native_command(rt, coordinator, command(path, "preflight"), p["root"], after=p["coordinator_before_record"])
+            expected_release = "stage" if p["phase"] == "review" else "diagnostic_only"
+            if (preflight_ref["turn_id"] != phase_turn or observed.get("result") != "ready"
+                    or observed.get("phase") != p["phase"] or observed.get("work_release") != expected_release
+                    or observed.get("coordinator_thread") != coordinator):
+                fail("review_preflight_binding_mismatch")
+            source, rows, _, _ = rt.session(coordinator)
+            births = []
+            expected_tasks = {ce.check_seal(json.loads(Path(b).read_text()))["task_name"] for b in p["births"]}
+            turn = None
+            for ordinal, row, sha in rows:
+                value = row["payload"]
+                if row["type"] == "turn_context":
+                    turn = value["turn_id"]
+                if (ordinal >= p["coordinator_before_record"] and row["type"] == "response_item"
+                        and value.get("type") == "function_call" and value.get("name") == "spawn_agent"):
+                    try:
+                        task = json.loads(value.get("arguments", "{}" )).get("task_name")
+                    except (ValueError, AttributeError):
+                        task = None
+                    if turn != phase_turn and task not in expected_tasks:
+                        continue  # a later, independently prepared phase
+                    if (turn != phase_turn or ordinal <= preflight_ref["ordinal"]
+                            or task not in expected_tasks
+                            or value.get("internal_chat_message_metadata_passthrough", {}).get("turn_id") != phase_turn):
+                        fail("review_preflight_order", "successful preflight must precede every birth in the same native turn")
+                    births.extend(ce._projection([(ordinal, row, sha)], {ordinal}, source))
+            if len(births) != len(p["births"]):
+                fail("review_preflight_order", "native births missing or extra")
             if p["phase"] == "review":
-                observed, preflight_ref = native_command(rt, coordinator, command(path, "preflight"), p["root"], after=p["coordinator_before_record"])
                 pre_start, pre_end = _native_interval(rt, coordinator, preflight_ref)
                 checked_at = observed.get("stage_checked_at_ms")
                 if type(checked_at) is not int or not pre_start <= checked_at <= pre_end:
@@ -292,7 +322,7 @@ def binding(path, *, runtime=None, complete=False):
                 if preflight_ref["turn_id"] != phase_turn or observed.get("result") != "ready" or observed.get("stage_status") != "Code Review" or observed.get("phase") != "review" or observed.get("coordinator_thread") != coordinator:
                     fail("review_stage_binding_mismatch")
             return dict(initial, continuation=ref,
-                sources=initial["sources"] + [ref] + _permission_sources(rt, coordinator, phase_turn))
+                sources=initial["sources"] + [ref, preflight_ref] + births + _permission_sources(rt, coordinator, phase_turn))
         return initial
     output, ref = native_command(rt, p["principal_thread"], command(path), p["root"], after=p["before_record"])
     coordinator = _verify_launch_output(path, p, output)
@@ -570,7 +600,7 @@ def prepare(*, root, phase, bootstrap=None, diff=None, authority_root=None, runt
                     "Coordinator preflight is already a prerequisite: do not run preflight again in the child. Use max_output_tokens=20000 for exec_command and max_output_tokens=32000 for enclosing functions.exec, printing one result at a time. "
                     "NEVER rerun the probe even if output is truncated; report review_probe_output_unavailable and stop. "
                     'Input context and output budgets are different units: diff bytes, Unicode characters and page count are NOT token counts. The model input context window is distinct from its generation/reasoning/work budget and each tool output limit. Do not infer inability to read the diff from byte/page count or remaining generation/work allowance alone. Use actual native context-window/input-usage metadata if exposed; no fixed window size is guaranteed and absence of metadata does not establish shortage. Tokenizer estimates, if supplied, are estimates, not observed native usage. Read all bounded pages sequentially, retaining every returned diff_text and its path/SHA; do not sample, summarize away or omit parts. If an actual input limit, truncation or missing delivery prevents full reading, stop with review_diff_delivery_incomplete and no verdict. '
-                    "A small diff is delivered inline as diff_text. For delivery=native-json-bounded-pages-v2 the short probe result is NOT full diff delivery: execute read_command_template with each integer chunk_index from 0 through chunk_count-1, one command/result at a time with the same output budgets. "
+                    "A small diff is delivered inline as diff_text. For delivery=native-json-bounded-pages-v2 the short probe result is NOT full diff delivery: copy and execute next_read_command LITERALLY from the immediately preceding result, one command/result at a time with the same output budgets. Commands use short relative paths and MUST run from the native card worktree cwd stated in this prompt; supply that exact workdir to exec_command. Do not rebuild paths, insert ../ or ./, expand the template manually, change quoting, combine commands, or run cd. Require chunk_index 0 through chunk_count-1 consecutively and next_read_command=null only after the last chunk. "
                     "Read every returned diff_text chunk before findings. These read commands perform NO write attempt. Do not combine chunks into an oversized tool output, substitute metadata for reading, or silently omit parts; insufficient context/output budget means review_diff_delivery_incomplete and no verdict. "
                     "The fixed helper and each read command verify the same diff SHA; no separate codex_review.py verify is required. Final verify-wave belongs ONLY to the writable principal after both payloads and source-bound collection; its absence now is expected, never a waiver of missing probe/chunks.\n"
                     + f"review_diff_path: {diff}\nreview_diff_sha256: {p['diff_sha256']}\nmodel_selection_capture: {child_capture}\n"

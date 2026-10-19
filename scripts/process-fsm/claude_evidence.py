@@ -33,7 +33,18 @@ from codex_evidence import (  # the sealed-envelope helpers are client neutral
     private_write,
     sealed,
 )
-from model_selection import SelectionError, claude_host_checks, load_capture, policy, request_role, validate_capture
+from model_selection import (
+    SelectionError,
+    claude_host_checks,
+    claude_hook_check,
+    claude_in_session,
+    claude_version_from_env,
+    load_capture,
+    policy,
+    request_role,
+    validate_capture,
+)
+from resolve import app_folder_note
 
 SCHEMA = "claude-transcript-evidence-v1"
 DRIVER = "claude-transcript-v1"
@@ -46,17 +57,22 @@ SCHEMA_FIELDS: dict[str, tuple[tuple[str, type], ...]] = {
     "assistant": (("type", str), ("sessionId", str), ("version", str), ("entrypoint", str), ("cwd", str),
                   ("message.id", str), ("message.model", str), ("effort", str)),
     "agent_tool_use": (("input.description", str), ("input.model", str), ("input.effort", str)),
-    "tool_use_result": (("agentId", str), ("status", str), ("resolvedModel", str)),
+    "tool_use_result": (("agentId", str), ("status", str)),
     "meta": (("toolUseId", str), ("description", str)),
     "child": (("isSidechain", bool), ("agentId", str), ("sessionId", str)),
 }
 SCHEMA_OPTIONAL: dict[str, tuple[tuple[str, type], ...]] = {
     "agent_tool_use": (("input.subagent_type", str),),
     "meta": (("agentType", str), ("model", str)),
+    # Required unless the spawn was launched in the background (`async_launched`): there the model is checked on the
+    # child's turns when the spawn carries none (design 9).
+    "tool_use_result": (("resolvedModel", str),),
 }
 SYNTHETIC_MODEL = "<synthetic>"
 # The surface is a type of host, not a version: an unknown value still stops the stage (design §17).
-QUALIFIED_ENTRYPOINTS = ("cli",)
+# `claude-desktop` (the desktop app over SSH, its own copy of Claude Code) joins `cli` together with the real,
+# sanitized transcript fixture of that copy in `claude_fixtures.py` (`APP_SESSION_2_1_295`); the live rehearsal confirms it.
+QUALIFIED_ENTRYPOINTS = ("cli", "claude-desktop")
 DEFAULT_DEST = Path(".cursor/tmp/claude-evidence")
 MAX_WAIT = 10.0
 UNAVAILABLE = "unavailable"
@@ -176,6 +192,8 @@ def _identity(rows, session: str) -> dict[str, Any]:
     if not versions or not entrypoints or cwd is None:
         missing = [name for name, found in (("version", versions), ("entrypoint", entrypoints), ("cwd", cwd)) if not found]
         raise EvidenceError("unsupported_schema", f"transcript records lack `{'`, `'.join(missing)}` (host version {latest or 'unknown'})", recovery="the host changed the transcript format; revalidate the driver against a real session")
+    if len(entrypoints) > 1:
+        raise EvidenceError("unverified", f"the session carries more than one surface {sorted(entrypoints)} (host version {latest}); the proof of two surfaces is never mixed in one session", recovery="start a new session on a single surface")
     if len(entrypoints) != 1 or not entrypoints <= set(QUALIFIED_ENTRYPOINTS):
         raise EvidenceError("unverified", f"surface value(s) {sorted(entrypoints)} (host version {latest}) are not a known surface; known: {', '.join(QUALIFIED_ENTRYPOINTS)}", recovery="a surface or entrypoint format change fails visibly until it is rehearsed; this is not a version check")
     return {"version": latest, "versions": sorted(versions), "entrypoint": entrypoints.pop(), "cwd": cwd}
@@ -233,11 +251,15 @@ def preflight(
     runtime: Runtime | None = None,
     environ: Mapping[str, str] | None = None,
     trust: Callable[[], dict[str, Any]] | None = None,
+    session_version: bool = True,
 ) -> dict[str, Any]:
     env = os.environ if environ is None else environ
     session = session or env.get("CLAUDE_CODE_SESSION_ID") or ""
     if not session:
         raise EvidenceError("session_unavailable", "CLAUDE_CODE_SESSION_ID missing")
+    folder = app_folder_note(Path(root), git_bound_card(Path(root).resolve()))
+    if folder:
+        raise EvidenceError("app_folder", folder, recovery="ask `#<id>` in this session: it enters the worktree `card-<id>-*` with EnterWorktree; the app's folder is neither deleted nor adopted")
     try:
         account = account_registration.require_active("claude", root, session=session, environ=env)
     except account_registration.RegistrationRefusal as exc:
@@ -264,8 +286,25 @@ def preflight(
     root = Path(root).resolve()
     if not _inside(root, meta["cwd"]):
         raise EvidenceError("worktree_mismatch", f"session cwd {meta['cwd']} is outside {root}")
+    if session_version and claude_in_session(env):
+        # Inside a session the version is the session's own (`AI_AGENT`), confirmed by the transcript; the `claude` on
+        # PATH is never asked, because the desktop app runs another copy than the terminal (design 2).
+        declared = claude_version_from_env(env)
+        if declared is None:
+            raise EvidenceError(
+                "capability_unavailable",
+                f"capability_unavailable: Claude Code host version is not readable from this session (no AI_AGENT on surface {meta['entrypoint']}); the binary on PATH is never queried",
+                recovery="start a new session from the host that exports AI_AGENT; no fallback to another surface",
+            )
+        if declared not in meta["versions"]:
+            raise EvidenceError(
+                "capability_unavailable",
+                f"capability_unavailable: AI_AGENT says host version {declared} but the transcript of surface {meta['entrypoint']} records {meta['versions']}",
+                recovery="start a new session; the version of the session is the one the transcript and the environment agree on",
+            )
     try:
         claude_host_checks(policy()["clients"]["claude"], {"environ": env, "version": meta["version"]})
+        claude_hook_check(meta["version"], {**env, "CLAUDE_CODE_ENTRYPOINT": meta["entrypoint"]})
     except SelectionError as exc:
         raise EvidenceError("capability_unavailable", str(exc)) from exc
     if capture is not None:
@@ -278,6 +317,8 @@ def preflight(
         "parent_observed": observed, "source_records": len(rows), "destination": str(out),
         "hooks_digest": status["digest"], "parent_cwd": meta["cwd"],
         "heartbeat_recorded_at": (beat or {}).get("recorded_at", UNAVAILABLE),
+        "desktop_app_version": (beat or {}).get("desktop_app_version", UNAVAILABLE),
+        "ssh": bool((beat or {}).get("ssh", False)),
     }
 
 
@@ -345,6 +386,7 @@ def prepare(*, root, capture, task_name, dest=DEFAULT_DEST, review_diff_sha256=U
         "parent_session": pf["session"], "parent_transcript": pf["source"], "before_record": pf["source_records"],
         "host_version": pf["host_version"], "host_versions": pf["host_versions"], "parent_cwd": pf["parent_cwd"],
         "surface": pf["surface"], "hooks_digest": pf["hooks_digest"],
+        "desktop_app_version": pf["desktop_app_version"], "ssh": pf["ssh"],
         "heartbeat_recorded_at": pf["heartbeat_recorded_at"],
         "review_diff_sha256": review_diff_sha256, "wave_id": wave_id, "qualification": False,
     })
@@ -400,7 +442,8 @@ def check_prepared_spawn(arguments: Mapping[str, Any], root, *, session: str | N
         raise EvidenceError("requested_mismatch")
     if marked(out, birth["attempt_id"], "model_mismatch"):
         raise EvidenceError("model_mismatch", "this birth was invalidated", recovery="new checked birth required")
-    return preflight(root=root, capture=birth["capture"], dest=out, session=session, runtime=runtime, environ=env, trust=trust)
+    # PreToolUse(Agent) runs in the hook's environment: the receipt already holds the version the birth confirmed.
+    return preflight(root=root, capture=birth["capture"], dest=out, session=session, runtime=runtime, environ=env, trust=trust, session_version=False)
 
 
 def _child_files(payload: Mapping[str, Any], runtime: Runtime) -> tuple[Path, Path]:
@@ -466,6 +509,7 @@ def note_resolved_model(arguments: Mapping[str, Any], response: Any, root, *, se
         except ValueError:
             response = {}
     resolved = response.get("resolvedModel") if isinstance(response, dict) else None
+    launched_in_background = isinstance(response, dict) and response.get("status") == "async_launched"
     prompt = arguments.get("prompt") or ""
     match = re.search(r"^runtime_evidence_birth:\s*(\S+)\s*$", prompt, re.MULTILINE)
     if not match:
@@ -473,25 +517,81 @@ def note_resolved_model(arguments: Mapping[str, Any], response: Any, root, *, se
     birth = check_seal(json.loads(Path(match[1]).read_text()))
     out = evidence_dir(root)
     expected = birth["capture"]["selection"]["model"]
+    if resolved is None and launched_in_background:
+        # No resolvedModel on a background launch: the pair is checked on the child's turns at collection (design 9).
+        return {"ok": True, "resolved": UNAVAILABLE, "expected": expected, "attempt_id": birth["attempt_id"], "deferred": True}
     if resolved != expected:
         mark(out, birth["attempt_id"], "model_mismatch", reason="resolvedModel", observed=resolved or UNAVAILABLE)
         return {"ok": False, "resolved": resolved or UNAVAILABLE, "expected": expected, "attempt_id": birth["attempt_id"]}
     return {"ok": True, "resolved": resolved, "expected": expected, "attempt_id": birth["attempt_id"]}
 
 
-def _handbacks(parent, agent_id: str, after: int) -> list[str]:
+NOTIFICATION_STATUS = {"completed": "completed", "failed": "failed", "killed": "interrupted"}
+TASK_NOTIFICATION = re.compile(r"<task-notification>(.*?)</task-notification>", re.DOTALL)
+
+
+def _tag(block: str, name: str) -> str | None:
+    found = re.search(rf"<{name}>(.*?)</{name}>", block, re.DOTALL)
+    return found.group(1).strip() if found else None
+
+
+def _returns(parent, agent_id: str, call_id: str, after: int) -> tuple[list[str], list[tuple[str, str]], list[str]]:
+    """What the parent transcript says about one child after its spawn.
+
+    Two forms are recognized (design 9): the `<agent-message from="{agentId}">` hand-back and the background
+    `queue-operation` `enqueue` with a `<task-notification>`. A notification counts only when its `<task-id>` is this
+    child and its `<tool-use-id>` is this spawn; another call's notification (a resumed agent) is not this return.
+    Returns (reports, [(mapped status, <result>)], unknown forms naming the field).
+    """
+
     tag = f'<agent-message from="{agent_id}">'
-    reports = []
+    reports: list[str] = []
+    notifications: list[tuple[str, str]] = []
+    unknown: list[str] = []
     for ordinal, row, _s in parent:
         if ordinal <= after or row.get("type") != "queue-operation" or row.get("operation") != "enqueue":
             continue
         content = row.get("content")
-        if not isinstance(content, str) or tag not in content:
+        if not isinstance(content, str):
             continue
-        body = content.split("The report follows:", 1)[1] if "The report follows:" in content else content.split(tag, 1)[1]
-        body = re.sub(r"</agent-message>\s*\Z", "", body.strip()).strip()
-        reports.append(body)
-    return [r for r in reports if r]
+        if tag in content:
+            body = content.split("The report follows:", 1)[1] if "The report follows:" in content else content.split(tag, 1)[1]
+            body = re.sub(r"</agent-message>\s*\Z", "", body.strip()).strip()
+            if body:
+                reports.append(body)
+            continue
+        if "<task-notification>" in content:
+            found = TASK_NOTIFICATION.search(content)
+            if found is None:
+                if agent_id in content or call_id in content:
+                    unknown.append("queue-operation.content (<task-notification> without its closing tag)")
+                continue
+            block = found.group(1)
+            task_id, tool_use_id = _tag(block, "task-id"), _tag(block, "tool-use-id")
+            if task_id != agent_id:
+                if task_id is None and agent_id in block:
+                    unknown.append("<task-id>")
+                continue
+            if tool_use_id is None:
+                unknown.append("<tool-use-id>")
+                continue
+            if tool_use_id != call_id:
+                continue  # the notification of another tool call of the same agent
+            status = _tag(block, "status")
+            if status not in NOTIFICATION_STATUS:
+                unknown.append(f"<status> ({status!r}; known: {', '.join(NOTIFICATION_STATUS)})")
+                continue
+            notifications.append((NOTIFICATION_STATUS[status], _tag(block, "result") or ""))
+            continue
+        if agent_id in content or call_id in content:
+            unknown.append("queue-operation.content (neither <agent-message> nor <task-notification>)")
+    return reports, notifications, unknown
+
+
+def _api_error(row: Mapping[str, Any]) -> bool:
+    """A host-generated `<synthetic>` turn that records an API error (HTTP 429, usage limit, ...)."""
+
+    return row.get("isApiErrorMessage") is True or bool(row.get("apiError")) or bool(row.get("error"))
 
 
 def _projection(rows, ordinals, source) -> list[dict[str, Any]]:
@@ -547,10 +647,16 @@ def extract(birth, *, runtime: Runtime | None = None):
     result = out_row["toolUseResult"]
     check_schema(result, "tool_use_result", version=_row_version(out_row), where=f" (record {oi})")
     agent_id = result["agentId"]
-    resolved = result["resolvedModel"]
+    resolved = result.get("resolvedModel")
+    if resolved is None and result["status"] != "async_launched":
+        raise EvidenceError(
+            "unsupported_schema",
+            f"tool_use_result record (record {oi}) lacks `resolvedModel` as str (absent) on host version {_row_version(out_row)}; only a background launch (`async_launched`) may omit it",
+            recovery="the host changed the transcript format: the driver must be revalidated against a real session; no version is refused by its number",
+        )
     if not AGENT_ID.fullmatch(agent_id):
         raise EvidenceError("spawn_return_malformed", "agentId is not a valid agent id")
-    if resolved != selected["model"]:
+    if resolved is not None and resolved != selected["model"]:
         raise EvidenceError("model_mismatch", f"host resolved {resolved!r}, captured {selected['model']!r}", recovery="new checked birth required; do not resume/retune", observed=resolved or UNAVAILABLE)
     child_path, meta_path = rt.child_paths(parent_path, birth["parent_session"], agent_id)
     try:
@@ -586,10 +692,14 @@ def extract(birth, *, runtime: Runtime | None = None):
             continue
         message = row.get("message") if isinstance(row.get("message"), dict) else {}
         if message.get("model") == SYNTHETIC_MODEL:
-            # Host-generated error turn (for example HTTP 429): never a model observation, and a failure when it ends the child.
-            synthetic.append({"ordinal": i, "uuid": row.get("uuid", UNAVAILABLE)})
+            # Host-generated turn: never a model observation. It fails the child only when it records an API error
+            # (HTTP 429, usage limit); a final `<synthetic>` without error stays out of the comparison and the status
+            # comes from the last real turn (R13).
+            failed_call = _api_error(row)
+            synthetic.append({"ordinal": i, "uuid": row.get("uuid", UNAVAILABLE), "api_error": failed_call})
             used_child.add(i)
-            last_assistant_synthetic = True
+            if failed_call:
+                last_assistant_synthetic = True
             continue
         last_assistant_synthetic = False
         check_schema(row, "assistant", version=_row_version(row), where=f" (child record {i})")
@@ -601,18 +711,39 @@ def extract(birth, *, runtime: Runtime | None = None):
         tools.update(b["name"] for b in _blocks(row) if b.get("type") == "tool_use" and isinstance(b.get("name"), str))
     if not turns and not synthetic:
         raise EvidenceError("observation_unavailable", "child transcript has no assistant record")
+    if resolved is None and not turns:
+        # Background launch with no resolvedModel: the pair has to be proven on at least one real turn of the child.
+        raise EvidenceError("observation_unavailable", "the spawn carries no resolvedModel and the child has no real turn to prove the model on", recovery="new checked birth required")
     if birth["role"] in REVIEWERS and not tools <= (READ_ONLY_TOOLS | RETURN_CHANNEL_TOOLS):
         raise EvidenceError("child_tool_mismatch", f"reviewer used {sorted(tools - READ_ONLY_TOOLS - RETURN_CHANNEL_TOOLS)}")
     host_status = str(result.get("status") or "")
     payloads: list[str] = []
+    reports, notifications, unknown_forms = _returns(parent, agent_id, call["id"], ci)
     if last_assistant_synthetic or host_status in {"failed", "error"}:
         status = "failed"
     elif host_status in {"interrupted", "killed", "cancelled", "stopped"}:
         status = "interrupted"
+    elif notifications:
+        status, note_result = notifications[-1]
+        if status == "completed":
+            payloads = [text for text in [note_result, *reports] if text.strip()]
+            if not payloads:
+                raise EvidenceError("payload_unavailable", "the completed <task-notification> carries an empty <result> and no hand-back report")
     else:
-        inline = _text(result.get("content")) or _text([b.get("content") for b in _blocks(out_row) if b.get("tool_use_id") == call["id"]])
-        payloads = [inline] if host_status == "completed" and inline else _handbacks(parent, agent_id, oi)
+        handback_report = result.get("handbackReport")
+        inline = (
+            _text(handback_report.get("text") if isinstance(handback_report, dict) else None)
+            or _text(result.get("content"))
+            or _text([b.get("content") for b in _blocks(out_row) if b.get("tool_use_id") == call["id"]])
+        )
+        payloads = [inline] if host_status == "completed" and inline else reports
         if not payloads:
+            if unknown_forms:
+                raise EvidenceError(
+                    "unsupported_schema",
+                    f"the parent transcript returns the child in a form the driver does not read: {'; '.join(sorted(set(unknown_forms)))} (host version {pmeta['version']})",
+                    recovery="the host changed how a child returns; the driver must be revalidated against a real session, never waited on forever",
+                )
             raise EvidenceError("terminal_unavailable", "no completed payload returned to the parent yet")
         status = "completed"
     used_parent = {ci, oi}
@@ -625,8 +756,10 @@ def extract(birth, *, runtime: Runtime | None = None):
         "parent_session": birth["parent_session"], "parent_message_id": message_id, "child_agent_id": agent_id,
         "call_id": call["id"], "host": HOST, "host_version": birth_version, "host_versions": sorted(parent_versions | set(cmeta["versions"])),
         "surface": pmeta["entrypoint"],
+        "desktop_app_version": birth.get("desktop_app_version", UNAVAILABLE), "ssh": bool(birth.get("ssh", False)),
+        "spawn_status": host_status or UNAVAILABLE,
         "requested": {"model": selected["model"], "effort": selected["effort"]}, "requested_native": cap["arguments"],
-        "resolved_model": resolved, "turns": turns, "synthetic_turns": synthetic, "synthetic_final": last_assistant_synthetic,
+        "resolved_model": resolved or UNAVAILABLE, "turns": turns, "synthetic_turns": synthetic, "synthetic_final": last_assistant_synthetic,
         "tools_used": sorted(tools),
         "read_only": tools <= (READ_ONLY_TOOLS | RETURN_CHANNEL_TOOLS),
         "status": status, "payload_returned": status == "completed",

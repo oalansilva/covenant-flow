@@ -46,7 +46,11 @@ export default async function covenantFlowShim(ctx = {}) {
         }
       }
       const hooks = loaded.get(modulePath);
-      if (hooks.__failed) throw new Error(`process-fsm-guard deny reason=adapter_missing. ${hooks.__failed}`);
+      if (hooks.__failed) {
+        const failure = new Error(`process-fsm-guard deny reason=adapter_missing. ${hooks.__failed}`);
+        failure.adapterLoadFailure = true;
+        throw failure;
+      }
       found.push(hooks);
     }
     return found;
@@ -63,7 +67,13 @@ export default async function covenantFlowShim(ctx = {}) {
       const tool = String((input && input.tool) || "");
       last = decide(directory, tool);
       if (last.action === "fail" && GATED.has(tool)) throw new Error(last.message);
-      await forward("tool.execute.before", [input, output], last);
+      try {
+        await forward("tool.execute.before", [input, output], last);
+      } catch (error) {
+        // A module that cannot be imported never blocks reading (R12); writes, shell and spawn stay denied with the reason.
+        if (error && error.adapterLoadFailure && !GATED.has(tool)) return;
+        throw error;
+      }
     },
     "tool.execute.after": async (input, output) => {
       try {

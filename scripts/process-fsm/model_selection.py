@@ -157,11 +157,29 @@ def claude_version_from_env(environ: Mapping[str, str] | None = None) -> str | N
     return match[1].replace("-", ".") if match else None
 
 
+# Hooks with `onFailure: "block"` (the account registration's PreToolUse) exist from this host version on; per-invocation
+# effort needs the lower `host_min_version` of the policy. The code applies both (R14), the policy file is untouched.
+CLAUDE_HOOK_MIN_VERSION = "2.1.295"
+
+
+def claude_in_session(environ: Mapping[str, str] | None = None) -> bool:
+    """True inside a Claude Code session (terminal or desktop app): its Bash tool and hooks carry `CLAUDECODE`."""
+    env = os.environ if environ is None else environ
+    return bool(str(env.get("CLAUDECODE", "")).strip())
+
+
 def claude_detect_version(environ: Mapping[str, str] | None = None) -> str | None:
-    """Host version from the agent identity env var, else `claude --version`."""
+    """Host version of the session (`AI_AGENT`); `claude --version` only outside a Claude Code session.
+
+    Inside a session the `claude` on PATH is another binary than the running host (the terminal one is 2.1.300 while the
+    desktop app runs its own copy at 2.1.295), so measuring it would certify the wrong host: the session version is
+    unreadable instead, and the caller fails visibly.
+    """
     version = claude_version_from_env(environ)
     if version:
         return version
+    if claude_in_session(environ):
+        return None
     try:
         out = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5, check=True).stdout
         return ".".join(str(n) for n in _version_tuple(out))
@@ -189,8 +207,29 @@ def claude_host_checks(contract: Mapping, facts: Mapping | None = None) -> None:
     except ValueError:
         ok = False
     if not ok:
+        if version is None and claude_in_session(env):
+            surface = str(env.get("CLAUDE_CODE_ENTRYPOINT") or "unknown")
+            raise SelectionError(
+                f"capability_unavailable: Claude Code host version is not readable from this session (no AI_AGENT on surface {surface}); "
+                f"the `claude` binary on PATH is never queried inside a session, so per-invocation effort cannot be proven (needs >= {minimum}); no fallback"
+            )
         raise SelectionError(
             f"capability_unavailable: Claude Code host version {version or 'undetectable'} lacks per-invocation effort (needs >= {minimum}); no fallback"
+        )
+
+
+def claude_hook_check(version: str | None, environ: Mapping[str, str] | None = None) -> None:
+    """Births and hook-dependent transitions need blocking hooks (host >= 2.1.295); below it `capability_unavailable`."""
+    env = os.environ if environ is None else environ
+    try:
+        ok = version is not None and _version_tuple(version) >= _version_tuple(CLAUDE_HOOK_MIN_VERSION)
+    except ValueError:
+        ok = False
+    if not ok:
+        surface = str(env.get("CLAUDE_CODE_ENTRYPOINT") or "unknown")
+        raise SelectionError(
+            f"capability_unavailable: Claude Code host version {version or 'undetectable'} on surface {surface} lacks hooks with onFailure=block "
+            f"(needs >= {CLAUDE_HOOK_MIN_VERSION}); a missing hook is never protection, no fallback"
         )
 
 

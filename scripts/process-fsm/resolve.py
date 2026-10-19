@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -98,3 +99,62 @@ def resolve(
             bound_card = UNBOUND
 
     return {"q": status, "bound_card": bound_card, "q_git": q_git}
+
+
+APP_FOLDER_SEGMENTS = (".claude", "worktrees")
+APP_FOLDER_TEXT = (
+    "pasta do app (sem card): esta pasta foi criada pelo app desktop do Claude, fora do worktree de qualquer card. "
+    "Escrita de produto e de OpenSpec, filhos de etapa e process_event ficam recusados aqui. "
+    "Para trabalhar num card, peça `#<id>` nesta mesma sessão: ela entra sozinha no worktree `card-<id>-*` com `EnterWorktree`. "
+    "A pasta do app não é apagada nem adotada como worktree de card."
+)
+
+
+def configured_worktree_folder(home: Path | None = None) -> Path | None:
+    """`worktree.location` of `~/.claude/settings.json` (nested or dotted key), when the app was configured with one."""
+
+    try:
+        document = json.loads(((home or Path.home()) / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    nested = document.get("worktree")
+    value = nested.get("location") if isinstance(nested, dict) else document.get("worktree.location")
+    return Path(value).expanduser() if isinstance(value, str) and value.strip() else None
+
+
+def app_folder(path: str | Path) -> Path | None:
+    """The folder the desktop app created for `path` (its worktree option), or None.
+
+    Recognized by the `.claude/worktrees/<name>` segment the app uses by default, or by living under the configured
+    worktree folder. The branch the app creates is not `card-<id>-*`, so such a folder is a folder without a card;
+    this only names it for the visible message and never binds or adopts it.
+    """
+
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except OSError:
+        return None
+    parts = resolved.parts
+    for index in range(len(parts) - 2):
+        if parts[index : index + 2] == APP_FOLDER_SEGMENTS:
+            return Path(*parts[: index + 3])
+    configured = configured_worktree_folder()
+    if configured is not None:
+        try:
+            base = configured.resolve()
+            relative = resolved.relative_to(base)
+        except (OSError, ValueError):
+            return None
+        return base / relative.parts[0] if relative.parts else None
+    return None
+
+
+def app_folder_note(path: str | Path, bound_card: str | None = None) -> str | None:
+    """Visible text when `path` is the app's own folder and no card is bound; None otherwise."""
+
+    if bound_card not in (None, "", UNBOUND):
+        return None
+    folder = app_folder(path)
+    return f"{APP_FOLDER_TEXT} Pasta: {folder}." if folder is not None else None

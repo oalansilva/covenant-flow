@@ -45,6 +45,8 @@ def record(
     output: str | Path = DEFAULT_PATH,
     capture: dict | str | Path | None = None,
     runtime_evidence: str | Path | None = None,
+    desktop_app_version: str = UNAVAILABLE,
+    ssh: bool = False,
 ) -> dict[str, object]:
     root = Path(repo_root).expanduser().resolve()
     if not root.is_dir():
@@ -95,6 +97,8 @@ def record(
         "host": host,
         "host_version": host_version,
         "surface": surface or UNAVAILABLE,
+        "desktop_app_version": desktop_app_version or UNAVAILABLE,
+        "ssh": bool(ssh),
         "status": status,
         "payload_returned": bool(payload_returned),
         "successful": successful,
@@ -144,6 +148,28 @@ def record(
     return entry
 
 
+def handoff_line(entry: dict, gate: str | None = None) -> str:
+    """One handoff line per child, taken from the proxy entry and never from the request (design 6).
+
+    Client, surface (with the host version and, for the desktop app, its version), the model/effort the transcript
+    showed, and the status. When the evidence is missing or diverges the line says which gate fails.
+    """
+
+    versions = f"host {entry.get('host_version', UNAVAILABLE)}"
+    if entry.get("desktop_app_version") not in (None, UNAVAILABLE):
+        versions += f", app {entry['desktop_app_version']}"
+    line = (
+        f"{entry.get('activity', UNAVAILABLE)} {entry.get('bound_card', UNAVAILABLE)}: client {entry.get('client', 'claude')}, "
+        f"surface {entry.get('surface', UNAVAILABLE)} ({versions}), "
+        f"observed {entry.get('observed_model', UNAVAILABLE)}/{entry.get('observed_effort', UNAVAILABLE)} "
+        f"(requested {entry.get('requested_model', UNAVAILABLE)}/{entry.get('requested_effort', UNAVAILABLE)}), status {entry.get('status', UNAVAILABLE)}"
+    )
+    if not entry.get("successful"):
+        reason = str(entry.get("reason") or entry.get("status") or "evidence missing or divergent")
+        line += f"; the gate that requires this evidence ({gate or 'next gate'}) fails: {reason}"
+    return line
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -155,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence", type=Path, help="verified collector envelope; required for success")
     parser.add_argument("--birth", type=Path, help="collect automatically after the native return (bounded flush)")
     parser.add_argument("--wait-seconds", type=float, default=5)
+    parser.add_argument("--handoff", action="store_true", help="print the one-line handoff (client, surface, observed pair, status) instead of the JSON entry")
+    parser.add_argument("--gate", default=None, help="with --handoff: the gate named when the evidence is missing or diverges")
     args = parser.parse_args(argv)
     try:
         if args.birth:
@@ -188,11 +216,13 @@ def main(argv: list[str] | None = None) -> int:
             reason=args.reason,
             capture=args.capture,
             runtime_evidence=args.evidence,
+            desktop_app_version=proof.get("desktop_app_version", UNAVAILABLE),
+            ssh=bool(proof.get("ssh", False)),
         )
     except (ProxyError, EvidenceError) as exc:
         print(f"claude proxy error: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
+    print(handoff_line(entry, args.gate) if args.handoff else json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
     return 0
 
 
