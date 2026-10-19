@@ -6,10 +6,17 @@ from pathlib import Path
 import subprocess
 import sys
 
-from test_codex_installer import _target, _pin, ROOT
+import pytest
+
+from test_codex_installer import _target, _pin, ROOT, INSTALL
 from test_codex_evidence import essay
 from test_codex_qualification_index import qualify
 from model_selection_fixtures import machine_models
+
+
+pytestmark = pytest.mark.skipif(
+    not INSTALL.is_file(), reason="installer integration tests require the product install.sh"
+)
 
 
 def test_clean_pin_delivers_terminal_modules_docs_and_manifest_without_trust(tmp_path, essay):
@@ -28,6 +35,7 @@ def test_clean_pin_delivers_terminal_modules_docs_and_manifest_without_trust(tmp
         assert (target / relative).read_bytes() == (ROOT / relative).read_bytes()
     assert (target / 'scripts/process-fsm/test_claude_desktop_surface.py').is_file()
     assert (target / 'scripts/process-fsm/test_residual_1101.py').is_file()
+    assert (target / 'scripts/process-fsm/test_rules_and_runbook_text.py').is_file()
     assert (target / 'scripts/process-fsm/test_pin_correction.py').is_file()
     operator_home = tmp_path / 'operator-home'
     assert not list(operator_home.glob('**/*trust*.json'))
