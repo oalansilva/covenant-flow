@@ -433,7 +433,7 @@ def extract_path(payload: Mapping[str, Any], overlay: Mapping[str, Any] | None =
     return paths[0] if paths else None
 
 
-def github_status_provider(bound_card: str | None) -> str | None:
+def github_status_provider(bound_card: str | None, *, authority_root: Path | None = None, authority: dict | None = None) -> str | None:
     """Pontual issue→Status. RATE_LIMIT / remaining=0 raises GraphQLQuotaError (not None)."""
     if bound_card in (None, "", UNBOUND):
         return None
@@ -442,7 +442,14 @@ def github_status_provider(bound_card: str | None) -> str | None:
     except (TypeError, ValueError):
         return None
     raise_if_cached_exhausted()
-    overlay = try_load_overlay(Path.cwd())
+    if authority is not None or authority_root is not None:
+        import process_authority as pa
+        binding = authority if authority is not None else pa.capture(authority_root, number)
+        if authority_root is not None and Path(authority_root).absolute() != Path(binding["root"]):
+            raise pa.AuthorityError("authority_binding_mismatch")
+        overlay = pa.overlay(binding, number)
+    else:
+        overlay = try_load_overlay(Path.cwd())
     owner, repo_name = repo_owner_name(overlay)
     board_owner, board_number = board_owner_number(overlay)
     if not owner or not repo_name or not board_owner or board_number is None:
@@ -482,20 +489,26 @@ def github_status_provider(bound_card: str | None) -> str | None:
     data = quota.body
     if not isinstance(data, dict):
         return None
+    if (authority is not None or authority_root is not None) and (proc.returncode != 0 or data.get("errors")):
+        return None
     nodes = (
         (((data.get("data") or {}).get("repository") or {}).get("issue") or {}).get("projectItems")
         or {}
     ).get("nodes") or []
+    matches = []
+    explicit = authority is not None or authority_root is not None
     for node in nodes:
         project = (node or {}).get("project") or {}
         login = (project.get("owner") or {}).get("login")
-        if project.get("number") != board_number or login not in (None, board_owner):
+        if project.get("number") != board_number or login not in ((board_owner,) if explicit else (None, board_owner)):
             continue
         field = (node or {}).get("fieldValueByName") or {}
         name = field.get("name")
         if isinstance(name, str) and name.strip():
-            return name.strip()
-    return None
+            if not explicit:
+                return name.strip()
+            matches.append(name.strip())
+    return matches[0] if len(matches) == 1 else None
 
 
 def _card_branch(q_git: str | None) -> bool:
