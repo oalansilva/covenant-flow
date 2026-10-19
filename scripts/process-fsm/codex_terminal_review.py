@@ -79,6 +79,9 @@ def advance_review(checkpoint, root, live, *, runtime):
     # Once a native process has started, a partial/error output must never
     # trigger relaunch of the same immutable attempt or counterfeit a return.
     try:
+        if checkpoint.get('bounded_proxy_log'):
+            from codex_bounded_review import reject_compacted_tasks
+            reject_compacted_tasks(package, runtime=runtime)
         if phase == 'review' and live['q'] != 'Code Review':
             fail('review_stage_binding_mismatch', 'Status changed after launch; current product Review is not accepted')
         cs.binding(path, runtime=runtime, complete=True)
@@ -105,6 +108,8 @@ def advance_review(checkpoint, root, live, *, runtime):
     except ce.EvidenceError as exc:
         return failure(checkpoint, root, exc, sources={'package': package['integrity_sha256'],
                     'events': ce.digest(Path(package['events']).read_bytes())})
+    if phase == 'probe' and checkpoint.get('bounded_diagnostic'):
+        return {'result': 'bounded_diagnostic_collected', 'evidence': [p['evidence_path'] for p in proofs]}
     if phase == 'review':
         from codex_proxy import record
         from codex_review import verify_wave
@@ -117,8 +122,10 @@ def advance_review(checkpoint, root, live, *, runtime):
                    host=proof['host'], host_version=proof['host_version'], status=proof['status'],
                    payload_returned=proof['payload_returned'], child_id=proof['child_thread'],
                    wave_id=proof['wave_id'], sandbox_mode=proof['parent_sandbox'], bound_card=checkpoint['card'],
-                   review_diff_sha256=checkpoint['diff_sha256'], capture=cap, runtime_evidence=proof['evidence_path'])
+                   review_diff_sha256=checkpoint['diff_sha256'], capture=cap, runtime_evidence=proof['evidence_path'],
+                   output=checkpoint.get('bounded_proxy_log', '.cursor/tmp/codex-child-proxies.jsonl'))
         verified = verify_wave(root=root, wave_id=package['wave_id'],
+                              proxy_log=checkpoint.get('bounded_proxy_log', '.cursor/tmp/codex-child-proxies.jsonl'),
                               expected_sha256=checkpoint['diff_sha256'], bound_card=checkpoint['card'])
         append(checkpoint, root, 'review_wave_verified', package=str(path), diff_sha256=checkpoint['diff_sha256'],
                wave_id=package['wave_id'], children=[p['child_thread'] for p in proofs])
@@ -137,6 +144,8 @@ def advance_review(checkpoint, root, live, *, runtime):
             # A fixed non-product input, never a live Review result.
             next_diff.write_text('diff --git a/diagnostic b/diagnostic\n--- a/diagnostic\n+++ b/diagnostic\n@@ -1 +1 @@\n-before\n+after\n')
             next_diff.chmod(0o600)
+    if checkpoint.get('bounded_diagnostic') and next_phase == 'probe':
+        next_diff = diff
     next_package = cs.prepare(root=root, phase=next_phase, bootstrap=bootstrap,
                               diff=next_diff if next_phase in {'probe', 'review'} else None, authority_root=authority_root, runtime=runtime)
     append(checkpoint, root, 'review_package', package=next_package['package'], phase=next_phase)

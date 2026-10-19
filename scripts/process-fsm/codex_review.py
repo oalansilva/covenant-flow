@@ -337,6 +337,11 @@ def verify_wave(
 def verify_latest_wave(*, root):
     """Post-return preflight uses the latest recorded wave, never current RO."""
     repo = Path(root).resolve()
+    composed = repo / ".cursor/tmp/bounded-review-current.json"
+    if composed.exists():
+        from codex_bounded_review import load, verify as verify_composed
+        current = load(composed)
+        return verify_composed(current["ledger"], activation=current["activation"])
     card = re.match(r"card-(\d+)-", repo.name)
     if not card:
         raise ReviewDiffError("bound card unavailable")
@@ -347,6 +352,12 @@ def verify_latest_wave(*, root):
     if not matching:
         raise ReviewDiffError("no completed native review wave")
     latest = matching[-1]
+    # Rollback must not let legacy gates consume a single composed unit as the
+    # global review, even if its two native deliveries passed independently.
+    proof = verify_proxy(latest)
+    diff = proof.get("review_observation", {}).get("diff")
+    if diff and Path(diff).read_bytes().startswith(b"BOUNDED-REVIEW-V1\n"):
+        raise ReviewDiffError("composed package requires complete global ledger verification")
     sha, children = verify_wave(root=repo, wave_id=latest["wave_id"], expected_sha256=latest["review_diff_sha256"], bound_card=card[1])
     return {"result": "verified", "wave_id": latest["wave_id"], "diff_sha256": sha, "children": list(children)}
 
@@ -370,9 +381,11 @@ def main(argv: list[str] | None = None) -> int:
         help="deprecated consumer identifier; does not override machine selection",
     )
     wave_parser.add_argument("--proxy-jsonl", type=Path, default=DEFAULT_PROXY_LOG)
-    wave_parser.add_argument("--wave-id", required=True)
-    wave_parser.add_argument("--sha256", required=True)
-    wave_parser.add_argument("--bound-card", required=True)
+    wave_parser.add_argument("--wave-id")
+    wave_parser.add_argument("--sha256")
+    wave_parser.add_argument("--bound-card")
+    wave_parser.add_argument("--bounded-ledger", type=Path)
+    wave_parser.add_argument("--activation", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.action == "capture":
@@ -390,6 +403,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"review_diff_sha256: {digest}")
             print(f"review_diff_bytes: {size}")
         else:
+            if args.bounded_ledger:
+                from codex_bounded_review import verify as verify_composed
+                result = verify_composed(args.bounded_ledger, activation=args.activation)
+                if result["result"] != "verified":
+                    raise ReviewDiffError("diagnostic ledger cannot prove product Review")
+                print(json.dumps(result, sort_keys=True))
+                return 0
+            if not all((args.wave_id, args.sha256, args.bound_card)):
+                raise ReviewDiffError("wave id, SHA and bound card are required")
             digest, child_ids = verify_wave(
                 root=args.root,
                 map_root=args.map_root,

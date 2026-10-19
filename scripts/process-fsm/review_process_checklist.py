@@ -450,6 +450,29 @@ def _check_fsm_edge(repo: Path, patch: str) -> str | None:
     return None
 
 
+def _check_composed(repo, bounded_ledger, activation):
+    marker = repo / ".cursor/tmp/bounded-review-current.json"
+    if bounded_ledger is None and not marker.exists():
+        return None
+    try:
+        import hashlib
+        from codex_bounded_review import load, verify
+        if bounded_ledger is None:
+            current = load(marker)
+            bounded_ledger, activation = current["ledger"], current["activation"]
+        result = verify(bounded_ledger, activation=activation)
+        if result["result"] != "verified":
+            return "composed diagnostic is not product Review"
+        ledger = load(bounded_ledger)
+        plan = load(ledger["plan"])
+        snapshot = load(plan["snapshot"])
+        if snapshot["root"] != str(repo.resolve()) or hashlib.sha256((repo / PATCH_REL).read_bytes()).hexdigest() != snapshot["diff_sha256"]:
+            return "composed snapshot differs from checklist patch"
+    except (ValueError, OSError, KeyError) as exc:
+        return "composed review: " + str(exc)
+    return None
+
+
 def check(
     repo: Path,
     wave_same_turn: str | None,
@@ -458,9 +481,14 @@ def check(
     phase: str | None = None,
     pilot_evidence: Path | None = None,
     qa_green: QaVerifier | None = None,
+    bounded_ledger: Path | None = None,
+    activation: Path | None = None,
 ) -> str | None:
     if phase is not None and phase not in PHASE_ORDER:
         return "phase"
+    composed = _check_composed(repo, bounded_ledger, activation)
+    if composed:
+        return composed
     item = _check_wave_same_turn(wave_same_turn)
     if item:
         return item
@@ -505,6 +533,8 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="JSON evidence (not versioned) for a change that declares the pilot_evidence gate",
     )
+    parser.add_argument("--bounded-ledger", type=Path)
+    parser.add_argument("--activation", type=Path)
     args = parser.parse_args(argv)
     item = check(
         Path(args.root),
@@ -512,6 +542,8 @@ def main(argv: list[str] | None = None) -> int:
         change_root=args.change_root,
         phase=None if args.phase == "strict" else args.phase,
         pilot_evidence=args.pilot_evidence,
+        bounded_ledger=args.bounded_ledger,
+        activation=args.activation,
     )
     if item:
         return _fail(item)
