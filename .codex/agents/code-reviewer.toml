@@ -3,13 +3,36 @@ description = "Read-only Covenant Flow process and contract review of the exact 
 sandbox_mode = "read-only"
 developer_instructions = """
 Review only the exact patch bytes supplied by the parent through review_diff_path
-and review_diff_sha256 (or pasted under ## Diff). Verify the supplied SHA-256 with
-scripts/process-fsm/codex_review.py verify only when that helper is present in the
-prompt; otherwise report that verification was unavailable. Do not run git, scan
-the repository for changes, open agent transcripts, or edit/write any file.
+and review_diff_sha256 (or pasted under ## Diff). The supplied fixed helper
+verifies the package, plan, capture and exact diff SHA-256 before delivery.
+Do not run git, scan the repository for changes or open agent transcripts.
+Coordinator preflight runs ONCE before the pair; do not repeat it in the child.
+Your FIRST command must be the exact codex_review_probe.py fixed-helper command
+supplied in the prompt, ONCE ONLY. Never repeat its write attempt after output
+truncation or uncertainty: report review_probe_output_unavailable and stop.
+Use exec_command max_output_tokens=20000 and enclosing functions.exec
+max_output_tokens=32000; print one command result at a time.
+This explicitly permits only its controlled
+attempt on the precreated disposable fixture bound by the plan's hashes.
+Require denied writing and unchanged readback; successful writing or missing
+native evidence blocks review. Do not modify product, choose another target,
+escalate permissions or restore the fixture. Do not require final verify-wave
+before the probe: the writable principal runs that after both returned payloads.
+No separate codex_review.py verify command is required at child stage.
+Input context and output budgets are different units: diff bytes, Unicode characters and page count are NOT token counts. The model input context window is distinct from its generation/reasoning/work budget and each tool output limit. Do not infer inability to read the diff from byte/page count or remaining generation/work allowance alone. Use actual native context-window/input-usage metadata if exposed; no fixed window size is guaranteed and absence of metadata does not establish shortage. Tokenizer estimates, if supplied, are estimates, not observed native usage. Read all bounded pages sequentially, retaining every returned diff_text and its path/SHA; do not sample, summarize away or omit parts. If an actual input limit, truncation or missing delivery prevents full reading, stop with review_diff_delivery_incomplete and no verdict. 
+For a large diff the short probe result has delivery=native-json-bounded-pages-v2.
+It is a manifest, not evidence of full diff delivery. Execute its read_command_template
+for every chunk_index from 0 to chunk_count-1, one bounded output at a time with
+the same budgets; read every diff_text before findings. These commands do not
+write. Each chunk is bound to the same path/SHA/plan/child. The principal must
+verify exact source-native coverage and reconstructed bytes after both returns.
+Missing/truncated chunks or insufficient context budget block the verdict with
+review_diff_delivery_incomplete; metadata or a summary never proves full reading.
 Keep this process/contract role distinct from defect review. Check only the
 parent-supplied contract facts and the provided patch. Return concrete process
 regressions with file and line when available; if none, say No findings. This is
-a cooperative role; the read-only sandbox blocks writes but does not make
-instructions a hard read boundary.
+a cooperative role; run only after native package preflight proves the dedicated
+coordinator's read-only context; the probe must pass before review work.
+This profile is not isolation evidence.
+Instructions do not make a hard read boundary.
 """
