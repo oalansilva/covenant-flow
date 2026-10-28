@@ -7,7 +7,8 @@ persisted. Ordinary work requires a real qualification of this driver schema.
 A host version is accepted when the rollout records the driver reads match the
 declared `codex_exec/rollout-v1` schema, never by a version number: the
 `cli_version` is recorded in the receipt and the evidence and refuses nothing on
-its own. Only `originator` (the kind of host) and the record schema are checked.
+its own. Host names are diagnostic metadata. Schema, session binding and a real
+qualification of each host surface are checked independently.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -27,7 +29,8 @@ SCHEMA = "codex-rollout-evidence-v1"
 DRIVER = "codex_exec/rollout-v1"
 # The first driver id embedded the version it was rehearsed on; it names the same schema.
 LEGACY_DRIVERS = ("codex_exec/0.162.1/rollout-v1",)
-ACCEPTED_DRIVERS = (DRIVER, *LEGACY_DRIVERS)
+NATIVE_DRIVER = "codex/rollout-v1"
+ACCEPTED_DRIVERS = (NATIVE_DRIVER, DRIVER, *LEGACY_DRIVERS)
 # Rollout record schema (`codex_exec/rollout-v1`): kind -> required `(field, type)` pairs.
 ROLLOUT_SCHEMA = {
     "session_meta": (("id", str), ("originator", str), ("cli_version", str), ("cwd", str)),
@@ -53,13 +56,94 @@ def check_rollout_schema(kind, payload, *, version="unavailable", where=""):
 DEFAULT_DEST = Path(".cursor/tmp/codex-evidence")
 MAX_WAIT = 10.0
 UNAVAILABLE = "unavailable"
+if __name__ == "__main__":
+    # The optional context driver shares this module's EvidenceError in CLI use.
+    sys.modules["codex_evidence"] = sys.modules[__name__]
+
+STAGE_CONTRACT = "codex-native-stage-v3"
+LEGACY_STAGE_CONTRACT = "codex-native-stage-v2"
+STAGE_CONTRACTS = {STAGE_CONTRACT, LEGACY_STAGE_CONTRACT}
+
+
+def stage_capabilities(*, proof=None, parent_sandbox=UNAVAILABLE, review_observation=None):
+    """Only source-verified observations are capabilities, never caller claims.
+
+    rollout-v1 observes linkage/selection/cwd/lifecycle after a diagnostic birth.
+    Operational context qualification is verified separately from lifecycle.
+    Historical snapshots keep their original observations. Internal context and
+    denied-write/readback require a separately revalidated native diagnostic.
+    """
+    verified = isinstance(proof, dict) and proof.get("validation") == "verified"
+    return {
+        "native_chat_linkage": "verified" if verified else UNAVAILABLE,
+        "model_effort_observation": "verified" if verified else UNAVAILABLE,
+        "worktree_binding": "verified" if verified else UNAVAILABLE,
+        "completed_payload": "verified" if verified else UNAVAILABLE,
+        "context_isolation": UNAVAILABLE,
+        "diagnostic_work_barrier": UNAVAILABLE,
+        "parent_read_only": "verified" if parent_sandbox == "read-only" else UNAVAILABLE,
+        "review_diff_read": "verified" if review_observation else UNAVAILABLE,
+        "review_write_denial_readback": "verified" if review_observation else UNAVAILABLE,
+    }
+
+
+def require_stage_capabilities(*, root, stage, capabilities):
+    required = ["native_chat_linkage", "model_effort_observation", "worktree_binding", "context_isolation"]
+    if stage in {"diff-reviewer", "code-reviewer", "Code Review", "pedir_review", "aceitar_sha"}:
+        required += ["parent_read_only", "review_diff_read", "review_write_denial_readback"]
+    missing = [name for name in required if capabilities.get(name) != "verified"]
+    if missing:
+        card = re.match(r"card-(\d+)-", Path(root).name)
+        raise EvidenceError(
+            "stage_capability_missing",
+            f"{stage} do #{card[1] if card else UNAVAILABLE} impedido antes do trabalho: "
+            f"garantia(s) ausente(s)={','.join(missing)}; etapa não executada. "
+            "Nenhum filho de etapa deve nascer; uma barreira diagnóstica não comprovada não supre a garantia ausente.",
+            recovery="preserve card/Status/artifacts; qualify an authoritative native capability source in the same chat; no external session",
+            observed=capabilities,
+        )
+
+
+def require_review_guarantees(proof):
+    """Historical lifecycle success does not satisfy the #1098 review contract."""
+    capabilities = stage_capabilities(proof=proof, parent_sandbox=proof["parent_sandbox"])
+    if proof.get("stage_contract") == STAGE_CONTRACT and not proof["qualification"]:
+        from codex_context import verify_qualification as verify_context
+        birth = proof["birth"]
+        expected = Path(birth["context_qualification"])
+        observation = verify_context(root=birth["root"], out=expected.parent,
+                                     session=proof["parent_thread"], expected_path=expected)
+        if observation["scope_sha256"] != birth["context_scope_sha256"]:
+            raise EvidenceError("context_scope_mismatch")
+        capabilities["context_isolation"] = "verified"
+    if proof["birth"].get("review_probe_plan"):
+        from codex_review_probe import observe
+        observe(proof["birth"], proof)
+        capabilities["review_diff_read"] = "verified"
+        capabilities["review_write_denial_readback"] = "verified"
+    require_stage_capabilities(root=proof["root"], stage="Code Review",
+                               capabilities=capabilities)
 
 
 class EvidenceError(ValueError):
-    def __init__(self, code, detail="", *, recovery="recollect same birth after source/flush recovery", observed=UNAVAILABLE):
+    def __init__(self, code, detail="", *, recovery="recollect same birth after source/flush recovery", observed=UNAVAILABLE, child_thread=UNAVAILABLE, child_path=UNAVAILABLE):
         self.code, self.detail, self.recovery = code, detail, recovery
         self.observed = observed
+        self.child_thread, self.child_path = child_thread, child_path
         super().__init__(f"{code}: {detail}; recovery={recovery}")
+
+
+def failure_result(code, *, collecting=False):
+    if code == "child_interrupted":
+        return "interrupted"
+    if collecting and code.startswith("review_probe_"):
+        return "unverified" if code in {"review_probe_unavailable", "review_probe_output_invalid"} else "failed"
+    if collecting and code == "turn_conflict":
+        return "failed"
+    if code in {"observed_mismatch", "child_sandbox_mismatch", "payload_unavailable", "terminal_unavailable", "return_payload_mismatch", "context_request_mismatch"}:
+        return "failed"
+    # An unreadable origin after a birth does not prove no work ran.
+    return "unverified" if collecting and code in {"source_unavailable", "source_truncated", "source_malformed", "source_conflict"} else "blocked"
 
 
 def digest(value):
@@ -179,21 +263,37 @@ class Rollout:
         meta = metas[0]
         version = meta.get("cli_version") if isinstance(meta.get("cli_version"), str) else UNAVAILABLE
         check_rollout_schema("session_meta", meta, version=version)
-        if meta["originator"] != "codex_exec":
-            raise EvidenceError("unsupported_host", f"{meta['originator']}/{version}", recovery="the driver reads `codex exec` rollouts; another host type needs its own driver")
         turns = [r[1]["payload"] for r in rows if r[1].get("type") == "turn_context"]
         if not turns:
             raise EvidenceError("unsupported_schema", f"turn_context record absent on host version {version}")
+        unique, by_id = [], {}
         for turn in turns:
             check_rollout_schema("turn_context", turn, version=version)
-        return path, rows, meta, turns
+            if turn["turn_id"] in by_id:
+                if turn != by_id[turn["turn_id"]] or unique[-1]["turn_id"] != turn["turn_id"]:
+                    raise EvidenceError("turn_conflict", turn["turn_id"])
+            else:
+                unique.append(turn)
+                by_id[turn["turn_id"]] = turn
+        # Runtime may repeat an identical context in one turn. Keep every raw
+        # row for provenance, but lifecycle has only one logical turn.
+        return path, rows, meta, unique
 
 
-def preflight(*, root, capture=None, dest=DEFAULT_DEST, thread=None, qualification=False, review=False, runtime=None):
+def qualification_path(out, host):
+    # Keep existing exec qualifications intact; surfaces can coexist in one worktree.
+    name = "qualification.json" if host == "codex_exec" else f"qualification-{digest(host.encode())[:16]}.json"
+    return Path(out) / name
+
+
+def preflight(*, root, capture=None, dest=DEFAULT_DEST, thread=None, qualification=False, review=False, runtime=None, stage=None):
+    review = review or stage in {"diff-reviewer", "code-reviewer", "Code Review", "pedir_review"}
     rt = runtime or Rollout()
     session = thread or os.environ.get("CODEX_THREAD_ID")
     if not session:
         raise EvidenceError("session_unavailable", "CODEX_THREAD_ID missing")
+    if stage and not qualification and thread and thread != os.environ.get("CODEX_THREAD_ID"):
+        raise EvidenceError("chat_binding_mismatch", f"{stage}: --thread cannot replace the current card chat", recovery="use the same native card chat; no external orchestration session")
     path, rows, meta, turns = rt.session(session)
     if any(not isinstance(turns[-1].get(k), str) or not turns[-1][k] for k in ("model", "effort")):
         raise EvidenceError("observation_unavailable", "active turn model/effort fields unavailable")
@@ -201,18 +301,34 @@ def preflight(*, root, capture=None, dest=DEFAULT_DEST, thread=None, qualificati
     if any(t.get("turn_id") == turns[-1]["turn_id"] for t in terminals):
         raise EvidenceError("session_inactive", "prepare requires the active spawn turn")
     root = Path(root).resolve()
-    if Path(meta.get("cwd", "")).resolve() != root or Path(turns[-1]["cwd"]).resolve() != root:
-        raise EvidenceError("worktree_mismatch", str(root))
+    # The current runtime turn governs the working directory. session_meta.cwd
+    # is historical after a native resume/rebind, not the active tool context.
+    if Path(turns[-1]["cwd"]).resolve() != root:
+        raise EvidenceError(
+            "worktree_mismatch",
+            f"requested={root}; session_cwd={meta['cwd']}; turn_cwd={turns[-1]['cwd']}",
+            recovery="bind the native chat to the card worktree and verify its runtime cwd; shell workdir alone is not a session binding",
+        )
     if review and turns[-1]["sandbox_policy"].get("type") != "read-only":
-        raise EvidenceError("parent_sandbox_mismatch", "review spawn session must be observed read-only")
+        if stage in {"pedir_review", "Code Review"} and not qualification:
+            from codex_review_session import principal_preflight
+            dedicated = principal_preflight(root=root, session=session, runtime=rt)
+            if dedicated is not None:
+                return dedicated
+        card = re.match(r"card-(\d+)-", root.name)
+        raise EvidenceError("parent_sandbox_mismatch", f"Code Review do #{card[1] if card else UNAVAILABLE} impedido: garantia=parent_read_only; review spawn session must be observed read-only", recovery="prepare and qualify the dedicated native read-only coordinator; no manual permission toggles")
     if capture is not None:
         validate_capture(load_capture(capture) if isinstance(capture, (str, Path)) else capture, client="codex")
     out = destination(root, dest)
+    proof = None
     if not qualification:
         try:
-            qualified = json.loads((out / "qualification.json").read_text())
+            qualified = json.loads(qualification_path(out, meta["originator"]).read_text())
             check_seal(qualified)
             proof = verify_evidence(qualified["evidence"], runtime=rt)
+            proof_parent = rt.session(proof["parent_thread"])[2]
+            if proof_parent["originator"] != meta["originator"]:
+                raise EvidenceError("unverified", "qualification belongs to another host surface")
             if proof["driver"] not in ACCEPTED_DRIVERS or not proof["qualification"] or not qualified.get("refusal_codes"):
                 raise EvidenceError("unverified", "qualification lacks positive proof and real refusals")
             refusals = [check_seal(json.loads(Path(p).read_text())) for p in qualified["refusals"]]
@@ -220,10 +336,42 @@ def preflight(*, root, capture=None, dest=DEFAULT_DEST, thread=None, qualificati
                 raise EvidenceError("unverified", "qualification refusal integrity/binding mismatch")
         except (OSError, ValueError, KeyError) as exc:
             raise EvidenceError("unverified", str(exc), recovery="explicit qualification essay without product work or transition") from exc
+    capabilities = stage_capabilities(proof=proof, parent_sandbox=turns[-1]["sandbox_policy"].get("type"))
+    context_qualification = {"result": "unavailable", "code": "context_qualification_missing"}
+    if not qualification:
+        from codex_context import verify_qualification as verify_context
+        try:
+            context_qualification = verify_context(root=root, out=out, session=session, runtime=rt)
+            capabilities["context_isolation"] = "verified"
+        except (EvidenceError, OSError, ValueError, KeyError) as exc:
+            context_qualification = {"result": "unavailable", "code": getattr(exc, "code", "context_qualification_missing")}
+    # This is the approved scoped operational criterion, never internal access.
+    capabilities["internal_context_attestation"] = UNAVAILABLE
+    review_qualification = {"result": UNAVAILABLE}
+    if review and not qualification:
+        from codex_review_probe import verify_qualification as verify_review
+        try:
+            review_qualification = verify_review(root=root, session=session, runtime=rt)
+            for key in ("review_diff_read", "review_write_denial_readback"):
+                capabilities[key] = "verified"
+        except (EvidenceError, OSError, ValueError, KeyError) as exc:
+            review_qualification = {"result": UNAVAILABLE, "code": getattr(exc, "code", "review_probe_qualification_missing")}
+    if stage == "aceitar_sha" and not qualification:
+        # Post-return persistence/transition is writable. The read-only fact
+        # comes from both completed reviewers, not this later parent turn.
+        from codex_review import verify_latest_wave, ReviewDiffError
+        try:
+            review_qualification = verify_latest_wave(root=root)
+            for key in ("parent_read_only", "review_diff_read", "review_write_denial_readback"):
+                capabilities[key] = "verified"
+        except (EvidenceError, ReviewDiffError, OSError, ValueError, KeyError) as exc:
+            review_qualification = {"result": UNAVAILABLE, "code": getattr(exc, "code", "review_wave_unverified")}
+    if stage and not qualification:
+        require_stage_capabilities(root=root, stage=stage, capabilities=capabilities)
     try:
         if review:
-            # The actual spawning session stays read-only. A separate writable
-            # orchestrator prepares the receipt and persists after both returns.
+            # Inspection in the same native read-only chat never probes writes.
+            # A future supported preparation path must preserve that guarantee.
             if not out.is_dir():
                 raise OSError("writable orchestrator must prepare private destination before read-only wave")
             if out.stat().st_mode & 0o777 != 0o700:
@@ -236,20 +384,51 @@ def preflight(*, root, capture=None, dest=DEFAULT_DEST, thread=None, qualificati
             check_writable_destination(out)
     except OSError as exc:
         raise EvidenceError("destination_unwritable", str(exc)) from exc
-    return {"result": "ready", "session": session, "parent_turn": turns[-1]["turn_id"], "source": str(path), "driver": DRIVER, "host": meta["originator"], "host_version": meta["cli_version"], "schema": SCHEMA, "qualification": qualification, "parent_sandbox": turns[-1]["sandbox_policy"]["type"], "source_records": len(rows), "destination": str(out)}
+    return {"result": "ready", "session": session, "parent_turn": turns[-1]["turn_id"], "source": str(path), "driver": DRIVER if meta["originator"] == "codex_exec" else NATIVE_DRIVER, "host": meta["originator"], "host_version": meta["cli_version"], "schema": SCHEMA, "qualification": qualification, "parent_sandbox": turns[-1]["sandbox_policy"]["type"], "source_records": len(rows), "destination": str(out), "capabilities": capabilities, "context_qualification": context_qualification, "review_qualification": review_qualification}
 
 
-def prepare(*, root, capture, task_name, dest=DEFAULT_DEST, qualification=False, review_diff_sha256=UNAVAILABLE, runtime=None, thread=None, wave_id=UNAVAILABLE):
+def prepare(*, root, capture, task_name, dest=DEFAULT_DEST, qualification=False, review_diff_sha256=UNAVAILABLE, runtime=None, thread=None, wave_id=UNAVAILABLE, review_probe_plan=None, defer_review_turn=False, context_diagnostic=False):
     cap = validate_capture(load_capture(capture), client="codex")
     review = cap["role"] in {"code-reviewer", "diff-reviewer"}
-    pf = preflight(root=root, capture=cap, dest=dest, qualification=qualification, review=review, runtime=runtime, thread=thread)
+    if context_diagnostic and not qualification:
+        raise EvidenceError("context_diagnostic_required")
+    if defer_review_turn and (not review or not review_probe_plan):
+        raise EvidenceError("review_preparation_invalid")
+    # Deferred receipts are private preparation, not permission to spawn/work.
+    # The actual read-only turn is resolved only from the later native call.
+    pf = preflight(root=root, capture=cap, dest=dest, qualification=qualification or defer_review_turn, review=review and not defer_review_turn, runtime=runtime, thread=thread, stage=None if defer_review_turn else cap["role"])
     if not task_name or "/" in task_name:
         raise EvidenceError("invalid_task_name", task_name)
     if review and (len(review_diff_sha256) != 64 or any(c not in "0123456789abcdef" for c in review_diff_sha256)):
         raise EvidenceError("diff_unavailable")
     if review:
         check_writable_destination(Path(pf["destination"]))
-    birth = sealed({"schema": SCHEMA, "capture": cap, "capture_path": str(Path(capture).resolve()), "root": str(Path(root).resolve()), "bound_card": Path(root).name.split("-")[1] if Path(root).name.startswith("card-") else UNAVAILABLE, "attempt_id": cap["attempt_id"], "role": cap["role"], "band": cap["band"], "task_name": task_name, "parent_thread": pf["session"], "parent_turn": pf["parent_turn"], "before_record": pf["source_records"], "qualification": qualification, "review_diff_sha256": review_diff_sha256, "wave_id": wave_id, "driver": DRIVER})
+    birth = sealed({"schema": SCHEMA, "capture": cap, "capture_path": str(Path(capture).resolve()), "root": str(Path(root).resolve()), "bound_card": Path(root).name.split("-")[1] if Path(root).name.startswith("card-") else UNAVAILABLE, "attempt_id": cap["attempt_id"], "role": cap["role"], "band": cap["band"], "task_name": task_name, "parent_thread": pf["session"], "parent_turn": pf["parent_turn"], "before_record": pf["source_records"], "qualification": qualification, "review_diff_sha256": review_diff_sha256, "wave_id": wave_id, "driver": pf["driver"], "parent_host": pf["host"], "stage_contract": STAGE_CONTRACT, "stage_status": UNAVAILABLE, "work_release": "diagnostic_only" if qualification else "stage"})
+    if context_diagnostic:
+        birth = sealed({**{k: v for k, v in birth.items() if k != "integrity_sha256"}, "context_diagnostic": "codex-context-contract-v1"})
+    if review_probe_plan:
+        from codex_review_probe import read_plan
+        plan = read_plan(review_probe_plan)
+        expected = {"root": str(Path(root).resolve()), "parent_thread": pf["session"], "role": cap["role"], "attempt_id": cap["attempt_id"], "wave_id": wave_id, "diff_sha256": review_diff_sha256}
+        if any(plan.get(k) != v for k, v in expected.items()):
+            raise EvidenceError("review_probe_binding_mismatch")
+        birth.pop("integrity_sha256")
+        birth.update(review_probe_plan=str(Path(review_probe_plan).resolve()), review_probe_plan_sha256=plan["integrity_sha256"])
+        if defer_review_turn:
+            birth.update(parent_turn="deferred_native_read_only", deferred_review_turn=True)
+        birth = sealed(birth)
+    if not qualification:
+        if defer_review_turn:
+            from codex_context import verify_qualification as verify_context
+            pf["context_qualification"] = verify_context(root=root, out=Path(pf["destination"]), session=pf["session"], runtime=runtime)
+            from codex_review_probe import verify_qualification as verify_review
+            rq = verify_review(root=root, session=pf["session"], runtime=runtime)
+            birth["review_qualification"] = rq["qualification"]
+            birth["review_qualification_sha256"] = rq["qualification_sha256"]
+        birth.pop("integrity_sha256")
+        birth["context_qualification"] = pf["context_qualification"]["qualification_path"]
+        birth["context_scope_sha256"] = pf["context_qualification"]["scope_sha256"]
+        birth = sealed(birth)
     target = Path(pf["destination"]) / f"{cap['attempt_id']}.birth.json"
     private_write(target, birth)
     return dict(pf, birth=str(target), arguments=cap["arguments"])
@@ -262,11 +441,46 @@ def check_prepared_spawn(arguments, root):
     if not match:
         raise EvidenceError("birth_receipt_missing", recovery="prepare checked birth before native spawn")
     birth = check_seal(json.loads(Path(match[1]).read_text()))
+    if birth.get("envelope_state") == "pending_coordinator":
+        from codex_review_session import resolve_envelope, preflight as dedicated_preflight
+        dedicated_preflight(birth["dedicated_package"])
+        birth = resolve_envelope(birth)
     if birth["root"] != str(Path(root).resolve()) or birth["task_name"] != arguments.get("task_name") or birth["parent_thread"] != os.environ.get("CODEX_THREAD_ID"):
         raise EvidenceError("birth_mismatch")
     if any(arguments.get(k) != v for k, v in birth["capture"]["arguments"].items()):
         raise EvidenceError("requested_mismatch")
-    return preflight(root=root, capture=birth["capture"], dest=Path(match[1]).parent, qualification=birth["qualification"], review=birth["role"] in {"diff-reviewer", "code-reviewer"})
+    if arguments.get("fork_turns") != "none":
+        raise EvidenceError("context_request_mismatch", "native child requires fork_turns=none; request is not effective isolation proof")
+    if birth.get("dedicated_package") and birth["role"] in {"diff-reviewer", "code-reviewer"} and arguments.get("agent_type") != birth["role"]:
+        raise EvidenceError("role_mismatch", "dedicated Review requires the named native profile before birth")
+    if birth.get("deferred_review_turn"):
+        if not birth.get("dedicated_package") and (birth["role"] not in {"diff-reviewer", "code-reviewer"} or not birth.get("review_probe_plan")):
+            raise EvidenceError("review_preparation_invalid")
+        if birth.get("review_probe_plan"):
+            from codex_review_probe import read_plan
+            plan = read_plan(birth["review_probe_plan"])
+            if plan["integrity_sha256"] != birth["review_probe_plan_sha256"]:
+                raise EvidenceError("review_probe_source_changed")
+    if birth["qualification"]:
+        from codex_context import plan_path
+        plan_file = plan_path(Path(match[1]))
+        if plan_file.exists():
+            plan = check_seal(json.loads(plan_file.read_text()))
+            if prompt != plan.get("requested_message"):
+                raise EvidenceError("context_request_mismatch", "outgoing diagnostic differs from the captured REQUESTED prompt")
+    if birth.get("dedicated_package"):
+        from codex_review_session import preflight as dedicated_preflight
+        return dedicated_preflight(birth["dedicated_package"])
+    pf = preflight(root=root, capture=birth["capture"], dest=Path(match[1]).parent, qualification=birth["qualification"], review=birth["role"] in {"diff-reviewer", "code-reviewer"}, stage=birth["role"])
+    if not birth["qualification"] and birth.get("stage_contract") == STAGE_CONTRACT:
+        if pf["context_qualification"]["scope_sha256"] != birth["context_scope_sha256"]:
+            raise EvidenceError("context_scope_mismatch")
+        if birth.get("review_probe_plan") and not birth.get("dedicated_package"):
+            from codex_review_probe import verify_qualification as verify_review
+            rq = verify_review(root=root, session=birth["parent_thread"], expected_path=birth["review_qualification"])
+            if rq["qualification_sha256"] != birth["review_qualification_sha256"]:
+                raise EvidenceError("review_probe_source_changed")
+    return pf
 
 
 def _projection(rows, ordinals, source):
@@ -276,6 +490,12 @@ def _projection(rows, ordinals, source):
 def extract(birth, *, runtime=None):
     rt = runtime or Rollout()
     check_seal(birth)
+    source_birth = birth
+    dedicated_chain = None
+    if birth.get("envelope_state") == "pending_coordinator":
+        from codex_review_session import resolve_envelope, binding
+        birth = resolve_envelope(birth, runtime=rt)
+        dedicated_chain = binding(birth["dedicated_package"], runtime=rt, complete=True)
     if birth.get("schema") != SCHEMA or birth.get("driver") not in ACCEPTED_DRIVERS:
         raise EvidenceError("unsupported_schema")
     cap = validate_capture(birth["capture"], client="codex", role=birth["role"])
@@ -288,9 +508,11 @@ def extract(birth, *, runtime=None):
     if original_capture != cap:
         raise EvidenceError("capture_changed", recovery="restore immutable birth capture or new birth required")
     parent_path, parent, parent_meta, parent_turns = rt.session(birth["parent_thread"])
-    parent_turn = [t for t in parent_turns if t["turn_id"] == birth["parent_turn"]]
-    if len(parent_turn) != 1:
-        raise EvidenceError("turn_mismatch", "birth parent turn")
+    if birth.get("parent_host", "codex_exec") != parent_meta["originator"]:
+        raise EvidenceError("host_mismatch", "spawn session host differs from birth receipt")
+    if birth["driver"] != NATIVE_DRIVER and parent_meta["originator"] != "codex_exec":
+        raise EvidenceError("host_mismatch", "legacy driver evidence is restricted to its original host")
+    deferred = birth.get("deferred_review_turn", False)
     calls = []
     used_parent = {0}
     active_parent_turn = None
@@ -308,24 +530,36 @@ def extract(birth, *, runtime=None):
         except (KeyError, ValueError) as exc:
             raise EvidenceError("spawn_malformed") from exc
         if args.get("task_name") == birth["task_name"]:
-            if v.get("namespace") != "collaboration" or v.get("internal_chat_message_metadata_passthrough", {}).get("turn_id") != birth["parent_turn"]:
+            expected_turn = active_parent_turn if deferred else birth["parent_turn"]
+            if v.get("namespace") != "collaboration" or v.get("internal_chat_message_metadata_passthrough", {}).get("turn_id") != expected_turn:
                 raise EvidenceError("unsupported_schema", "native spawn namespace/turn metadata unavailable")
-            if active_parent_turn != birth["parent_turn"]:
+            if active_parent_turn != expected_turn:
                 raise EvidenceError("turn_mismatch", "spawn belongs to another parent turn")
             calls.append((i, v, args))
     if len(calls) != 1:
         raise EvidenceError("birth_mismatch", f"expected one native spawn, found {len(calls)}", recovery="new checked birth required if no intact spawn origin")
     ci, call, args = calls[0]
+    spawn_turn = call["internal_chat_message_metadata_passthrough"]["turn_id"]
+    parent_turn = [t for t in parent_turns if t["turn_id"] == spawn_turn]
+    if len(parent_turn) != 1:
+        raise EvidenceError("turn_mismatch", "birth parent turn")
+    if Path(parent_turn[0]["cwd"]).resolve() != Path(birth["root"]):
+        raise EvidenceError("worktree_mismatch", "parent spawn turn")
+    used_parent.update(i for i, r, s in parent if r["type"] == "turn_context" and r["payload"].get("turn_id") == spawn_turn)
     if not birth["qualification"] and request_role(args) != birth["role"]:
         raise EvidenceError("role_mismatch", "native role/title differs from capture")
+    if birth.get("dedicated_package") and birth["role"] in {"diff-reviewer", "code-reviewer"} and args.get("agent_type") != birth["role"]:
+        raise EvidenceError("role_mismatch", "dedicated Review requires both named native profiles")
     if any(args.get(k) != v for k, v in cap["arguments"].items()):
         raise EvidenceError("requested_mismatch", recovery="new checked birth required")
+    if birth.get("stage_contract") in STAGE_CONTRACTS and args.get("fork_turns") != "none":
+        raise EvidenceError("context_request_mismatch", "actual native spawn did not request isolated context")
     outputs = [(i, r["payload"]) for i, r, s in parent if r["type"] == "response_item" and r["payload"].get("type") == "function_call_output" and r["payload"].get("call_id") == call["call_id"]]
     if len(outputs) != 1:
         raise EvidenceError("spawn_return_unavailable")
     oi, output = outputs[0]
     check_rollout_schema("function_call_output", output, version=parent_meta["cli_version"], where=f" (record {oi})")
-    if output.get("internal_chat_message_metadata_passthrough", {}).get("turn_id") != birth["parent_turn"]:
+    if output.get("internal_chat_message_metadata_passthrough", {}).get("turn_id") != spawn_turn:
         raise EvidenceError("turn_mismatch", "native spawn result belongs to another parent turn")
     try:
         child_path = json.loads(output["output"])["task_name"]
@@ -343,27 +577,31 @@ def extract(birth, *, runtime=None):
     if len(candidates) != 1:
         raise EvidenceError("source_conflict", "native path/parent must resolve exactly one child")
     child_id, child_source, child, meta, turns = candidates[0]
+    identity = {"child_thread": child_id, "child_path": child_path}
     if meta.get("timestamp", "") < parent_meta.get("timestamp", ""):
         raise EvidenceError("birth_mismatch", "child predates parent")
     if Path(meta.get("cwd", "")).resolve() != Path(birth["root"]):
-        raise EvidenceError("worktree_mismatch", "child session")
+        raise EvidenceError("worktree_mismatch", "child session", **identity)
     relevant = []
     used_child = {0}
-    seen_turns = set()
+    seen_turns = {}
     for i, row, sha in child:
         v = row["payload"]
         if row["type"] == "turn_context":
             if v["turn_id"] in seen_turns:
-                raise EvidenceError("turn_conflict", v["turn_id"])
-            seen_turns.add(v["turn_id"])
+                if v != seen_turns[v["turn_id"]]:
+                    raise EvidenceError("turn_conflict", v["turn_id"])
+                used_child.add(i)
+                continue
+            seen_turns[v["turn_id"]] = v
             observed = {"model": v.get("model") or UNAVAILABLE, "reasoning_effort": v.get("effort") or UNAVAILABLE}
             if observed != cap["arguments"]:
-                raise EvidenceError("observed_mismatch", f"turn={v['turn_id']}", recovery="new checked birth required; do not resume/retune", observed=observed)
+                raise EvidenceError("observed_mismatch", f"turn={v['turn_id']}", recovery="new checked birth required; do not resume/retune", observed=observed, **identity)
             if Path(v["cwd"]).resolve() != Path(birth["root"]):
-                raise EvidenceError("worktree_mismatch", "child turn")
+                raise EvidenceError("worktree_mismatch", "child turn", **identity)
             sandbox = v["sandbox_policy"].get("type", UNAVAILABLE)
             if birth["role"] in {"diff-reviewer", "code-reviewer"} and sandbox != "read-only":
-                raise EvidenceError("child_sandbox_mismatch")
+                raise EvidenceError("child_sandbox_mismatch", **identity)
             relevant.append({"turn_id": v["turn_id"], "observed": observed, "sandbox": sandbox})
             used_child.add(i)
     if birth["role"] in {"diff-reviewer", "code-reviewer"} and parent_turn[0]["sandbox_policy"].get("type") != "read-only":
@@ -372,6 +610,8 @@ def extract(birth, *, runtime=None):
     started = set()
     for i, row, sha in child:
         v = row["payload"]
+        if row["type"] == "event_msg" and v.get("type") == "turn_aborted":
+            raise EvidenceError("child_interrupted", "native runtime recorded turn_aborted; this is not completion", **identity)
         if row["type"] == "event_msg" and v.get("type") in {"task_started", "task_complete"}:
             check_rollout_schema("task_event", v, version=meta["cli_version"], where=f" ({v['type']}, record {i})")
             if v.get("turn_id") not in seen_turns:
@@ -382,10 +622,10 @@ def extract(birth, *, runtime=None):
             else:
                 payload = v.get("last_agent_message")
                 if not isinstance(payload, str) or not payload.strip():
-                    raise EvidenceError("payload_unavailable")
+                    raise EvidenceError("payload_unavailable", **identity)
                 completes.append((v["turn_id"], payload.strip()))
-    if started != seen_turns or {t for t, p in completes} != seen_turns or len(completes) != len(seen_turns):
-        raise EvidenceError("terminal_unavailable", "every work turn requires start/context/completion")
+    if started != set(seen_turns) or {t for t, p in completes} != set(seen_turns) or len(completes) != len(seen_turns):
+        raise EvidenceError("terminal_unavailable", "every work turn requires start/context/completion", **identity)
     returns = []
     for i, row, sha in parent:
         v = row["payload"]
@@ -397,11 +637,49 @@ def extract(birth, *, runtime=None):
             if content.get("type") == "input_text" and text.startswith("Message Type: FINAL_ANSWER\n") and "\nPayload:\n" in text:
                 returns.append((i, text.split("\nPayload:\n", 1)[1].strip()))
     if len(returns) != len(completes) or [p for i, p in returns] != [p for t, p in completes]:
-        raise EvidenceError("return_payload_mismatch", "native FINAL_ANSWER must match each child terminal payload")
+        raise EvidenceError("return_payload_mismatch", "native FINAL_ANSWER must match each child terminal payload", **identity)
     used_parent.update([ci, oi, *[i for i, p in returns]])
-    result = {"schema": SCHEMA, "driver": birth["driver"], "birth": birth, "attempt_id": cap["attempt_id"], "bound_card": birth["bound_card"], "root": birth["root"], "role": birth["role"], "band": birth["band"], "parent_thread": birth["parent_thread"], "child_thread": child_id, "child_path": child_path, "call_id": call["call_id"], "host": meta["originator"], "host_version": meta["cli_version"], "requested": cap["arguments"], "turns": relevant, "parent_sandbox": parent_turn[0]["sandbox_policy"]["type"], "status": "completed", "payload_returned": True, "payload_sha256": [digest(p.encode()) for t, p in completes], "qualification": birth["qualification"], "review_diff_sha256": birth["review_diff_sha256"], "sources": _projection(parent, used_parent, parent_path) + _projection(child, used_child, child_source), "validation": "verified"}
+    if birth["role"] in {"diff-reviewer", "code-reviewer"}:
+        # Parent must stay read-only from this birth until this child's return.
+        for i, row, sha in parent:
+            if ci < i <= returns[-1][0] and row["type"] == "event_msg" and row["payload"].get("type") == "thread_settings_applied":
+                raise EvidenceError("parent_sandbox_mismatch", "parent settings changed during the read-only reviewer interval; requalify a new native turn")
+            if ci < i <= returns[-1][0] and row["type"] == "turn_context":
+                if row["payload"]["sandbox_policy"].get("type") != "read-only":
+                    raise EvidenceError("parent_sandbox_mismatch", "parent became writable before reviewer returned")
+                used_parent.add(i)
+    result = {"schema": SCHEMA, "driver": birth["driver"], "birth": source_birth, "attempt_id": cap["attempt_id"], "bound_card": birth["bound_card"], "root": birth["root"], "role": birth["role"], "band": birth["band"], "parent_thread": birth["parent_thread"], "child_thread": child_id, "child_path": child_path, "call_id": call["call_id"], "host": meta["originator"], "host_version": meta["cli_version"], "requested": cap["arguments"], "turns": relevant, "parent_sandbox": parent_turn[0]["sandbox_policy"]["type"], "status": "completed", "payload_returned": True, "payload_sha256": [digest(p.encode()) for t, p in completes], "qualification": birth["qualification"], "review_diff_sha256": birth["review_diff_sha256"], "sources": _projection(parent, used_parent, parent_path) + _projection(child, used_child, child_source), "validation": "verified"}
+    if dedicated_chain:
+        result["dedicated_chain"] = dedicated_chain
+        result["sources"] += dedicated_chain["sources"]
     if "wave_id" in birth:
         result["wave_id"] = birth["wave_id"]
+    if deferred:
+        result["native_parent_turn"] = spawn_turn
+    if birth.get("review_probe_plan"):
+        from codex_review_probe import observe
+        result["review_observation"] = observe(birth, result, runtime=rt)
+        result["sources"] += result["review_observation"]["sources"]
+        if not birth["qualification"]:
+            from codex_review_probe import verify_qualification as verify_review
+            rq = verify_review(root=birth["root"], session=birth["parent_thread"], runtime=rt, expected_path=birth.get("review_qualification"))
+            if not birth.get("dedicated_package") and rq["qualification_sha256"] != birth.get("review_qualification_sha256"):
+                raise EvidenceError("review_probe_source_changed")
+    if birth.get("stage_contract") in STAGE_CONTRACTS:
+        result["stage_contract"] = birth["stage_contract"]
+        result["stage_status"] = birth["stage_status"]
+        result["work_release"] = birth["work_release"]
+        result["native_arguments"] = {k: args.get(k, UNAVAILABLE) for k in ("task_name", "model", "reasoning_effort", "fork_turns", "agent_type")}
+        result["capabilities"] = stage_capabilities(proof=result, parent_sandbox=result["parent_sandbox"])
+        if birth.get("stage_contract") == STAGE_CONTRACT and not birth["qualification"]:
+            from codex_context import verify_qualification as verify_context
+            expected = Path(birth["context_qualification"])
+            observation = verify_context(root=birth["root"], out=expected.parent, session=birth["parent_thread"], runtime=rt, expected_path=expected)
+            if observation["scope_sha256"] != birth["context_scope_sha256"]:
+                raise EvidenceError("context_scope_mismatch")
+            result["context_scope_sha256"] = observation["scope_sha256"]
+            result["capabilities"]["context_isolation"] = "verified"
+            result["capabilities"]["internal_context_attestation"] = UNAVAILABLE
     return result
 
 
@@ -446,7 +724,8 @@ def collect(birth_path, *, dest=None, wait_seconds=5.0, runtime=None):
             return dict(result, evidence_path=str(target))
         except EvidenceError as exc:
             if exc.code not in {"source_unavailable", "source_truncated", "spawn_return_unavailable", "terminal_unavailable", "return_payload_mismatch"} or time.monotonic() >= deadline:
-                failure = sealed({"schema": SCHEMA, "attempt_id": birth["attempt_id"], "bound_card": birth["bound_card"], "role": birth["role"], "parent_thread": birth["parent_thread"], "capture_sha256": birth["capture"]["capture_sha256"], "requested": birth["capture"]["arguments"], "observed": exc.observed, "result": "blocked", "code": exc.code, "detail": exc.detail, "wait_seconds": wait_seconds, "recovery": exc.recovery})
+                outcome = failure_result(exc.code, collecting=True)
+                failure = sealed({"schema": SCHEMA, "attempt_id": birth["attempt_id"], "bound_card": birth["bound_card"], "role": birth["role"], "band": birth["band"], "root": birth["root"], "stage_status": birth.get("stage_status", UNAVAILABLE), "parent_thread": birth["parent_thread"], "parent_turn": birth["parent_turn"], "child_thread": exc.child_thread, "child_path": exc.child_path, "capture_path": birth["capture_path"], "capture_sha256": birth["capture"]["capture_sha256"], "requested": birth["capture"]["arguments"], "observed": exc.observed, "result": outcome, "code": exc.code, "detail": exc.detail, "wait_seconds": wait_seconds, "recovery": exc.recovery})
                 # Separate immutable failure from later successful recollection.
                 private_write(out / f"{birth['attempt_id']}.failure-{digest(failure)[:12]}.json", failure)
                 raise
@@ -482,8 +761,9 @@ def qualify(evidence_path, refusal_paths, *, runtime=None):
     refusals = [check_seal(json.loads(Path(p).read_text())) for p in refusal_paths]
     if not refusals or any(r.get("schema") != SCHEMA or r.get("result") != "blocked" or r.get("attempt_id") != proof["attempt_id"] for r in refusals):
         raise EvidenceError("refusal_proof_unavailable")
-    receipt = sealed({"driver": DRIVER, "session": proof["parent_thread"], "evidence": str(Path(evidence_path).resolve()), "refusal_codes": [r["code"] for r in refusals], "refusals": [str(Path(p).resolve()) for p in refusal_paths]})
-    private_write(Path(evidence_path).parent / "qualification.json", receipt)
+    receipt = sealed({"driver": proof["driver"], "session": proof["parent_thread"], "evidence": str(Path(evidence_path).resolve()), "refusal_codes": [r["code"] for r in refusals], "refusals": [str(Path(p).resolve()) for p in refusal_paths]})
+    parent_host = (runtime or Rollout()).session(proof["parent_thread"])[2]["originator"]
+    private_write(qualification_path(Path(evidence_path).parent, parent_host), receipt)
     return receipt
 
 
@@ -496,13 +776,16 @@ def main(argv=None):
         p.add_argument("--capture", type=Path, required=command == "prepare")
         p.add_argument("--dest", type=Path, default=DEFAULT_DEST)
         p.add_argument("--qualification", action="store_true", help="explicit essay only; no product work or transition")
-        p.add_argument("--thread", help="authoritative session id of the actual spawn session (including dedicated read-only wave)")
+        p.add_argument("--thread", help="authoritative session id of the actual spawn session in the same card chat")
         if command == "prepare":
             p.add_argument("--task-name", required=True)
             p.add_argument("--review-diff-sha256", default=UNAVAILABLE)
             p.add_argument("--wave-id", default=UNAVAILABLE)
+            p.add_argument("--review-probe-plan", type=Path)
+            p.add_argument("--defer-review-turn", action="store_true", help="prepare while writable; actual native spawn must later be read-only in this same chat")
         else:
             p.add_argument("--review", action="store_true")
+            p.add_argument("--stage", default="native-delegation", help="required stage guarantees; qualification is diagnostic only")
     p = sub.add_parser("collect")
     p.add_argument("--birth", required=True, type=Path)
     p.add_argument("--wait-seconds", type=float, default=5)
@@ -528,14 +811,28 @@ def main(argv=None):
     except (EvidenceError, OSError, ValueError) as exc:
         root = args.get("root", Path.cwd())
         session = args.get("thread") or os.environ.get("CODEX_THREAD_ID", UNAVAILABLE)
+        stage = args.get("stage", "Code Review" if args.get("review") else UNAVAILABLE)
+        if command in {"collect", "verify"}:
+            try:
+                origin = check_seal(json.loads(Path(args.get("birth") or args["evidence"]).read_text()))
+                origin = origin.get("birth", origin)
+                root, session, stage = origin["root"], origin["parent_thread"], origin["role"]
+            except (OSError, ValueError, KeyError):
+                pass
+        elif args.get("capture"):
+            try:
+                stage = validate_capture(load_capture(args["capture"]), client="codex")["role"]
+            except (OSError, ValueError):
+                pass
         host, version, source = UNAVAILABLE, UNAVAILABLE, UNAVAILABLE
-        if command in {"preflight", "prepare"} and session != UNAVAILABLE:
+        if session != UNAVAILABLE:
             try:
                 path, _, meta, _ = Rollout().session(session)
                 host, version, source = meta["originator"], meta["cli_version"], str(path)
             except (EvidenceError, OSError, ValueError):
                 pass  # No binary/config fallback for unavailable runtime.
-        print(json.dumps({"result": "blocked", "schema": SCHEMA, "root": str(root), "bound_card": Path(root).name.split("-")[1] if Path(root).name.startswith("card-") else UNAVAILABLE, "session": session, "host": host, "host_version": version, "source": source, "code": getattr(exc, "code", "invalid_input"), "observed": getattr(exc, "observed", UNAVAILABLE), "detail": str(exc), "recovery": getattr(exc, "recovery", "restore source; preserve Status/artifacts")}, sort_keys=True))
+        code = getattr(exc, "code", "invalid_input")
+        print(json.dumps({"result": failure_result(code, collecting=command in {"collect", "verify"}), "schema": SCHEMA, "root": str(root), "bound_card": Path(root).name.split("-")[1] if Path(root).name.startswith("card-") else UNAVAILABLE, "stage": stage, "session": session, "child_thread": getattr(exc, "child_thread", UNAVAILABLE), "host": host, "host_version": version, "source": source, "code": code, "observed": getattr(exc, "observed", UNAVAILABLE), "detail": str(exc), "recovery": getattr(exc, "recovery", "restore source; preserve Status/artifacts")}, sort_keys=True))
         return 2
 
 

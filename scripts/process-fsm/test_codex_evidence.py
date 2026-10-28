@@ -1,5 +1,6 @@
 """Controlled rollout fixtures exercise refusals; these do not qualify any host."""
 import json
+import copy
 import sqlite3
 from pathlib import Path
 
@@ -12,7 +13,8 @@ from model_selection_fixtures import machine_models
 
 
 class Essay:
-    def __init__(self, tmp_path, monkeypatch, role="qa-gate", sandbox="workspace-write", wave="unavailable", qualification=True):
+    def __init__(self, tmp_path, monkeypatch, role="qa-gate", sandbox="workspace-write", wave="unavailable", qualification=True, host="codex_exec", skip_prepare=False, capture_suffix=""):
+        self.host = host
         self.root = tmp_path / "card-1095-fixture"
         self.root.mkdir(exist_ok=True)
         self.home = Path.home() / ".codex"
@@ -32,14 +34,16 @@ class Essay:
             if not db.execute("SELECT id FROM threads WHERE id=?", (self.parent_id,)).fetchone():
                 db.execute("INSERT INTO threads VALUES (?,?,?)", (self.parent_id, str(self.parent), "/root"))
         self.cap = resolve("codex", "execucao", role=role)
-        self.capture = tmp_path / (role + ".capture.json")
+        self.capture = tmp_path / (role + capture_suffix + ".capture.json")
         save_capture(self.capture, self.cap)
-        self.p = [self.row("session_meta", dict(id=self.parent_id, originator="codex_exec", cli_version="0.162.1", cwd=str(self.root), timestamp="2026-10-13T01:00:00Z", source="exec")), self.row("turn_context", dict(turn_id="parent-turn", model="parent-model", effort="medium", cwd=str(self.root), sandbox_policy={"type": sandbox}))]
+        self.p = [self.row("session_meta", dict(id=self.parent_id, originator=self.host, cli_version="0.162.1", cwd=str(self.root), timestamp="2026-10-13T01:00:00Z", source="exec")), self.row("turn_context", dict(turn_id="parent-turn", model="parent-model", effort="medium", cwd=str(self.root), sandbox_policy={"type": sandbox}))]
         if self.parent.exists():
             self.p = [json.loads(line) for line in self.parent.read_text().splitlines()]
         else:
             self.write(self.parent, self.p)
         (self.root / ce.DEFAULT_DEST).mkdir(parents=True, mode=0o700, exist_ok=True)
+        if skip_prepare:
+            return
         self.receipt = ce.prepare(root=self.root, capture=self.capture, task_name=self.task, qualification=qualification, wave_id=wave, review_diff_sha256="a" * 64)
         self.birth = Path(self.receipt["birth"])
 
@@ -54,8 +58,8 @@ class Essay:
     def complete(self, turns=None):
         turns = turns or [("child-turn", self.cap["arguments"])]
         native = {"internal_chat_message_metadata_passthrough": {"turn_id": "parent-turn"}}
-        self.p += [self.row("response_item", dict(type="function_call", name="spawn_agent", namespace="collaboration", call_id="call-" + self.task, arguments=json.dumps(dict(task_name=self.task, **self.cap["arguments"], message="sensitive prompt")), **native)), self.row("response_item", dict(type="function_call_output", call_id="call-" + self.task, output=json.dumps({"task_name": self.agent_path}), **native))]
-        self.c = [self.row("session_meta", dict(id=self.child_id, originator="codex_exec", cli_version="0.162.1", cwd=str(self.root), timestamp="2026-10-13T01:01:00Z", source={"subagent": {"thread_spawn": {"parent_thread_id": self.parent_id, "agent_path": self.agent_path}}}))]
+        self.p += [self.row("response_item", dict(type="function_call", name="spawn_agent", namespace="collaboration", call_id="call-" + self.task, arguments=json.dumps(dict(task_name=self.task, **self.cap["arguments"], fork_turns="none", message="sensitive prompt")), **native)), self.row("response_item", dict(type="function_call_output", call_id="call-" + self.task, output=json.dumps({"task_name": self.agent_path}), **native))]
+        self.c = [self.row("session_meta", dict(id=self.child_id, originator=self.host, cli_version="0.162.1", cwd=str(self.root), timestamp="2026-10-13T01:01:00Z", source={"subagent": {"thread_spawn": {"parent_thread_id": self.parent_id, "agent_path": self.agent_path}}}))]
         for turn, pair in turns:
             self.c += [self.row("event_msg", dict(type="task_started", turn_id=turn)), self.row("turn_context", dict(turn_id=turn, model=pair.get("model"), effort=pair.get("reasoning_effort"), cwd=str(self.root), sandbox_policy={"type": self.sandbox})), self.row("event_msg", dict(type="task_complete", turn_id=turn, last_agent_message="returned " + turn))]
             self.p.append(self.row("response_item", dict(type="agent_message", author=self.agent_path, content=[{"type": "input_text", "text": f"Message Type: FINAL_ANSWER\nTask name: /root\nSender: {self.agent_path}\nPayload:\nreturned {turn}"}])))
@@ -79,6 +83,39 @@ class Essay:
 @pytest.fixture
 def essay(tmp_path, monkeypatch, machine_models):
     return Essay(tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("parent", [False, True])
+def test_identical_context_repetitions_preserve_all_origin_rows(essay, parent):
+    essay.complete()
+    rows, path = (essay.p, essay.parent) if parent else (essay.c, essay.child)
+    position = next(i for i, row in enumerate(rows) if row["type"] == "turn_context")
+    repeated = copy.deepcopy(rows[position])
+    repeated["timestamp"] = "2026-10-13T01:02:00Z"
+    rows.insert(position + 1, repeated)
+    essay.write(path, rows)
+    proof = essay.collect()
+    assert len(proof["turns"]) == 1
+    refs = [s for s in proof["sources"] if s["source"] == str(path) and s["type"] == "turn_context"]
+    assert len(refs) == 2
+    assert refs[0]["raw_sha256"] != refs[1]["raw_sha256"]
+    assert ce.verify_evidence(proof["evidence_path"])["sources"] == proof["sources"]
+    rows[position + 1]["payload"]["extra_runtime_field"] = "changed"
+    essay.write(path, rows)
+    with pytest.raises(ce.EvidenceError, match="turn_conflict"):
+        ce.verify_evidence(proof["evidence_path"])
+
+
+@pytest.mark.parametrize("field,value", [("model", "other"), ("effort", "low"),
+    ("cwd", "/source"), ("sandbox_policy", {"type": "read-only"}), ("unrecognized", True)])
+def test_any_repeated_context_payload_divergence_is_refused(essay, field, value):
+    essay.complete()
+    repeated = copy.deepcopy(essay.c[2])
+    repeated["payload"][field] = value
+    essay.c.insert(3, repeated)
+    essay.write(essay.child, essay.c)
+    with pytest.raises(ce.EvidenceError, match="turn_conflict"):
+        essay.collect()
 
 
 def test_native_chain_private_minimal_stable_idempotent_and_gate(essay):
@@ -225,7 +262,7 @@ def test_refusal_preserves_work_and_status(essay, mutation, code):
 
 
 @pytest.mark.parametrize("mutation,code", [
-    (lambda e: e.p[0]["payload"].update(originator="other"), "unsupported_host"),
+    (lambda e: e.p[0]["payload"].update(originator=""), "unsupported_schema"),
     (lambda e: e.p[0]["payload"].pop("cli_version"), "unsupported_schema"),
     (lambda e: e.p[1]["payload"].pop("turn_id"), "unsupported_schema"),
     (lambda e: e.p[1]["payload"].update(cwd="/other"), "worktree_mismatch"),
@@ -257,11 +294,23 @@ def test_the_schema_error_names_the_record_kind_the_field_and_the_observed_versi
     assert e.value.code == "unsupported_schema" and "turn_context" in str(e.value) and "sandbox_policy" in str(e.value) and "9.9.9" in str(e.value)
 
 
-def test_originator_still_has_to_be_codex_exec_in_every_version(essay):
-    essay.p[0]["payload"].update(originator="codex_tui", cli_version="9.9.9")
+@pytest.mark.parametrize("host", ["codex-tui", "codex_app_server", "future-surface"])
+def test_host_name_does_not_substitute_for_schema_and_qualification(essay, host):
+    essay.p[0]["payload"].update(originator=host, cli_version="9.9.9")
     essay.write(essay.parent, essay.p)
-    with pytest.raises(ce.EvidenceError, match="unsupported_host"):
-        ce.preflight(root=essay.root, qualification=True)
+    result = ce.preflight(root=essay.root, qualification=True)
+    assert result["host"] == host
+    assert result["driver"] == ce.NATIVE_DRIVER
+    with pytest.raises(ce.EvidenceError, match="unverified"):
+        ce.preflight(root=essay.root)
+
+
+def test_legacy_birth_cannot_be_relabelled_as_another_host(essay):
+    essay.complete()
+    essay.p[0]["payload"]["originator"] = "codex-tui"
+    essay.write(essay.parent, essay.p)
+    with pytest.raises(ce.EvidenceError, match="host_mismatch"):
+        essay.collect()
 
 
 def test_divergent_evidence_fails_the_gate_in_a_new_version_too(essay):
@@ -391,7 +440,15 @@ def test_review_provenance_wave_sandbox_and_diff(tmp_path, monkeypatch, machine_
         ce.qualify(qualified["evidence_path"], list(qualifier.birth.parent.glob("*.failure-*.json")))
     proofs = []
     for role in ("diff-reviewer", "code-reviewer"):
-        e = Essay(tmp_path, monkeypatch, role=role, sandbox="read-only", wave="review-1095", qualification=qualification)
+        e = Essay(tmp_path, monkeypatch, role=role, sandbox="read-only", wave="review-1095", qualification=True)
+        if not qualification:
+            # Rehearse a historical receipt, never mint a new stage receipt by
+            # bypassing the missing-capability preflight in production code.
+            birth = json.loads(e.birth.read_text())
+            for key in ("integrity_sha256", "stage_contract", "stage_status", "work_release"):
+                birth.pop(key, None)
+            birth["qualification"] = False
+            e.birth.write_text(json.dumps(ce.sealed(birth)))
         e.complete()
         if qualification:
             args = json.loads(e.p[-3]["payload"]["arguments"])
@@ -405,7 +462,8 @@ def test_review_provenance_wave_sandbox_and_diff(tmp_path, monkeypatch, machine_
         with pytest.raises(ReviewDiffError, match="qualification evidence cannot prove product review"):
             verify_wave(root=e.root, wave_id="review-1095", expected_sha256="a" * 64, bound_card="1095")
         return
-    assert verify_wave(root=e.root, wave_id="review-1095", expected_sha256="a" * 64, bound_card="1095")[1] == ("child-diff-reviewer", "child-code-reviewer")
+    with pytest.raises(ReviewDiffError, match="dedicated principal/coordinator chain"):
+        verify_wave(root=e.root, wave_id="review-1095", expected_sha256="a" * 64, bound_card="1095")
     proofs[0]["review_diff_sha256"] = "b" * 64
     log = e.root / ".cursor/tmp/codex-child-proxies.jsonl"
     log.write_text("".join(json.dumps(p) + "\n" for p in proofs))
@@ -430,7 +488,7 @@ def test_process_event_refuses_before_moving_and_ambiguous_client(essay, monkeyp
 def test_trusted_hook_rechecks_prepared_birth_and_current_session(essay, monkeypatch):
     import codex_adapter
     monkeypatch.setattr(codex_adapter, "_repo_root", lambda cwd: essay.root)
-    args = dict(task_name=essay.task, **essay.cap["arguments"], message=f"model_selection_capture: {essay.capture}\nruntime_evidence_birth: {essay.birth}")
+    args = dict(task_name=essay.task, fork_turns="none", **essay.cap["arguments"], message=f"model_selection_capture: {essay.capture}\nruntime_evidence_birth: {essay.birth}")
     request = {"tool_name": "Agent", "tool_input": args, "cwd": str(essay.root)}
     assert codex_adapter.pre_tool_use(request) is None
     monkeypatch.setenv("CODEX_THREAD_ID", "another-parent")
@@ -542,3 +600,224 @@ def test_model_proxy_consumes_verified_birth_and_all_turns(essay):
     assert not evidence(**args)["successful"]
     assert evidence(**args, runtime_evidence=result["evidence_path"])["successful"]
     assert verify_continuation(essay.cap, args["observed"], host=args["host"], host_version=args["host_version"], status=args["status"], payload_returned=True, runtime_evidence=result["evidence_path"])["successful"]
+
+
+@pytest.mark.parametrize("host", ["codex-tui", "codex_app_server"])
+def test_surface_requires_its_own_complete_native_qualification(tmp_path, monkeypatch, machine_models, host):
+    e = Essay(tmp_path, monkeypatch, host=host)
+    with pytest.raises(ce.EvidenceError, match="birth_mismatch"):
+        e.collect()
+    e.complete()
+    proof = e.collect()
+    assert proof["driver"] == ce.NATIVE_DRIVER
+    assert proof["host"] == host
+    ce.qualify(proof["evidence_path"], list(e.birth.parent.glob("*.failure-*.json")))
+    assert ce.preflight(root=e.root)["result"] == "ready"
+    # A different active surface cannot reuse this qualification.
+    alternate = e.sessions / "alternate.jsonl"
+    other_rows = [json.loads(json.dumps(row)) for row in e.p[:2]]
+    other_rows[0]["payload"].update(id="alternate", originator="another-surface")
+    e.write(alternate, other_rows)
+    with sqlite3.connect(e.home / "state_5.sqlite") as db:
+        db.execute("INSERT INTO threads VALUES (?,?,?)", ("alternate", str(alternate), "/root"))
+    # Even a copied, intact qualification cannot qualify another surface.
+    ce.qualification_path(e.birth.parent, "another-surface").write_bytes(
+        ce.qualification_path(e.birth.parent, host).read_bytes())
+    with pytest.raises(ce.EvidenceError, match="qualification belongs to another host surface"):
+        ce.preflight(root=e.root, thread="alternate")
+
+
+def test_native_rebind_uses_observed_active_turn_not_historical_session_cwd(essay):
+    essay.p[0]["payload"]["cwd"] = "/historical-launch-directory"
+    essay.write(essay.parent, essay.p)
+    assert ce.preflight(root=essay.root, qualification=True)["result"] == "ready"
+    # Neither the launch directory nor an arbitrary --root overrides the runtime turn.
+    with pytest.raises(ce.EvidenceError, match="worktree_mismatch") as err:
+        ce.preflight(root="/historical-launch-directory", qualification=True)
+    assert "turn_cwd=" in err.value.detail
+    assert "shell workdir alone" in err.value.recovery
+
+
+@pytest.mark.parametrize("mutation,code", [
+    (lambda e: e.c[2]["payload"].update(model="wrong"), "observed_mismatch"),
+    (lambda e: e.c[2]["payload"].update(effort="wrong"), "observed_mismatch"),
+    (lambda e: e.c[2]["payload"].update(cwd="/wrong"), "worktree_mismatch"),
+    (lambda e: e.c[0]["payload"]["source"]["subagent"]["thread_spawn"].update(parent_thread_id="wrong"), "source_conflict"),
+    (lambda e: e.c[3]["payload"].update(last_agent_message=""), "payload_unavailable"),
+])
+def test_interactive_surface_preserves_refusals(tmp_path, monkeypatch, machine_models, mutation, code):
+    e = Essay(tmp_path, monkeypatch, host="codex-tui").complete()
+    mutation(e)
+    e.write(e.child, e.c)
+    with pytest.raises(ce.EvidenceError, match=code):
+        e.collect()
+
+
+def test_interactive_review_still_requires_runtime_read_only(tmp_path, monkeypatch, machine_models):
+    e = Essay(tmp_path, monkeypatch, host="codex-tui")
+    with pytest.raises(ce.EvidenceError, match="parent_sandbox_mismatch"):
+        ce.preflight(root=e.root, qualification=True, review=True)
+
+
+def test_parent_worktree_binding_is_revalidated_during_collection(essay):
+    essay.complete()
+    essay.p[1]["payload"]["cwd"] = "/another-card"
+    essay.write(essay.parent, essay.p)
+    with pytest.raises(ce.EvidenceError, match="worktree_mismatch"):
+        essay.collect()
+
+
+def test_native_stage_preflight_refuses_unobserved_context_before_receipt(essay):
+    with pytest.raises(ce.EvidenceError, match="birth_mismatch"):
+        essay.collect()
+    essay.complete()
+    proof = essay.collect()
+    ce.qualify(proof["evidence_path"], list(essay.birth.parent.glob("*.failure-*.json")))
+    before = {p.name: p.read_bytes() for p in essay.birth.parent.iterdir()}
+    with pytest.raises(ce.EvidenceError) as failure:
+        ce.prepare(root=essay.root, capture=essay.capture, task_name="must_not_spawn")
+    assert failure.value.code == "stage_capability_missing"
+    assert "#1095" in str(failure.value) and "qa-gate" in str(failure.value)
+    assert failure.value.observed["context_isolation"] == "unavailable"
+    assert "barreira" in str(failure.value)
+    assert {p.name: p.read_bytes() for p in essay.birth.parent.iterdir()} == before
+    # Requested isolation and unrelated runtime metadata are not effective proof.
+    essay.c[0]["payload"].update(history_mode="paginated", context_window={"window_id": "native-id"}, context_isolation="verified")
+    essay.write(essay.child, essay.c)
+    fresh = ce.extract(json.loads(essay.birth.read_text()))
+    assert fresh["native_arguments"]["fork_turns"] == "none"
+    assert fresh["capabilities"]["context_isolation"] == "unavailable"
+    assert fresh["work_release"] == "diagnostic_only"
+
+
+def test_new_birth_requires_actual_isolated_context_request_even_for_diagnostic(essay):
+    essay.complete()
+    args = json.loads(essay.p[2]["payload"]["arguments"])
+    args["fork_turns"] = "all"
+    essay.p[2]["payload"]["arguments"] = json.dumps(args)
+    essay.write(essay.parent, essay.p)
+    with pytest.raises(ce.EvidenceError, match="context_request_mismatch"):
+        essay.collect()
+    assert json.loads(next(essay.birth.parent.glob("*.failure-*.json")).read_text())["result"] == "failed"
+
+
+def test_interruption_is_not_completed_or_blocked_before_spawn(essay):
+    essay.complete()
+    essay.c[-1] = essay.row("event_msg", {"type": "turn_aborted", "turn_id": "child-turn", "reason": "interrupted"})
+    essay.write(essay.child, essay.c)
+    with pytest.raises(ce.EvidenceError, match="child_interrupted"):
+        essay.collect()
+    assert json.loads(next(essay.birth.parent.glob("*.failure-*.json")).read_text())["result"] == "interrupted"
+    assert not list(essay.birth.parent.glob("*.evidence.json"))
+
+
+def test_declarative_readonly_and_probe_claims_never_satisfy_effective_review(essay):
+    essay.complete()
+    proof = essay.collect()
+    proof.update(parent_sandbox="read-only", context_isolation="verified", review_diff_read=True,
+                 review_write_denial_readback=True, sandbox_mode="read-only")
+    proof["capabilities"] = {k: "verified" for k in proof["capabilities"]}
+    with pytest.raises(ce.EvidenceError, match="context_isolation.*review_diff_read.*review_write_denial_readback"):
+        ce.require_review_guarantees(proof)
+
+
+def test_process_transition_preserves_state_when_native_stage_guarantee_is_missing(essay):
+    from process_event import process_event
+    with pytest.raises(ce.EvidenceError, match="birth_mismatch"):
+        essay.collect()
+    essay.complete()
+    proof = essay.collect()
+    ce.qualify(proof["evidence_path"], list(essay.birth.parent.glob("*.failure-*.json")))
+    calls = []
+    class Mover:
+        def set_status(self, *args, **kwargs):
+            calls.append((args, kwargs))
+    state = dict(q="Todo", q_git="card-1095-fixture", bound_card="1095")
+    result = process_event("iniciar_design", cwd=essay.root, card="1095", resolve_fn=lambda *a, **kw: state, mover=Mover())
+    assert result["reason"] == "codex_evidence:stage_capability_missing"
+    assert result["state"] == "Todo" and not calls
+
+
+def test_another_thread_cannot_replace_same_chat_stage(essay):
+    with pytest.raises(ce.EvidenceError, match="chat_binding_mismatch"):
+        ce.preflight(root=essay.root, stage="qa-gate", thread="external-session")
+
+
+def test_cli_interruption_uses_birth_identity_and_never_reports_prebirth_block(essay, monkeypatch, capsys):
+    essay.complete()
+    essay.c[-1] = essay.row("event_msg", {"type": "turn_aborted", "turn_id": "child-turn"})
+    essay.write(essay.child, essay.c)
+    monkeypatch.chdir(essay.home)
+    assert ce.main(["collect", "--birth", str(essay.birth), "--wait-seconds", "0"]) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["result"] == "interrupted" and out["bound_card"] == "1095"
+    assert out["root"] == str(essay.root) and out["stage"] == "qa-gate"
+    assert out["child_thread"] == essay.child_id and out["session"] == essay.parent_id
+
+def t5_lifecycle_fixture(essay):
+    with pytest.raises(ce.EvidenceError, match="birth_mismatch"):
+        essay.collect()
+    essay.complete()
+    proof = essay.collect()
+    ce.qualify(proof["evidence_path"], list(essay.birth.parent.glob("*.failure-*.json")))
+    change = essay.root / "openspec" / "changes" / "card-1095-fixture"
+    change.mkdir(parents=True)
+    for name in ("proposal.md", "tasks.md"):
+        (change / name).write_text("# fixture\n")
+    (change / "design.md").write_text("UI impact: none\nlive_route: N/A harness-only\nsurface: new\n")
+    spec = change / "specs" / "harness" / "spec.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("# fixture contract\n")
+    return change
+
+
+def t5_lifecycle_request(essay, change, mover):
+    from process_event import process_event
+
+    return process_event(
+        "submeter_design", cwd=essay.root, card="1095", change="card-1095-fixture",
+        status="Design", q_git="card-1095-fixture", bound_card="1095",
+        change_dir=change, mover=mover, client="codex",
+    )
+
+
+def test_t5_uses_real_basic_preflight_without_qualifying_context_or_prepare(essay):
+    from process_event import FakeMover, compute_digest, sidecar_path
+
+    change = t5_lifecycle_fixture(essay)
+    pf = ce.preflight(root=essay.root)
+    assert pf["result"] == "ready"
+    assert pf["capabilities"]["context_isolation"] == "unavailable"
+    mover = FakeMover()
+    out = t5_lifecycle_request(essay, change, mover)
+    assert out["result"] == "transition" and out["reason"] == "T5"
+    assert mover.calls == [(1095, "Aprovação de Design")]
+    assert sidecar_path(change).read_text().strip() == compute_digest(change, None)
+    births_before = set(essay.birth.parent.glob("*.birth.json"))
+    with pytest.raises(ce.EvidenceError, match="stage_capability_missing"):
+        ce.prepare(root=essay.root, capture=essay.capture, task_name="still_no_stage")
+    assert set(essay.birth.parent.glob("*.birth.json")) == births_before
+    # The lifecycle qualification did not become context evidence.
+    assert ce.preflight(root=essay.root)["capabilities"]["context_isolation"] == "unavailable"
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("qualification", "unverified"),
+    ("worktree", "worktree_mismatch"),
+    ("source", "source_unavailable"),
+])
+def test_t5_real_basic_preflight_refuses_missing_qualification_identity_or_source(essay, fault, code):
+    from process_event import FakeMover, sidecar_path
+
+    change = t5_lifecycle_fixture(essay)
+    if fault == "qualification":
+        ce.qualification_path(essay.birth.parent, essay.host).unlink()
+    elif fault == "worktree":
+        essay.p[1]["payload"]["cwd"] = "/other-card"
+        essay.write(essay.parent, essay.p)
+    else:
+        essay.parent.unlink()
+    mover = FakeMover()
+    out = t5_lifecycle_request(essay, change, mover)
+    assert out["result"] == "reject" and out["reason"] == "codex_evidence:" + code
+    assert mover.calls == [] and not sidecar_path(change).exists()

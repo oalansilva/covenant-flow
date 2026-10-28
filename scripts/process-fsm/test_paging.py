@@ -206,16 +206,22 @@ def test_codex_page_routes_reviewers_to_codex_without_changing_cursor_page():
     assert "Agents nativos do Codex" in codex
     assert "`diff-reviewer` e `code-reviewer`" in codex
     assert "ambos `sandbox_mode=read-only` recebem o mesmo" in codex
-    assert "prova por sinal/trace autoritativo do runtime" in codex
-    assert "o turno que fará os spawns está `read-only`" in codex
+    assert "fonte autoritativa da cadeia principal/coordenador/filhos" in codex
+    assert "read-only desde o nascimento" in codex
     assert "Sem prova, modo diferente ou trace indisponível, recuse visivelmente antes de qualquer spawn" in codex
     assert "O `sandbox_mode` do Agent configura só o filho e não prova nem altera o sandbox do turno pai" in codex
-    assert "`/permissions` → `Read Only`" in codex
+    assert "O principal permanece gravável, sem alternância manual de permissões" in codex
+    assert "`/permissions`" not in codex
     assert "`codex exec --sandbox read-only`" in codex
     assert "até ambos retornarem `completed` com payload" in codex
     assert "registra proxies via `codex_proxy.py`" in codex
     assert "metadados observados de runtime/trace e retorno, nunca inferidos" in codex
     assert "use a captura local de nascimento, sem fallback" in codex
+    assert "`codex_review_session.py prepare`" in codex
+    assert "parent/turno unavailable só se resolvem das fontes reais" in codex
+    assert "Coordenador novo qualifica contexto opção 2 e os dois perfis/probes diagnósticos na própria sessão" in codex
+    assert "Retomadas nativas conservam read-only; só o principal persiste" in codex
+    assert "Perfis permitem só a tentativa do helper em fixture descartável, exigindo deny/readback antes do parecer" in codex
     assert "scripts/process-fsm/review_process_checklist.py" in codex
     assert "`review_diff_path` e SHA-256" in codex
     assert "`codex/execucao` da escolha local" in codex
@@ -238,31 +244,34 @@ def test_codex_page_routes_reviewers_to_codex_without_changing_cursor_page():
     )
     codex_protocol = skill.split("Protocolo por filho:", 1)[1].split("\n\n", 1)[0]
     review_contract = (
-        skill.split("No Code Review, preserve esta ordem:", 1)[1]
+        skill.split("No Code Review, o principal permanece gravável", 1)[1]
         .lstrip("\n")
-        .split("\n\n", 1)[0]
+        .split("\n\n**Diff grande e saída:**", 1)[0]
     )
     assert "ordem de preparação gravável, onda nativa `read-only` e persistência gravável" in codex_protocol
-    assert "`sandbox_mode=read-only` em `.codex/agents/*.toml` configura apenas cada filho" in codex_protocol
-    assert "sessão Codex CLI dedicada" in review_contract
-    assert "recuse visivelmente antes de qualquer spawn" in review_contract
-    assert "recebem o mesmo path + SHA-256" in review_contract
-    assert "par capturado de `codex/execucao` da escolha local" in review_contract
-    assert "`sandbox_mode=read-only`" in review_contract
-    assert "A sessão permanece `read-only` até ambos retornarem `completed` com payload" in review_contract
-    assert "não grave proxies nem faça follow-up sob escrita nessa sessão" in review_contract
-    assert "Só depois dos dois retornos, o pai/orquestrador gravável registra um proxy" in review_contract
-    assert "Nunca invente ou infira metadados" in review_contract
-    assert "Use a captura de nascimento aplicável, sem comparar com arquivo posteriormente editado e sem fallback" in review_contract
-    assert "Em seguida execute `verify-wave`" in review_contract
-    assert "scripts/process-fsm/review_process_checklist.py` passarem (`PASS`)" in review_contract
-    assert "Não inferir que o Agent API controla o sandbox do pai" in skill
+    assert "`sandbox_mode=read-only` em `.codex/agents/*.toml` é declaração de perfil; não comprova nem altera permissões efetivas" in codex_protocol
+    assert "coordenador Codex dedicado automático **read-only desde o nascimento**" in review_contract
+    assert "nem pedir alternância manual de permissões" in review_contract
+    assert "Fonte ausente ou qualificação incompleta bloqueia antes de trabalho de produto" in review_contract
+    assert "ambos** Agents nativos no mesmo turno" in review_contract
+    assert "`diff-reviewer` e `code-reviewer`, filhos distintos" in review_contract
+    assert "capturas próprias e mesmo path/SHA" in review_contract
+    assert "dois probes diagnósticos em perfis nomeados" in review_contract
+    assert "exigindo deny/readback antes do parecer" in review_contract
+    assert "Coordenador/filhos mantêm read-only até completed e ambos payloads" in review_contract
+    assert "Principal gravável coleta/proxy pelos envelopes/capturas originais" in review_contract
+    assert "cadeia principal→coordenador→filhos" in review_contract
+    assert "não reescreve traces nem fabrica receipt posterior" in review_contract
+    assert "dois perfis/filhos, turno do coordenador, pacote/diff/SHA, seleção/contexto e read-only/probes" in review_contract
+    assert "Persistência roda no principal comprovado" in review_contract
+    assert "`review_process_checklist.py`; commit só com ambos PASS" in review_contract
     skill_order = [
-        review_contract.index("O pai/orquestrador gravável materializa"),
-        review_contract.index("Inicie no mesmo worktree uma sessão Codex CLI dedicada"),
-        review_contract.index("Só depois dos dois retornos, o pai/orquestrador gravável registra"),
-        review_contract.index("Em seguida execute `verify-wave`"),
-        review_contract.index("Faça commit somente depois que `verify-wave`"),
+        review_contract.index("Principal materializa/verifica diff exato e SHA"),
+        review_contract.index("Coordenador novo não herda qualificação do principal"),
+        review_contract.index("coordenador verifica pacote/preflight/Status vivos"),
+        review_contract.index("Principal gravável coleta/proxy"),
+        review_contract.index("`codex_review.py verify-wave` revalida cadeia"),
+        review_contract.index("Depois `review_process_checklist.py`; commit só com ambos PASS"),
     ]
     assert skill_order == sorted(skill_order)
 

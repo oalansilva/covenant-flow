@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 from test_overlay_fixtures import FIELD_ID, filled_overlay_dict, write_overlay  # noqa: E402
 import design_clone_gate  # noqa: E402
+from model_selection_fixtures import machine_models  # noqa: E402, F401
 from fsm import load_fsm  # noqa: E402
 from guard import decide  # noqa: E402
 from process_event import (  # noqa: E402
@@ -1422,3 +1423,424 @@ def test_item_edit_rate_limit_updates_cache_not_move_failed(
     assert stored is not None
     assert stored["remaining"] == 0
     assert stored["source"] == "graphql-headers"
+
+import process_event as pe
+
+
+@pytest.fixture
+def unavailable_codex_stage(monkeypatch):
+    import account_registration
+    import codex_evidence
+
+    monkeypatch.setenv("CODEX_THREAD_ID", "codex-i4-fixture")
+    calls = {"registration": [], "stage": []}
+    monkeypatch.setattr(
+        account_registration, "require_active",
+        lambda client, root: calls["registration"].append((client, root)),
+    )
+
+    def unavailable(**kwargs):
+        calls["stage"].append(kwargs)
+        raise codex_evidence.EvidenceError("stage_capability_missing", "fixture: missing context isolation")
+
+    monkeypatch.setattr(codex_evidence, "preflight", unavailable)
+    return calls
+
+
+def approved_i4_change(tmp_path, *, changed=True):
+    change = tmp_path / "openspec" / "changes" / "card-612-process-event"
+    change.mkdir(parents=True)
+    (change / "design.md").write_text("# approved design\n")
+    sidecar_path(change).write_text(pe.compute_digest(change, None) + "\n")
+    if changed:
+        (change / "design.md").write_text("# revised design\n")
+    return change
+
+
+@pytest.mark.parametrize("event,state", [
+    ("iniciar_apply", "Pronto para Dev"),
+    ("pedir_review", "Em desenvolvimento"),
+])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_codex_measured_i4_precedes_stage_capability_without_starting_stage(
+    tmp_path, unavailable_codex_stage, event, state, dry_run,
+):
+    change = approved_i4_change(tmp_path)
+    original_sidecar = sidecar_path(change).read_bytes()
+    mover = FakeMover()
+    out = process_event(
+        event, card="612", change="card-612-process-event",
+        resolve_fn=lambda *args, **kwargs: {"q": None, "q_git": "card-612-process-event", "bound_card": "612"},
+        status_provider=lambda bound: state if bound == "612" else None,
+        change_dir=change, mover=mover, dry_run=dry_run, client="codex",
+    )
+    assert out == {"result": "transition", "state": state, "to": "Design", "reason": "I4"}
+    assert mover.calls == ([] if dry_run else [(612, "Design")])
+    assert len(unavailable_codex_stage["registration"]) == 1
+    assert unavailable_codex_stage["stage"] == []
+    assert sidecar_path(change).read_bytes() == original_sidecar
+
+
+@pytest.mark.parametrize("event,state", [
+    ("iniciar_apply", "Pronto para Dev"),
+    ("pedir_review", "Em desenvolvimento"),
+])
+def test_codex_unchanged_digest_still_requires_stage_capability(
+    tmp_path, unavailable_codex_stage, event, state,
+):
+    change = approved_i4_change(tmp_path, changed=False)
+    mover = FakeMover()
+    out = process_event(
+        event, card="612", status=state, q_git="card-612-process-event",
+        bound_card="612", change_dir=change, mover=mover, client="codex",
+    )
+    assert out["reason"] == "codex_evidence:stage_capability_missing"
+    assert out["result"] == "reject" and out["to"] is None and mover.calls == []
+    assert unavailable_codex_stage["stage"][0]["stage"] == event
+
+
+@pytest.mark.parametrize("event,state", [
+    ("pedir_review", "Pronto para Dev"),
+    ("iniciar_apply", "Em desenvolvimento"),
+    ("pedir_review", "Done"),
+    ("iniciar_apply", None),
+])
+def test_codex_changed_digest_wrong_state_does_not_compile_t17(
+    tmp_path, unavailable_codex_stage, event, state,
+):
+    mover = FakeMover()
+    out = process_event(
+        event, card="612", status=state, q_git="card-612-process-event",
+        bound_card="612", change_dir=approved_i4_change(tmp_path), mover=mover,
+        status_provider=lambda bound: state, client="codex",
+    )
+    assert out["result"] == "reject" and out["to"] is None and mover.calls == []
+
+
+@pytest.mark.parametrize("overrides,reason", [
+    ({"card": "999"}, "card_mismatch"),
+    ({"change": "card-999-other"}, "change_mismatch"),
+    ({"q_git": "develop"}, "guard:q_git_card"),
+    ({"q_git": "main"}, "guard:q_git_card"),
+    ({"bound_card": "999"}, "card_mismatch"),
+    ({"bound_card": None}, "unbound"),
+    ({"client": "cursor"}, "codex_evidence:ambiguous_client"),
+])
+def test_codex_i4_preserves_identity_card_branch_and_client_checks(
+    tmp_path, unavailable_codex_stage, overrides, reason,
+):
+    mover = FakeMover()
+    kwargs = dict(
+        card="612", change="card-612-process-event", status="Em desenvolvimento",
+        q_git="card-612-process-event", bound_card="612",
+        change_dir=approved_i4_change(tmp_path), mover=mover, client="codex",
+        resolve_fn=lambda *args, **kwargs: {"q": None, "q_git": None, "bound_card": None},
+    )
+    kwargs.update(overrides)
+    # A branch outside card-* is tested without a contradictory explicit slug.
+    if overrides.get("q_git") in {"develop", "main"}:
+        kwargs["change"] = None
+    out = process_event("pedir_review", **kwargs)
+    assert out["result"] == "reject" and out["reason"] == reason
+    assert out["to"] is None and mover.calls == []
+    assert unavailable_codex_stage["stage"] == []
+
+
+@pytest.mark.parametrize("code", [
+    "hooks_inactive", "hooks_unreviewed", "hooks_changed", "adapter_divergent",
+])
+def test_codex_i4_never_bypasses_hook_registration_or_trust(
+    tmp_path, monkeypatch, unavailable_codex_stage, code,
+):
+    import account_registration
+
+    def refused(*args, **kwargs):
+        raise account_registration.RegistrationRefusal(code, "fixture registration refusal")
+
+    monkeypatch.setattr(account_registration, "require_active", refused)
+    mover = FakeMover()
+    out = process_event(
+        "pedir_review", card="612", status="Em desenvolvimento",
+        q_git="card-612-process-event", bound_card="612",
+        change_dir=approved_i4_change(tmp_path), mover=mover, client="codex",
+    )
+    assert out["reason"] == "codex_evidence:" + code
+    assert out["result"] == "reject" and out["to"] is None and mover.calls == []
+    assert unavailable_codex_stage["stage"] == []
+
+
+def test_codex_i4_requires_the_existing_engine_to_authorize_guard_actor(
+    tmp_path, unavailable_codex_stage,
+):
+    table = load_fsm()
+    for transition in table["transitions"]:
+        if transition["id"] == "T17b":
+            transition["actor"] = "Alan"
+    mover = FakeMover()
+    out = process_event(
+        "pedir_review", card="612", status="Em desenvolvimento",
+        q_git="card-612-process-event", bound_card="612", fsm=table,
+        change_dir=approved_i4_change(tmp_path), mover=mover, client="codex",
+    )
+    assert out["reason"] == "actor" and out["result"] == "reject"
+    assert out["to"] is None and mover.calls == []
+    assert unavailable_codex_stage["stage"] == []
+
+
+def test_codex_cannot_call_guard_invalidation_directly(
+    tmp_path, unavailable_codex_stage,
+):
+    mover = FakeMover()
+    out = process_event(
+        "invalidar_aprovacao", card="612", status="Em desenvolvimento",
+        q_git="card-612-process-event", bound_card="612",
+        change_dir=approved_i4_change(tmp_path), mover=mover, client="codex",
+    )
+    assert out["reason"] == "actor" and out["result"] == "reject"
+    assert mover.calls == []
+
+@pytest.fixture
+def t5_basic_runtime(monkeypatch):
+    import account_registration
+    import codex_evidence
+
+    monkeypatch.setenv("CODEX_THREAD_ID", "codex-t5-fixture")
+    calls = {"registration": [], "preflight": []}
+    monkeypatch.setattr(
+        account_registration, "require_active",
+        lambda client, root: calls["registration"].append((client, root)),
+    )
+
+    def preflight(**kwargs):
+        calls["preflight"].append(kwargs)
+        if kwargs.get("stage") is not None:
+            raise codex_evidence.EvidenceError("stage_capability_missing", "fixture: no spawn capacity")
+        return {"result": "ready", "capabilities": {"context_isolation": "unavailable"}}
+
+    monkeypatch.setattr(codex_evidence, "preflight", preflight)
+    return calls
+
+
+def t5_artifacts(tmp_path):
+    change = tmp_path / "openspec" / "changes" / "card-612-process-event"
+    change.mkdir(parents=True)
+    for name in ("proposal.md", "tasks.md"):
+        (change / name).write_text("# artifact\n")
+    (change / "design.md").write_text("UI impact: none\nlive_route: N/A harness-only\nsurface: new\n")
+    spec = change / "specs" / "harness" / "spec.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("# contract\n")
+    return change
+
+
+def t5_request(artifact_dir, mover, **overrides):
+    kwargs = dict(
+        card="612", change="card-612-process-event", status="Design",
+        q_git="card-612-process-event", bound_card="612",
+        change_dir=artifact_dir, mover=mover, client="codex",
+        resolve_fn=lambda *a, **kw: {"q": None, "q_git": None, "bound_card": None},
+    )
+    kwargs.update(overrides)
+    return process_event("submeter_design", **kwargs)
+
+
+@pytest.mark.parametrize("signal,client", [("CURSOR_AGENT", "cursor"), ("CURSOR_VERSION", "cursor"), ("CURSOR_PROJECT_DIR", "cursor"), ("OPENCODE", "opencode")])
+@pytest.mark.parametrize("event", ["iniciar_design", "recriticar", "submeter_design", "iniciar_apply", "pedir_review", "aceitar_sha", "integrar_develop"])
+def test_implicit_cursor_opencode_identity_cannot_bypass_account_registration(tmp_path, monkeypatch, signal, client, event):
+    import account_registration
+    monkeypatch.setenv(signal, "observed-host")
+    seen = []
+    def denied(active, root):
+        seen.append((active, root))
+        raise account_registration.RegistrationRefusal("hooks_unreviewed", "fixture: registration untrusted")
+    monkeypatch.setattr(account_registration, "require_active", denied)
+    mover = FakeMover()
+    out = process_event(event, cwd=tmp_path, status="Todo", q_git="card-612-process-event", bound_card="612", mover=mover)
+    assert out["result"] == "reject" and out["reason"] == client + "_registration:hooks_unreviewed"
+    assert seen == [(client, tmp_path)] and mover.calls == []
+
+
+def test_host_detection_keeps_explicit_client_and_innermost_precedence(tmp_path, monkeypatch):
+    import process_event as pe
+    import account_registration
+    seen = []
+    monkeypatch.setenv("CURSOR_AGENT", "1")
+    monkeypatch.setenv("OPENCODE", "1")
+    monkeypatch.setattr(pe, "nearest_agent_client", lambda **kw: "opencode")
+    monkeypatch.setattr(account_registration, "require_active", lambda client, root: seen.append(client))
+    assert pe.host_client() == "opencode"
+    for explicit, expected in ((None, "opencode"), ("cursor", "cursor")):
+        out = process_event("iniciar_design", cwd=tmp_path, status="Todo", q_git="card-612-process-event", bound_card="612", mover=FakeMover(), client=explicit)
+        assert out["result"] == "transition" and seen[-1] == expected
+    monkeypatch.setenv("COVENANT_CLIENT", "grok")
+    assert process_event("iniciar_design", cwd=tmp_path, status="Todo", q_git="card-612-process-event", bound_card="612", mover=FakeMover())["result"] == "transition"
+    assert seen == ["opencode", "cursor"]
+
+
+@pytest.mark.parametrize("observed", [None, ("claude-opus-5-5", "high"), ("claude-sonnet-5-5", "low"), ("claude-sonnet-5-5", "high")])
+def test_claude_t16_requires_observed_parent_matching_captured_execution(tmp_path, monkeypatch, machine_models, observed):
+    import claude_evidence
+    from model_selection import resolve as resolve_selection
+    from release_model_selection import check_claude_parent
+    monkeypatch.setenv("CLAUDECODE", "1")
+    capture = resolve_selection("claude", "execucao", role="fecho-lote")
+    def observe(**kwargs):
+        if observed is None:
+            raise claude_evidence.EvidenceError("runtime_unavailable", "fixture: no observed parent")
+        return {"model": observed[0], "effort": observed[1]}
+    monkeypatch.setattr(claude_evidence, "observe_parent", observe)
+    mover = FakeMover()
+    out = process_event("fechar_release", cwd=tmp_path, status="Homologado", q_git="develop", bound_card=UNBOUND,
+        package_cards=[612], m_lote=False, mover=mover, parent_capture=capture, parent_checker=check_claude_parent)
+    if observed == ("claude-sonnet-5-5", "high"):
+        assert out["reason"] != "claude_evidence:parent_model"
+    else:
+        assert out["result"] == "reject" and out["reason"] == "claude_evidence:parent_model"
+        assert "observed parent" in out["message"] and "captured claude/execucao" in out["message"]
+    assert mover.calls == [] and out["state"] == "Homologado"
+
+
+@pytest.mark.parametrize("missing", ["UI impact", "live_route", "surface"])
+def test_t5_rejects_missing_parseable_contract_tokens_before_move(tmp_path, monkeypatch, missing):
+    import process_event as pe
+    monkeypatch.setattr(pe, "native_client", lambda: None)
+    change = t5_artifacts(tmp_path)
+    lines = ["UI impact: none", "live_route: N/A harness-only", "surface: new"]
+    (change / "design.md").write_text("\n".join(line for line in lines if not line.startswith(missing + ":")) + "\n")
+    mover = FakeMover()
+    out = process_event("submeter_design", cwd=tmp_path, status="Design", q_git="card-612-process-event", bound_card="612", change_dir=change, mover=mover)
+    assert out["reason"] == "guard:design_tokens" and out["result"] == "reject"
+    assert missing in out["message"] and mover.calls == []
+    assert not sidecar_path(change).exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_codex_t5_keeps_basic_preflight_and_only_submits_artifacts(
+    tmp_path, t5_basic_runtime, dry_run,
+):
+    change = t5_artifacts(tmp_path)
+    mover = FakeMover()
+    out = t5_request(change, mover, dry_run=dry_run)
+    assert out == {"result": "transition", "state": "Design", "to": "Aprovação de Design", "reason": "T5"}
+    assert len(t5_basic_runtime["registration"]) == 1
+    assert len(t5_basic_runtime["preflight"]) == 1
+    assert t5_basic_runtime["preflight"][0]["stage"] is None
+    if dry_run:
+        assert mover.calls == [] and not sidecar_path(change).exists()
+    else:
+        assert mover.calls == [(612, "Aprovação de Design")]
+        assert sidecar_path(change).read_text().strip() == pe.compute_digest(change, None)
+
+
+@pytest.mark.parametrize("code", [
+    "source_unavailable", "session_unavailable", "session_inactive",
+    "unverified", "worktree_mismatch", "observation_unavailable", "unsupported_schema",
+])
+def test_codex_t5_basic_runtime_failures_still_block_submission(
+    tmp_path, monkeypatch, t5_basic_runtime, code,
+):
+    import codex_evidence
+
+    def refused(**kwargs):
+        assert kwargs["stage"] is None
+        raise codex_evidence.EvidenceError(code, "fixture basic runtime refusal")
+
+    monkeypatch.setattr(codex_evidence, "preflight", refused)
+    change = t5_artifacts(tmp_path)
+    mover = FakeMover()
+    out = t5_request(change, mover)
+    assert out["result"] == "reject" and out["reason"] == "codex_evidence:" + code
+    assert out["to"] is None and mover.calls == []
+    assert not sidecar_path(change).exists()
+
+
+@pytest.mark.parametrize("code", [
+    "hooks_inactive", "hooks_unreviewed", "hooks_changed", "adapter_divergent",
+])
+def test_codex_t5_keeps_account_registration_and_operator_trust(
+    tmp_path, monkeypatch, t5_basic_runtime, code,
+):
+    import account_registration
+
+    def refused(*args, **kwargs):
+        raise account_registration.RegistrationRefusal(code, "fixture registration refusal")
+
+    monkeypatch.setattr(account_registration, "require_active", refused)
+    change = t5_artifacts(tmp_path)
+    mover = FakeMover()
+    out = t5_request(change, mover)
+    assert out["reason"] == "codex_evidence:" + code and out["result"] == "reject"
+    assert mover.calls == [] and t5_basic_runtime["preflight"] == []
+    assert not sidecar_path(change).exists()
+
+
+@pytest.mark.parametrize("overrides,reason", [
+    ({"card": "999"}, "card_mismatch"),
+    ({"change": "card-999-other"}, "change_mismatch"),
+    ({"q_git": "develop", "bound_card": None, "change": None}, "unbound"),
+    ({"q_git": "main", "bound_card": None, "change": None}, "unbound"),
+    ({"bound_card": None}, "unbound"),
+    ({"client": "cursor"}, "codex_evidence:ambiguous_client"),
+])
+def test_codex_t5_rejects_invalid_identity_card_and_branch(
+    tmp_path, t5_basic_runtime, overrides, reason,
+):
+    change = t5_artifacts(tmp_path)
+    mover = FakeMover()
+    out = t5_request(change, mover, **overrides)
+    assert out["reason"] == reason and out["result"] == "reject"
+    assert mover.calls == [] and not sidecar_path(change).exists()
+
+
+@pytest.mark.parametrize("state", ["Todo", "Aprovação de Design", "Pronto para Dev", "Em desenvolvimento", "Done"])
+def test_codex_t5_wrong_state_is_not_submission(tmp_path, t5_basic_runtime, state):
+    change = t5_artifacts(tmp_path)
+    mover = FakeMover()
+    out = t5_request(change, mover, status=state)
+    assert out["result"] == "reject" and out["to"] is None
+    assert mover.calls == [] and not sidecar_path(change).exists()
+
+
+@pytest.mark.parametrize("missing", ["proposal.md", "design.md", "tasks.md", "specs/harness/spec.md"])
+def test_codex_t5_still_requires_design_artifacts(tmp_path, t5_basic_runtime, missing):
+    change = t5_artifacts(tmp_path)
+    (change / missing).unlink()
+    mover = FakeMover()
+    out = t5_request(change, mover)
+    assert out["result"] == "reject" and out["reason"] == "guard:G_design"
+    assert mover.calls == [] and not sidecar_path(change).exists()
+
+
+def test_codex_t5_keeps_actor_gate(tmp_path, t5_basic_runtime):
+    table = load_fsm()
+    for transition in table["transitions"]:
+        if transition["id"] == "T5":
+            transition["actor"] = "Alan"
+    change = t5_artifacts(tmp_path)
+    mover = FakeMover()
+    out = t5_request(change, mover, fsm=table)
+    assert out["result"] == "reject" and out["reason"] == "actor"
+    assert mover.calls == [] and not sidecar_path(change).exists()
+
+
+@pytest.mark.parametrize("event,state", [
+    ("iniciar_design", "Todo"),
+    ("recriticar", "Design"),
+    ("iniciar_apply", "Pronto para Dev"),
+    ("pedir_review", "Em desenvolvimento"),
+])
+def test_t5_scope_does_not_relax_future_native_stage_gates(
+    tmp_path, t5_basic_runtime, event, state,
+):
+    change = t5_artifacts(tmp_path)
+    # Real fixture digest unchanged: do not take the distinct I4 invalidation route.
+    sidecar_path(change).write_text(pe.compute_digest(change, None) + "\n")
+    before = sidecar_path(change).read_bytes()
+    mover = FakeMover()
+    out = process_event(
+        event, card="612", status=state, q_git="card-612-process-event",
+        bound_card="612", change_dir=change, mover=mover, client="codex",
+    )
+    assert out["result"] == "reject" and out["reason"] == "codex_evidence:stage_capability_missing"
+    assert t5_basic_runtime["preflight"][0]["stage"] == event
+    assert mover.calls == [] and sidecar_path(change).read_bytes() == before

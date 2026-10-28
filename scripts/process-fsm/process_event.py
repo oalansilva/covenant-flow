@@ -270,7 +270,6 @@ def write_sidecar(change_dir: Path, prototype_dir: Path | None) -> None:
 PREFLIGHT_EVENTS = frozenset({"iniciar_design", "recriticar", "submeter_design", "iniciar_apply", "pedir_review", "aceitar_sha", "integrar_develop"})
 AGENT_CLIENT_NAMES = {"codex": "codex", "claude": "claude"}
 
-
 HOST_CLIENT_NAMES = {**AGENT_CLIENT_NAMES, "opencode": "opencode", "cursor-agent": "cursor"}
 HOST_ENVIRONMENT = {
     "cursor": ("CURSOR_AGENT", "CURSOR_VERSION", "CURSOR_PROJECT_DIR"),
@@ -279,7 +278,7 @@ HOST_ENVIRONMENT = {
 
 
 def nearest_agent_client(pid: int | None = None, proc_root: Path = Path("/proc"), names: dict[str, str] | None = None) -> str | None:
-    """Innermost Codex/Claude Code ancestor of this process, from the process tree (`names` widens the set)."""
+    """Innermost Codex/Claude Code ancestor of this process, from the process tree."""
 
     client_names = AGENT_CLIENT_NAMES if names is None else names
     current = os.getpid() if pid is None else pid
@@ -315,12 +314,7 @@ def native_client() -> str | None:
 
 
 def host_client() -> str | None:
-    """Native identity of the clients that have no `--client` of their own to carry (R10): `cursor` or `opencode`.
-
-    Only when exactly one of them is demonstrable, from its environment or from the innermost agent ancestor. It is
-    consulted after Codex and Claude Code (which win) and never overrides an explicit `--client`/`COVENANT_CLIENT`.
-    """
-
+    """Recover Cursor/OpenCode identity when no explicit client is supplied."""
     present = {client for client, names in HOST_ENVIRONMENT.items() if any(os.environ.get(n) for n in names)}
     if len(present) == 1:
         return next(iter(present))
@@ -331,12 +325,7 @@ def host_client() -> str | None:
 
 
 def claude_closeout_parent_refusal(root: Path, capture: dict[str, Any] | None = None, checker: Callable[..., Any] | None = None) -> str | None:
-    """T16 in Claude Code: the observed parent must be on the captured `claude/execucao` pair; None when it is.
-
-    Reuses `observe-parent` and `load_execucao_pair` through `check_claude_parent`. Without a given capture the pair is
-    the one the local selection resolves now for the `fecho-lote` role, the same one its child is born with.
-    """
-
+    """Preserve T16's observed-parent check against captured claude/execucao."""
     from claude_evidence import EvidenceError, observe_parent
     from model_selection import SelectionError, resolve as resolve_selection
     from release_model_selection import check_claude_parent, load_execucao_pair
@@ -394,6 +383,19 @@ def _fechar_message(
     elif RELEASE_GUARD not in text:
         text = f"{text}; {RELEASE_GUARD}"
     return text
+
+
+def _codex_stage_refusal(workdir: Path, event: str, state: str | None) -> dict[str, Any] | None:
+    from codex_evidence import EvidenceError, preflight
+
+    # T5 submits existing artifacts; it does not start a native stage child.
+    # Keep runtime/qualification/binding checks without requiring spawn capacity.
+    stage = None if event == "submeter_design" else event
+    try:
+        preflight(root=workdir, stage=stage)
+    except (EvidenceError, OSError, ValueError) as exc:
+        return _payload(result="reject", state=state, to=None, reason=f"codex_evidence:{getattr(exc, 'code', 'invalid_input')}", message=str(exc))
+    return None
 
 
 def process_event(
@@ -465,12 +467,12 @@ def process_event(
         except account_registration.RegistrationRefusal as exc:
             prefix = "codex_evidence" if active_client == "codex" else f"{active_client}_registration"
             return _payload(result="reject", state=q, to=None, reason=f"{prefix}:{exc.code}", message=f"{active_client}: {exc}")
-    if active_client == "codex" and event in PREFLIGHT_EVENTS:
-        from codex_evidence import EvidenceError, preflight
-        try:
-            preflight(root=workdir)
-        except (EvidenceError, OSError, ValueError) as exc:
-            return _payload(result="reject", state=q, to=None, reason=f"codex_evidence:{getattr(exc, 'code', 'invalid_input')}", message=str(exc))
+    # I4 events must first let the existing engine invalidate stale approval.
+    # That route starts no stage child; identity and hook trust still gate it.
+    if active_client == "codex" and event in PREFLIGHT_EVENTS and event not in I4_EVENTS:
+        refusal = _codex_stage_refusal(workdir, event, q)
+        if refusal is not None:
+            return refusal
     if active_client == "claude" and event in PREFLIGHT_EVENTS:
         from claude_evidence import EvidenceError, preflight as claude_preflight
         try:
@@ -478,7 +480,6 @@ def process_event(
         except (EvidenceError, OSError, ValueError) as exc:
             return _payload(result="reject", state=q, to=None, reason=f"claude_evidence:{getattr(exc, 'code', 'invalid_input')}", message=str(exc))
     if active_client == "claude" and event == "fechar_release":
-        # The closeout rule of the Claude Code adapter applies where the event happens, not only in the runbook (R26).
         refusal = claude_closeout_parent_refusal(workdir, parent_capture, parent_checker)
         if refusal:
             return _payload(result="reject", state=q, to=None, reason="claude_evidence:parent_model", message=_fechar_message(refusal))
@@ -542,17 +543,11 @@ def process_event(
         resolved_proto = proto if proto.is_dir() else None
 
     if event == "submeter_design" and g_design is None and resolved_change_dir is not None:
-        # T5 anticipates the checklist the precommit runs anyway: the three gate tokens must parse (R28).
         design_file = resolved_change_dir / "design.md"
         gap = design_token_gap(design_file.read_text(encoding="utf-8")) if design_file.is_file() else None
         if gap:
-            return _payload(
-                result="reject",
-                state=q,
-                to=None,
-                reason="guard:design_tokens",
-                message=f"T5 refused: design.md has no parseable `{gap}` line (needs `UI impact`, `live_route` and `surface`); fix it and submit again",
-            )
+            return _payload(result="reject", state=q, to=None, reason="guard:design_tokens",
+                message=f"T5 refused: design.md has no parseable `{gap}` line (needs `UI impact`, `live_route` and `surface`); fix it and submit again")
     if g_design is None:
         g_design = (
             files_g_design(resolved_change_dir, resolved_proto)
@@ -666,6 +661,10 @@ def process_event(
 
     result = evaluate(table, EvalContext(**ctx_kwargs))
     if event in I4_EVENTS and result.reason == "I4":
+        if match is None:
+            return _payload(result="reject", state=q, to=None, reason="guard:q_git_card")
+        if str(bound) != match.group(1):
+            return _payload(result="reject", state=q, to=None, reason="card_mismatch")
         compiled = evaluate(
             table,
             EvalContext(
@@ -690,6 +689,13 @@ def process_event(
                 reason="I4",
             )
         return _payload(result="reject", state=q, to=None, reason=compiled.reason)
+
+    # Unchanged approval retains the capability refusal for the requested stage.
+    # No stage is started by the approval-invalidating route above.
+    if active_client == "codex" and event in I4_EVENTS:
+        refusal = _codex_stage_refusal(workdir, event, q)
+        if refusal is not None:
+            return refusal
 
     enabled = enabled_events(table, eval_state if event == "fechar_release" else q)
     message = None
@@ -790,7 +796,6 @@ def main(argv: list[str] | None = None) -> int:
     parent_capture = None
     if args.capture is not None:
         from model_selection import SelectionError, load_capture
-
         try:
             parent_capture = load_capture(args.capture)
         except (OSError, ValueError, SelectionError) as exc:
