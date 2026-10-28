@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
 
 import yaml  # noqa: E402
 
-from design_clone_gate import parse_live_route, parse_surface, parse_ui_impact  # noqa: E402
+from design_clone_gate import design_token_gap  # noqa: E402
 from fsm import CARD_GIT_RE  # noqa: E402
 
 REPO_ROOT = ROOT.parents[1]
@@ -258,13 +258,7 @@ def _check_design_tokens(change_dir: Path) -> str | None:
     path = change_dir / "design.md"
     if not path.is_file():
         return "design.md tokens"
-    text = path.read_text(encoding="utf-8")
-    ui = parse_ui_impact(text)
-    live, _rest = parse_live_route(text)
-    surface = parse_surface(text)
-    if ui is None or live is None or surface is None:
-        return "design.md tokens"
-    return None
+    return "design.md tokens" if design_token_gap(path.read_text(encoding="utf-8")) else None
 
 
 def _check_patch(repo: Path) -> tuple[str | None, str]:

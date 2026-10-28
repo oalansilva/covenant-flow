@@ -15,7 +15,6 @@ if str(HERE) not in sys.path:
 
 from codex_models import ModelRoutingError  # noqa: E402
 from model_selection import validate_spawn  # noqa: E402
-from codex_binding import normalize_input, mutation_paths, validate_context  # noqa: E402
 from guard import (  # noqa: E402
     decide,
     extract_paths,
@@ -51,7 +50,6 @@ def _repo_root(cwd: str | Path) -> Path:
         capture_output=True,
         text=True,
         timeout=5,
-        env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
     )
     if result.returncode == 0 and result.stdout.strip():
         return Path(result.stdout.strip()).resolve()
@@ -120,34 +118,23 @@ def pre_tool_use(payload: Mapping[str, Any]) -> dict[str, Any] | None:
             check_prepared_spawn(data, root)
             return None
 
-        data = normalize_input(canonical_tool, data)
+        if canonical_tool == "Bash" and not isinstance(data.get("command"), str):
+            return _pretool_deny(
+                "process-fsm-guard deny reason=invalid_tool_input. Bash command must be a string."
+            )
         request = dict(event)
         request["tool_name"] = canonical_tool
         request["cwd"] = str(cwd)
         request["tool_input"] = data
-        paths = mutation_paths(request)
-        if canonical_tool == "apply_patch" and not paths:
+        if canonical_tool == "apply_patch" and not extract_paths(normalize(request)):
             return _pretool_deny(
                 "process-fsm-guard deny reason=empty_path. Codex apply_patch must include an extractable file path."
             )
 
-        tool_dir, _binding = validate_context(event, root, data, paths)
-        # Agent-supplied Status never overrides the live board. The native hook
-        # cwd establishes identity; workdir only resolves operands within it.
-        request.pop("status", None)
-        request["cwd"] = str(tool_dir)
-        decisions = [decide(request, status_provider=github_status_provider)]
-        for target in paths:
-            absolute = Path(target).expanduser()
-            if not absolute.is_absolute():
-                absolute = tool_dir / absolute
-            decisions.append(decide({"tool_name": "Write", "cwd": str(root),
-                                     "tool_input": {"file_path": str(absolute.resolve())}},
-                                    status_provider=github_status_provider))
-        for decision in decisions:
-            if decision.get("permission") == "deny":
-                reason = _text(decision.get("reason")) or "process-fsm-guard deny."
-                return _pretool_deny(reason)
+        decision = decide(request, status_provider=github_status_provider)
+        if decision.get("permission") == "deny":
+            reason = _text(decision.get("reason")) or "process-fsm-guard deny."
+            return _pretool_deny(reason)
         return None
     except Exception as exc:
         # A failed policy lookup must never become an implicit permission.

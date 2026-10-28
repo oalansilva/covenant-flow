@@ -197,40 +197,13 @@ claude_memory preflight
 python_overlay "$SOURCE/scripts/process-fsm/claude_skills.py" preflight --source "$SOURCE" --target "$TARGET"
 python_overlay "$SOURCE/scripts/process-fsm/claude_agents.py" preflight --source "$SOURCE" --target "$TARGET"
 # Preflight only the shipped mechanisms. Never read the account's selections.
-for mechanism in .cursor/model-policy.yaml scripts/process-fsm/model_selection.py scripts/process-fsm/model_selection_adapter.py scripts/process-fsm/model_selection_lib.js scripts/process-fsm/model_proxy.py scripts/process-fsm/release_model_selection.py scripts/process-fsm/codex_adapter.py scripts/process-fsm/codex_binding.py scripts/process-fsm/codex_proxy.py scripts/process-fsm/codex_review.py scripts/process-fsm/codex_evidence.py scripts/process-fsm/codex_fs.py scripts/process-fsm/claude_adapter.py scripts/process-fsm/claude_agents.py scripts/process-fsm/claude_evidence.py scripts/process-fsm/claude_proxy.py scripts/process-fsm/claude_review.py scripts/process-fsm/claude_skills.py scripts/process-fsm/claude_trust.py scripts/process-fsm/cf_shim.py scripts/process-fsm/cf_shim_opencode.js scripts/process-fsm/account_install.py scripts/process-fsm/account_registration.py scripts/process-fsm/adapter_manifest.py scripts/process-fsm/project_registration.py .claude/agents/diff-reviewer.md .claude/agents/code-reviewer.md CLAUDE.md .dsh/plugin/process-fsm-guard.js .opencode/plugin/process-fsm-guard.js .opencode/plugin/impeccable-hook.js .cursor/hooks/process-fsm-model-selection.sh .grok/hooks/process-fsm-model-selection.sh; do
+for mechanism in .cursor/model-policy.yaml scripts/process-fsm/model_selection.py scripts/process-fsm/model_selection_adapter.py scripts/process-fsm/model_selection_lib.js scripts/process-fsm/model_proxy.py scripts/process-fsm/release_model_selection.py scripts/process-fsm/codex_adapter.py scripts/process-fsm/codex_proxy.py scripts/process-fsm/codex_review.py scripts/process-fsm/codex_evidence.py scripts/process-fsm/codex_fs.py scripts/process-fsm/claude_adapter.py scripts/process-fsm/claude_agents.py scripts/process-fsm/claude_evidence.py scripts/process-fsm/claude_proxy.py scripts/process-fsm/claude_review.py scripts/process-fsm/claude_skills.py scripts/process-fsm/claude_trust.py scripts/process-fsm/cf_shim.py scripts/process-fsm/cf_shim_opencode.js scripts/process-fsm/account_install.py scripts/process-fsm/account_registration.py scripts/process-fsm/adapter_manifest.py scripts/process-fsm/project_registration.py .claude/agents/diff-reviewer.md .claude/agents/code-reviewer.md CLAUDE.md .dsh/plugin/process-fsm-guard.js .opencode/plugin/process-fsm-guard.js .opencode/plugin/impeccable-hook.js .cursor/hooks/process-fsm-model-selection.sh .grok/hooks/process-fsm-model-selection.sh; do
   [[ -f "$SOURCE/$mechanism" ]] || die "selection mechanism missing in source: $mechanism"
 done
 python_overlay - <<PY
 from model_selection import policy
 if "claude" not in policy()["clients"]:
     raise SystemExit("implantar: source policy lacks the claude contract")
-PY
-
-# Terminal-flow delta is shipped from the nucleus. Missing members refuse
-# before copying; the consumer's overlay document is never a generic doc target.
-TERMINAL_MEMBERS=(
-  scripts/process-fsm/codex_qualification_index.py
-  scripts/process-fsm/codex_qualification.py
-  scripts/process-fsm/codex_terminal.py
-  scripts/process-fsm/codex_terminal_review.py
-  docs/codex-terminal-flow.md
-  docs/codex-runtime-evidence.md
-  docs/codex-native-capabilities.md
-  docs/codex-review-qualification.md
-  docs/claude-runtime-evidence.md
-)
-for terminal_member in "${TERMINAL_MEMBERS[@]}"; do
-  [[ -f "$SOURCE/$terminal_member" ]] || die "terminal mechanism missing in source: $terminal_member"
-done
-TERMINAL_TARGET="$TARGET" python_overlay - <<'PY'
-import os
-from pathlib import Path
-from overlay import load_overlay
-root = Path(os.environ["TERMINAL_TARGET"])
-doc = load_overlay(root, require_filled=True).get("overlay_doc")
-generic_docs = {root / ("docs/" + name + ".md") for name in ("codex-terminal-flow", "codex-runtime-evidence", "codex-native-capabilities", "codex-review-qualification", "claude-runtime-evidence")}
-if doc and (root / doc).resolve() in {path.resolve() for path in generic_docs}:
-    raise SystemExit("implantar: terminal docs collide with consumer-owned overlay_doc")
 PY
 
 copy_tree "$SOURCE/.cursor/model-policy.yaml" "$TARGET/.cursor/model-policy.yaml"
@@ -265,9 +238,6 @@ rsync_process_fsm() {
   rsync -a --delete --exclude='/route-landmarks.yaml' "$SOURCE/scripts/process-fsm/" "$TARGET/scripts/process-fsm/"
 }
 rsync_process_fsm
-for terminal_doc in codex-terminal-flow codex-runtime-evidence codex-native-capabilities codex-review-qualification claude-runtime-evidence; do
-  copy_tree "$SOURCE/docs/$terminal_doc.md" "$TARGET/docs/$terminal_doc.md"
-done
 if [[ -f "$SOURCE/scripts/process-fsm/route-landmarks.yaml" ]]; then
   copy_tree_if_missing "$SOURCE/scripts/process-fsm/route-landmarks.yaml" "$TARGET/scripts/process-fsm/route-landmarks.yaml"
 fi

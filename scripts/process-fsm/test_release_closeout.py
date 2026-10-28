@@ -76,32 +76,50 @@ def test_release_section_drops_t18_label_and_uses_birth_capture():
 
 
 def _overlay_text() -> str:
-    # The overlay doc is consumer-owned product data: absent in the nucleus checkout.
+    # The overlay doc is consumer-owned product data: absent in the nucleus checkout. The assertions on it are skipped
+    # explicitly by `_require_overlay`, never degraded to an empty text that lets the test pass without them (R24).
     return OVERLAY.read_text(encoding="utf-8") if OVERLAY.is_file() else ""
+
+
+def _require_overlay() -> str:
+    if not OVERLAY.is_file():
+        pytest.skip("docs/crypto-overlay.md is the Cripto's consumer-owned document and is absent from this tree")
+    return _overlay_text()
 
 
 def test_release_section_and_overlay_archive_use_1022_decide():
     release = _release_section()
-    overlay = _overlay_text()
-    for text in (release, overlay) if overlay else (release,):
+    for text in (release,):
         assert "decide()" in text
         assert "#1022" in text
         assert "worktree" in text.lower()
         assert "cherry-pick" in text
         assert "segunda allow-list" in text or "second allow-list" in text
     assert "Sync now / Archive without syncing" in release
+    overlay = _require_overlay()
+    for text in (overlay,):
+        assert "decide()" in text
+        assert "#1022" in text
+        assert "worktree" in text.lower()
+        assert "cherry-pick" in text
+        assert "segunda allow-list" in text or "second allow-list" in text
     assert "após os cards do pacote moverem para `Pronto`" not in overlay
     assert "Limpar branches após publicação/Pronto" not in overlay
 
 
 def test_release_branch_deletion_before_post_and_pronto():
     release = _release_section()
-    overlay = _overlay_text()
-    for text in (release, overlay) if overlay else (release,):
+    for text in (release,):
         assert "antes" in text and "post" in text and "Pronto" in text
         assert "PRESERVED_BRANCHES" in text
         assert "qa-gate" in text
-        assert "MUST NOT desligar `qa-gate`" in text or "MUST NOT desligar `qa-gate`" in overlay
+        assert "MUST NOT desligar `qa-gate`" in text
+    overlay = _require_overlay()
+    for text in (overlay,):
+        assert "antes" in text and "post" in text and "Pronto" in text
+        assert "PRESERVED_BRANCHES" in text
+        assert "qa-gate" in text
+        assert "MUST NOT desligar `qa-gate`" in text
 
 
 def test_decision_table_proceeds_without_reconfirming_authorized_work():

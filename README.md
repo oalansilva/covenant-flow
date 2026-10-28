@@ -68,7 +68,7 @@ A partir do pin com registro na conta, `--pin` **não grava** registro de hooks 
 /path/to/covenant-flow/install.sh --account            # shim + uma entrada por host instalado, sem tocar em entradas alheias
 /path/to/covenant-flow/install.sh --account --check    # por host: registration=account|unproven|not_installed, shim e revisões
 /path/to/covenant-flow/install.sh --account --remove   # tira só as entradas do Covenant Flow
-python3 ~/.config/covenant-flow/shim/current/cf_shim.py trust --record   # operador, depois de ler registro (R) e adapter (A)
+python3 ~/.config/covenant-flow/shim/current/cf_shim.py trust --record   # operador, em terminal comum (confirmação digitada; recusa dentro de sessão de agente), depois de ler registro (R) e adapter (A)
 ```
 
 Nada disso grava confiança nem toca a seleção de modelos. Grok Build e dsh ficam como antes (registro de projeto). Pins anteriores continuam com o registro de projeto; o shim não age neles.
