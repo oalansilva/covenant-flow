@@ -60,7 +60,14 @@ EXPECTED_MATRIX = (
     ("T17b", "Em desenvolvimento", "invalidar_aprovacao", "Design"),
 )
 
-ALAN_GATES = {"T1": "priorizar", "T7": "aprovar_design", "T15": "homologar", "T18": "nao_homologar"}
+ALAN_GATES = {
+    "T1": "priorizar",
+    "T2": "cancelar",
+    "T6": "devolver_design",
+    "T7": "aprovar_design",
+    "T15": "homologar",
+    "T18": "nao_homologar",
+}
 AGENT_GATES = {"T16": "fechar_release"}
 
 CARD_GIT_RE = re.compile(r"^card-(\d+)(?:-.*)?$")

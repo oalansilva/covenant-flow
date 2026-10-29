@@ -341,7 +341,7 @@ def test_harness_mdc_body_budget():
     assert "Task `inherit`" not in text
     assert "every Task inherits" not in text
     assert "herdar o picker" not in text
-    assert "T1/T7/T15" not in text
+    assert "T1, T2, T6, T7, T15, T18" not in text and "T1/T7/T15" not in text
     assert "diff-reviewer" not in text
     assert "release-guard" not in text
     assert "Grok Auto" not in text
@@ -372,7 +372,9 @@ def test_agents_md_is_stub():
     assert "scripts/release-guard pre" not in text
     assert "Em Refinamento -> Todo -> Design" not in text
     assert "(q, bound_card, q_git)" in text
-    assert "T1/T7/T15" in text
+    assert "Portões do Alan: T1, T2, T6, T7, T15, T18" in text and "T1/T7/T15" not in text
+    assert "Texto livre é wording; comando exato capturado fora do agente é evento do Alan." in text
+    assert "Chat é wording" not in text
     assert "Cursor Agent" in text and "Grok Build" in text and "OpenCode" in text
     assert "dsh" in text
     assert "não always-on" not in text

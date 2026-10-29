@@ -40,7 +40,7 @@ def test_every_host_of_the_scope_gets_one_entry_and_the_shim_is_versioned(accoun
     assert (base / "current").is_symlink() and (base / "current").resolve().name == cf_shim.SHIM_VERSION
     assert (base / cf_shim.SHIM_VERSION / "cf_shim.py").read_bytes() == (HERE / "cf_shim.py").read_bytes()
     claude = json.loads((account / ".claude/settings.json").read_text())["hooks"]
-    assert {"SessionStart", "PreToolUse", "PostToolUse", "SubagentStop", "Stop"} == set(claude)
+    assert {"SessionStart", "PreToolUse", "PostToolUse", "SubagentStop", "Stop", "UserPromptSubmit"} == set(claude)
     pre = claude["PreToolUse"][0]
     # anchored: a tool that merely contains "Write" (TodoWrite) never reaches the adapter; the app's `mcp__ccd_*` do
     assert pre["matcher"] == account_install.PRETOOL_MATCHER == "^(Bash|Edit|Write|MultiEdit|NotebookEdit|Agent|mcp__ccd_.*)$"

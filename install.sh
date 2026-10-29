@@ -22,9 +22,13 @@ Usage:
 --account  Install the account shim (~/.config/covenant-flow/shim/) and merge one hook
            registration into the global config of each of Claude Code, Cursor, Codex and
            OpenCode found on this machine (foreign entries preserved; Grok Build and dsh
-           untouched). --check reports per host (and for the consumer at --target) what is
-           missing or unreviewed; --remove takes only Covenant Flow's entries out. It never
-           records trust: the operator runs `cf_shim.py trust --record`.
+           untouched). For Claude Code it also registers the prompt hook (UserPromptSubmit)
+           and the seven gate commands (~/.claude/commands/priorizar.md ...), so that
+           `/priorizar N` reaches the hook instead of "Unknown command"; a foreign command
+           file with one of those names refuses the run. --check reports per host (and for
+           the consumer at --target) what is missing or unreviewed; --remove takes only
+           Covenant Flow's entries and commands out. It never records trust: the operator
+           runs `cf_shim.py trust --record`.
 
 v1 refuses submodule, gitignore-as-install, marketplace, and template-clone as the channel.
 USAGE

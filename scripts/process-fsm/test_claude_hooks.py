@@ -51,7 +51,7 @@ def test_every_registered_command_names_an_event_the_adapter_dispatches(claude_a
         for group in groups:
             for handler in group["hooks"]:
                 client, event = shim_call(handler["command"])
-                assert event in {"session-start", "pre-tool-use", "post-tool-use", "subagent-stop", "stop"}
+                assert event in {"session-start", "pre-tool-use", "post-tool-use", "subagent-stop", "stop", "prompt-submit"}
                 # the pinned manifest maps the event to the adapter file the shim runs
                 assert ENTRYPOINTS[client][event] == ["python3", "scripts/process-fsm/claude_adapter.py", event]
                 seen.add(event)

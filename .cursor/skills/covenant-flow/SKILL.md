@@ -37,7 +37,7 @@ PT-BR curto. Não diga `concluído` / `Pronto` / `publicado` até a evidência d
 
 ## Um chat por card
 
-Título `#<id>` nos dois clientes (Em Refinamento → Done técnico). Homologado e Release/lote fora. Pai orquestra: `process_event`, git, recusas, handoff, relaying do grill. **Não** grelha, não escreve OpenSpec/protótipo (exceção: só `## Design Critique` após A/B), não implementa, não review, não QA. Recusar executar outra atividade **no mesmo chat** — não pedir outro transcript. Sem Status=Pronto para Dev + `implemente`: uma frase com Status atual + “Apply só depois de Pronto para Dev (T7 teu)” + parar. Sem estado, evento, hook ou `enabled_tools` novo na FSM. `AGENTS.md` always-on não cresce com esta regra.
+Título `#<id>` nos dois clientes (Em Refinamento → Done técnico). Homologado e Release/lote fora. Pai orquestra: `process_event` (o movimento de Status é do executor do board, a pedido do `process_event`; o agente não move nem adiciona card no Project), git, recusas, handoff, relaying do grill. **Não** grelha, não escreve OpenSpec/protótipo (exceção: só `## Design Critique` após A/B), não implementa, não review, não QA. Recusar executar outra atividade **no mesmo chat** — não pedir outro transcript. Sem Status=Pronto para Dev + `implemente`: uma frase com Status atual + “Apply só depois de Pronto para Dev (T7 teu)” + parar. Sem estado, evento, hook ou `enabled_tools` novo na FSM. `AGENTS.md` always-on não cresce com esta regra.
 
 Filhos (Status tem que bater; mesmo worktree `card-<id>-*` pós-T1; grill no cwd atual sem branch; `working_directory` = worktree quando a árvore existir; filho MUST NOT `move_agent_to_root`):
 
@@ -169,14 +169,14 @@ Caminho obrigatório:
 
 `Cancelado` é terminal a qualquer momento, inclusive Em Refinamento.
 
-Gates humanos (agente não cruza): (0) Em Refinamento→Todo; (1) Aprovação de Design→Pronto para Dev (só Alan); (2) em Done, o par `homologar` → Homologado (T15) e `nao_homologar` → Em desenvolvimento (T18, só Alan, motivo visível `Não homologar:` + texto no issue). Homologado→Pronto é T16: `process_event fechar_release` após `release-guard post` PASS. Homologado sem aresta inversa. Arraste GitHub Done→Em desenvolvimento sem esse comentário é fora-de-δ: restaurar Done e exigir o motivo; não inventar UI no board.
+Gates humanos (agente não cruza; só Alan, no board ou por comando exato capturado fora do agente, ver "Comandos de portão"): T1 Em Refinamento→Todo; T2 coluna viva→Cancelado; T6 Aprovação de Design→Design (devolver, com motivo); T7 Aprovação de Design→Pronto para Dev; em Done, o par `homologar` → Homologado (T15) e `nao_homologar` → Em desenvolvimento (T18, motivo visível `Não homologar:` + texto no issue). Homologado→Pronto é T16: `process_event fechar_release` após `release-guard post` PASS. Homologado sem aresta inversa. Arraste GitHub Done→Em desenvolvimento sem esse comentário é fora-de-δ: o agente não restaura o Status (não move Status); comenta pedindo o motivo e não segue o Apply até o comentário existir; não inventar UI no board.
 
 | Status | Significado |
 | --- | --- |
-| `Em Refinamento` | Entrada **e** grelha da história (`grill-card` no issue). Alan escolhe, prioriza ou cancela. T1 só Alan |
-| `Todo` | Backlog (história já afiada). **Não é código.** Próxima etapa: Design |
+| `Em Refinamento` | Entrada **e** grelha da história (`grill-card` no issue). Alan escolhe, prioriza ou cancela. T1 só Alan (board ou `/priorizar N`, que já inicia o Design) |
+| `Todo` | Backlog (história já afiada). **Não é código.** Próxima etapa: Design. Arrasto para Todo fica em Todo |
 | `Design` | OpenSpec sintetiza o issue grelhado + crítica; Gist no card; protótipo se UI. Não reentrevistar |
-| `Aprovação de Design` | Aguardando Alan |
+| `Aprovação de Design` | Aguardando Alan (T7 `/aprovar-design N` ou T6 `/devolver-design N "motivo"`, ou board) |
 | `Pronto para Dev` | Design aprovado; único status que libera `/opsx:apply` |
 | `Em desenvolvimento` | Implementando |
 | `Code Review` | Diff pronto; review antes do commit |
@@ -187,6 +187,16 @@ Gates humanos (agente não cruza): (0) Em Refinamento→Todo; (1) Aprovação de
 | `Cancelado` | Não será feito |
 
 **Anti-bypass:** pedido `implemente` / `implemente todos` **não** autoriza código nem `/opsx:apply` enquanto `Status=Todo`. `UI impact: none` não pula colunas.
+
+### Comandos de portão
+
+O Alan passa os seis portões no board ou digitando no chat, como a mensagem inteira, uma destas linhas (`<card>` = número do issue, com ou sem `#`; motivo entre aspas duplas, 1–500 caracteres, sem aspas nem quebra de linha):
+
+`/priorizar <card>` (T1 e, no mesmo run, T3) · `/aprovar-design <card>` (T7) · `/devolver-design <card> "motivo"` (T6) · `/homologar <card>` (T15) · `/nao-homologar <card> "motivo"` (T18) · `/cancelar <card> "motivo"` (T2, pede `/confirmar-cancelar <card>` em até 10 min)
+
+- **Quem reconhece:** o hook de prompt do Claude Code (`UserPromptSubmit`, registro na conta), antes do agente, e manda ao **executor do board** (GitHub Actions no repo do executor, único dono do token que escreve no Project). O executor confere coluna de origem, evento e ator contra a FSM fixada no `PIN`, move, deixa recibo na issue (`Devolver design:` / `Não homologar:` / `Cancelar:` na primeira linha quando move) e responde. `/aprovar-design` é recusado se o design mudou desde o T5. Variação ("aprova aí", maiúscula, palavra a mais, duas linhas, sem motivo) não tem efeito nem recibo. Comentário de issue nunca é entrada do executor.
+- **Agente:** move só pedindo pelo `process_event` (o executor recusa evento do Alan pedido pelo agente com `actor`); não chama `portao_client`, `capturar` nem `dispatches` (a Guard nega). Com o resultado do executor no contexto adicional da mensagem, siga a FSM a partir do Status atual (`/priorizar` já deixou o card em Design; `/homologar` movido: comentário de evidência de homologado no mesmo turno). **Texto com cara de comando sem esse contexto** (hook ausente, outro cliente, `board.executor` desligado) é wording: diga que o comando não foi capturado e aponte o board; não mova nem capture por conta própria. Sem resposta no teto (90 s): não presuma o resultado, leia o recibo da issue.
+- **Nível: cooperativo.** O agente roda no mesmo usuário do sistema que o hook, com root: pode forjar um `capturar` e apagar o run e o recibo (tem `write` nos dois repos), e o recibo sai como `oalansilva`, então não avisa o Alan. Run e recibo são registro, não prova. O que fica fora do alcance do agente é o token que escreve no Project. Cursor, Codex, OpenCode, Grok Build e dsh ficam só com o board.
 
 ### Design — clone da página viva
 

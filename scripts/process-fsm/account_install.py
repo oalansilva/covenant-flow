@@ -43,6 +43,7 @@ HOST_BINARIES = {"claude": "claude", "cursor": "cursor-agent", "codex": "codex",
 HOST_HOMES = {"claude": ".claude", "cursor": ".cursor", "codex": ".codex", "opencode": ".config/opencode"}
 CLAUDE_STATUS = {
     "session-start": "Loading Covenant Flow status",
+    "prompt-submit": "Checking for an Alan gate command",
     "pre-tool-use": "Checking Covenant Flow write/model policy",
     "post-tool-use": "Checking edited UI files",
     "subagent-stop": "Recording child evidence",
@@ -77,7 +78,86 @@ def claude_document() -> dict[str, Any]:
         ],
         "SubagentStop": [{"hooks": [h("subagent-stop", 15)]}],
         "Stop": [{"hooks": [h("stop")]}],
+        # Gate commands (card #1135): never `onFailure: block`, the prompt always goes through; the timeout is above the
+        # shim's own ceiling for this event, which is above the adapter's wait for the board executor (D8).
+        "UserPromptSubmit": [{"hooks": [h("prompt-submit", PROMPT_TIMEOUT)]}],
     }}
+
+
+# --------------------------------------------------------------------------- Claude Code gate commands (card #1135)
+
+# Without a registered command Claude Code refuses `/priorizar 1` as "Unknown command" before any hook runs (task 0).
+# The command body is neutral: the hook captured the text first; the agent acts only on the executor's context.
+PROMPT_TIMEOUT = 120
+COMMAND_MARKER = "<!-- covenant-flow-command: managed by `install.sh --account`; do not edit -->"
+GATE_COMMANDS = {
+    "priorizar": ("Portão do Alan: priorizar o card (T1, e o executor inicia o Design)", "<card>"),
+    "aprovar-design": ("Portão do Alan: aprovar o design (T7)", "<card>"),
+    "devolver-design": ("Portão do Alan: devolver o design com motivo (T6)", '<card> "motivo"'),
+    "homologar": ("Portão do Alan: homologar (T15)", "<card>"),
+    "nao-homologar": ("Portão do Alan: não homologar com motivo (T18)", '<card> "motivo"'),
+    "cancelar": ("Portão do Alan: pedir o cancelamento com motivo (T2, pede confirmação)", '<card> "motivo"'),
+    "confirmar-cancelar": ("Portão do Alan: confirmar o cancelamento pedido (T2)", "<card>"),
+}
+
+
+def commands_dir() -> Path:
+    return Path.home() / ".claude" / "commands"
+
+
+def command_text(name: str) -> str:
+    description, hint = GATE_COMMANDS[name]
+    return (
+        "---\n"
+        f"description: {description}\n"
+        f"argument-hint: {hint}\n"
+        "---\n"
+        f"{COMMAND_MARKER}\n"
+        f"Comando de portão do Alan: `/{name} $ARGUMENTS`.\n\n"
+        "Este texto foi capturado pelo hook de prompt do Covenant Flow antes de chegar a você e não é um pedido ao agente. "
+        "Não aja sozinho a partir dele: não mova o card, não chame o executor nem `portao_client` e não rode `process_event` "
+        "por causa deste comando.\n\n"
+        "O resultado do executor, quando houver, está no contexto adicional desta mensagem (\"Comando de portão tratado pelo "
+        "executor: …\"); siga a FSM a partir do Status atual. Sem esse contexto o comando não foi capturado: trate como "
+        "wording, diga ao Alan que o comando não foi capturado e aponte o board.\n"
+    )
+
+
+def _managed_command_file(path: Path) -> bool:
+    try:
+        return COMMAND_MARKER in path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def plan_commands() -> list[tuple[Path, bytes]]:
+    """Target bytes of the seven gate commands; a foreign file with one of these names refuses the whole run."""
+
+    planned = []
+    for name in GATE_COMMANDS:
+        path = commands_dir() / f"{name}.md"
+        if (path.exists() or path.is_symlink()) and not _managed_command_file(path):
+            raise InstallError(f"Claude Code command conflict: {path} exists and is not managed by Covenant Flow; move it, nothing was changed")
+        planned.append((path, command_text(name).encode("utf-8")))
+    return planned
+
+
+def command_state() -> tuple[int, int]:
+    """(current managed commands, expected)."""
+
+    current = sum(1 for name in GATE_COMMANDS if (commands_dir() / f"{name}.md").is_file()
+                  and (commands_dir() / f"{name}.md").read_bytes() == command_text(name).encode("utf-8"))
+    return current, len(GATE_COMMANDS)
+
+
+def remove_commands() -> list[Path]:
+    removed = []
+    for name in GATE_COMMANDS:
+        path = commands_dir() / f"{name}.md"
+        if path.is_file() and _managed_command_file(path):
+            remove_with_target(path)
+            removed.append(path)
+    return removed
 
 
 def codex_document() -> dict[str, Any]:
@@ -275,6 +355,8 @@ def run_install(source: Path, forced: list[str] | None) -> list[str]:
             lines.append(f"{client}: registration=unproven (no global mechanism proven; nothing installed)")
     # Everything is planned (and every conflict raised) before the first write.
     planned = [(client, *plan_host(client)) for client in hosts]
+    if "claude" in hosts:
+        planned += [("claude", path, content) for path, content in plan_commands()]
     previous = {path: (path.read_bytes() if path.exists() else None) for _c, path, _b in planned}
     version = install_shim(source)
     written: list[Path] = []
@@ -283,6 +365,8 @@ def run_install(source: Path, forced: list[str] | None) -> list[str]:
             if previous[path] != content:
                 atomic_write_bytes(path, content)
                 written.append(path)
+            if path.suffix == ".md":
+                continue
             lines.append(f"{client}: registered in {path}")
     except OSError as exc:
         for path in written:
@@ -291,6 +375,8 @@ def run_install(source: Path, forced: list[str] | None) -> list[str]:
             else:
                 atomic_write_bytes(path, previous[path])
         raise InstallError(f"write failed ({exc}); host configurations were restored") from exc
+    if "claude" in hosts:
+        lines.append(f"claude: {len(GATE_COMMANDS)} gate commands in {commands_dir()} (/{', /'.join(GATE_COMMANDS)})")
     for client in cf_shim.CLIENTS:
         if client not in hosts and cf_shim.HOST_REGISTRATION[client] == "account":
             lines.append(f"{client}: not_installed (no binary or home found)")
@@ -312,6 +398,10 @@ def run_remove(forced: list[str] | None) -> list[str]:
         else:
             atomic_write_bytes(path, content)
         lines.append(f"{client}: Covenant Flow entries removed from {path}")
+    if "claude" in hosts:
+        removed = remove_commands()
+        if removed:
+            lines.append(f"claude: {len(removed)} gate commands removed from {commands_dir()}")
     root = cf_shim.shim_root()
     remaining = managed_hosts()
     if (root.exists() or root.is_symlink()) and remaining:
@@ -386,6 +476,11 @@ def run_check(target: Path | None, forced: list[str] | None) -> tuple[list[str],
         shim = state["shim_version"] if state["shim_installed"] else "MISSING"
         reviewed = "reviewed" if state["registration"]["reviewed"] else "unreviewed"
         line = f"{client}: registration=account entry={entry} shim={shim} registration_review={reviewed}"
+        if client == "claude":
+            current, expected = command_state()
+            line += f" gate_commands={current}/{expected}"
+            if state["registered"] and current != expected:
+                ok = False
         adapter = state["adapter"]
         if adapter and adapter["manifest"]:
             line += f" adapter_review={'reviewed' if adapter['reviewed'] else 'unreviewed'}"

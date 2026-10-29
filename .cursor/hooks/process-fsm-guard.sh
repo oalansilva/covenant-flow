@@ -121,6 +121,35 @@ if _sidecar_mut(command) or any(_is_sidecar_path(p) for p in paths):
     msg = "process-fsm-guard deny reason=sidecar"
     print(json.dumps({"permission": "deny", "decision": "deny", "agent_message": msg, "user_message": msg, "reason": msg}))
     sys.exit(0)
+# Card #1135: same executor-dispatch rule as board_status.is_executor_dispatch_command (inline copy without PyYAML).
+try:
+    from board_status import is_executor_dispatch_command as _executor_dispatch
+except Exception:
+    _PE_ONLY = re.compile(
+        r"^\s*(?:[A-Z_][A-Z0-9_]*=\S*\s+)*(?:\S*/)?python3?\s+(?:\S*/)?scripts/process-fsm/process_event\.py"
+        r"\s+[a-z_]+(?:\s+--[a-z][a-z-]*(?:[ =][^\s;&|<>`$()]+)?)*\s*$"
+    )
+    _PORTAO = re.compile(
+        r"(?:\bpython3?\b|\bpy\b)[^;&|\n]*(?:\bportao_client(?:\.py)?\b|\bportao/executor\.py\b)"
+        r"|\b(?:import\s+portao_client|from\s+portao_client\s+import|from\s+portao\b[\w.]*\s+import|import\s+portao\b)"
+        r"|\bportao_client\s*\.\s*(?:capturar|pedir|enviar|montar_pedido)\b"
+    )
+    _DISPATCH = re.compile(r"(?:repos/|api\.github\.com/repos/)[^\s'\"/]+/[^\s'\"/]+/dispatches\b")
+    _HTTP = re.compile(r"\bgh\s+api\b|\bcurl\b|\bwget\b|\bhttpie?\b|\brequests\.|\burllib\b|\bhttpx\b|\bfetch\(")
+    def _executor_dispatch(c, overlay=None):
+        if not c or _PE_ONLY.match(c):
+            return False
+        if _PORTAO.search(c):
+            return True
+        return bool(_DISPATCH.search(c) and _HTTP.search(c))
+if _executor_dispatch(command):
+    msg = (
+        "process-fsm-guard deny reason=executor_dispatch. Only scripts/process-fsm/process_event.py asks the board "
+        "executor (`process_event <evento> --card N`); Alan's gate commands are captured only by the prompt hook. "
+        "Do not call portao_client / capturar or the `dispatches` endpoint directly (cooperative rule, not a guarantee)."
+    )
+    print(json.dumps({"permission": "deny", "decision": "deny", "agent_message": msg, "user_message": msg, "reason": msg}))
+    sys.exit(0)
 if path is None and command:
     import os as _os
     non_redir = re.search(r"(?:sed\s+-i|perl\s+-i|\bcp\s+|\bmv\s+|\binstall\s+)", command)

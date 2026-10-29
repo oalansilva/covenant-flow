@@ -48,6 +48,7 @@ from t14 import (  # noqa: E402
     classify_qa_gate,
     measure_checks_green,
     run_t14,
+    t14_closeout_done,
 )
 from t16 import (  # noqa: E402
     LiveT16Closer,
@@ -85,19 +86,92 @@ EVENT_GUARDS = {
 
 
 class BoardMover(Protocol):
-    def set_status(self, issue_number: int, to: str) -> None: ...
+    """One Status move, described as the FSM edge it is: the executor checks event, source column and actor (D9)."""
+
+    via_executor: bool
+
+    def move(self, issue_number: int, evento: str, de: str | None, para: str, ator: str, extras: dict[str, Any] | None = None) -> None: ...
+
+
+class MoveRefused(RuntimeError):
+    """The executor answered and did not move: `code` becomes `reason=executor:<code>`, Status unchanged."""
+
+    def __init__(self, code: str, message: str | None = None) -> None:
+        super().__init__(message or code)
+        self.code = code
+        self.message = message or code
 
 
 class FakeMover:
+    via_executor = False
+
     def __init__(self) -> None:
         self.calls: list[tuple[int, str]] = []
+        self.requests: list[dict[str, Any]] = []
 
-    def set_status(self, issue_number: int, to: str) -> None:
-        self.calls.append((issue_number, to))
+    def move(self, issue_number: int, evento: str, de: str | None, para: str, ator: str, extras: dict[str, Any] | None = None) -> None:
+        self.requests.append({"issue": issue_number, "evento": evento, "de": de, "para": para, "ator": ator, "extras": dict(extras or {})})
+        self.calls.append((issue_number, para))
+
+
+class ExecutorMover:
+    """Moves only by asking the board executor (`portao_client.pedir`); never `gh project item-edit` (D9).
+
+    `pedir` is injectable: unit tests pass a fake executor and never reach GitHub.
+    """
+
+    via_executor = True
+
+    def __init__(self, config: Any, *, pedir: Callable[..., dict[str, Any]] | None = None, origem: dict[str, Any] | None = None) -> None:
+        self.config = config
+        self._pedir = pedir
+        self.origem: dict[str, Any] = dict(origem or {})
+
+    def set_client(self, client: str | None) -> None:
+        if client and not self.origem.get("cliente"):
+            self.origem["cliente"] = client
+
+    def move(self, issue_number: int, evento: str, de: str | None, para: str, ator: str, extras: dict[str, Any] | None = None) -> None:
+        if self._pedir is None:
+            import portao_client
+
+            self._pedir = portao_client.pedir
+        resposta = self._pedir(evento, issue_number, de=de, ator=ator, config=self.config, origem=self.origem, extras=extras or {})
+        resultado = str(resposta.get("resultado") or "indisponivel")
+        if resultado == "movido":
+            return
+        code = str(resposta.get("codigo") or resultado)
+        raise MoveRefused(code, str(resposta.get("mensagem") or code))
+
+
+def default_mover(root: Path | None = None) -> "BoardMover":
+    """`board.executor` in the overlay selects the executor; without the key, the previous `item-edit` mover (D9)."""
+
+    import portao_client
+
+    try:
+        overlay = load_overlay(root or REPO_ROOT)
+    except Exception:
+        return GhBoardMover()
+    config = portao_client.config_do_overlay(overlay)
+    return GhBoardMover() if config is None else ExecutorMover(config, origem=_session_origin())
+
+
+def _session_origin() -> dict[str, Any]:
+    return {
+        "superficie": os.environ.get("CLAUDE_CODE_ENTRYPOINT") or None,
+        "sessao": os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or None,
+    }
 
 
 class GhBoardMover:
     """Live Project Status edit from overlay board ids. Tests MUST inject FakeMover instead."""
+
+    via_executor = False
+
+    def move(self, issue_number: int, evento: str, de: str | None, para: str, ator: str, extras: dict[str, Any] | None = None) -> None:
+        del evento, de, ator, extras
+        self.set_status(issue_number, para)
 
     def set_status(self, issue_number: int, to: str) -> None:
         import subprocess
@@ -209,9 +283,20 @@ def _quota_reject(exc: GraphQLQuotaError, state: str | None = None) -> dict[str,
     )
 
 
-def _safe_move(mover: BoardMover, issue_number: int, to: str) -> dict[str, Any] | None:
+def _safe_move(
+    mover: BoardMover,
+    issue_number: int,
+    to: str,
+    *,
+    evento: str,
+    de: str | None,
+    ator: str = "Agent",
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     try:
-        mover.set_status(issue_number, to)
+        mover.move(issue_number, evento, de, to, ator, extras)
+    except MoveRefused as exc:
+        return _payload(result="reject", state=de, to=None, reason=f"executor:{exc.code}", message=exc.message)
     except GraphQLQuotaError as exc:
         return _quota_reject(exc)
     except (RuntimeError, ValueError, OSError) as exc:
@@ -431,13 +516,24 @@ def process_event(
     parent_checker: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     if event == "criar_card":
-        return _payload(
-            result="reject",
-            state=status,
-            to=None,
-            reason="not_implemented",
-            message="criar_card is out of scope for process_event; create the issue/card first.",
-        )
+        if mover is None or not getattr(mover, "via_executor", False):
+            return _payload(
+                result="reject",
+                state=status,
+                to=None,
+                reason="not_implemented",
+                message="criar_card needs board.executor in the overlay; create the issue/card first.",
+            )
+        try:
+            new_card = int(str(card).lstrip("#"))
+        except (TypeError, ValueError):
+            return _payload(result="reject", state=None, to=None, reason="unbound", message="criar_card needs --card N (the issue already exists)")
+        if dry_run:
+            return _payload(result="transition", state=None, to="Em Refinamento", reason="T0")
+        failed = _safe_move(mover, new_card, "Em Refinamento", evento="criar_card", de=None)
+        if failed is not None:
+            return failed
+        return _payload(result="transition", state=None, to="Em Refinamento", reason="T0")
     table = fsm if fsm is not None else load_fsm()
     workdir = Path(cwd) if cwd is not None else Path.cwd()
     if card is not None:
@@ -457,6 +553,8 @@ def process_event(
     active_client = client or os.environ.get("COVENANT_CLIENT") or native or host_client()
     if native and active_client != native:
         return _payload(result="reject", state=q, to=None, reason=f"{native}_evidence:ambiguous_client")
+    if mover is not None and hasattr(mover, "set_client"):
+        mover.set_client(active_client)
     if active_client in ("cursor", "opencode", "codex") and event in PREFLIGHT_EVENTS:
         # Account registration (pin with an adapter manifest): the hooks of these clients run from the
         # operator account through the shim. Without the shim, its heartbeat, the client's entry or its
@@ -609,6 +707,16 @@ def process_event(
                 rows = []
         if not rows:
             return _payload(result="reject", state=q, to=None, reason="no_pr")
+    # D9: T14 repeated after the closeout (squash, sync, restart, done comment) with Status still QA
+    # only asks for the move; it neither re-measures the merged PR nor redoes the squash.
+    t14_closed = bool(
+        event == "integrar_develop"
+        and not dry_run
+        and t14_runner is not None
+        and t14_closeout_done(t14_runner, q_git=str(git), bound_card=str(bound))
+    )
+    if t14_closed and checks_green is None:
+        checks_green = True
     if event == "integrar_develop" and checks_green is None:
         if checks_green_classifier is not None:
             try:
@@ -678,7 +786,7 @@ def process_event(
         )
         if compiled.result == "transition":
             if not dry_run and mover is not None and issue_number is not None:
-                failed = _safe_move(mover, issue_number, compiled.to or "Design")
+                failed = _safe_move(mover, issue_number, compiled.to or "Design", evento="invalidar_aprovacao", de=q, ator="Guard")
                 if failed is not None:
                     failed["state"] = q
                     return failed
@@ -733,7 +841,8 @@ def process_event(
         if t14_runner is None:
             return _payload(result="reject", state=q, to=None, reason="I8")
         try:
-            run_t14(t14_runner, q_git=str(git), bound_card=str(bound))
+            if not t14_closed:
+                run_t14(t14_runner, q_git=str(git), bound_card=str(bound))
         except T14Error as exc:
             text = str(exc)
             if "sync: dirty" in text:
@@ -743,7 +852,7 @@ def process_event(
             return _payload(result="reject", state=q, to=None, reason="I8", message=text)
         if mover is None or issue_number is None:
             return _payload(result="transition", state=q, to=result.to, reason=result.reason, message=message)
-        failed = _safe_move(mover, issue_number, result.to or "")
+        failed = _safe_move(mover, issue_number, result.to or "", evento=event, de=q)
         if failed is not None:
             failed["state"] = q
             return failed
@@ -759,7 +868,8 @@ def process_event(
                     t16_closer.comment_pronto(card=str(number), package=parsed_package or homologado_ids)
                     if mover is None:
                         return _payload(result="reject", state=q, to=None, reason="I9")
-                    failed = _safe_move(mover, number, result.to or "Pronto")
+                    failed = _safe_move(mover, number, result.to or "Pronto", evento=event, de="Homologado",
+                                        extras={"pacote": ",".join(str(n) for n in (parsed_package or homologado_ids))})
                     if failed is not None:
                         failed["state"] = q
                         failed["reason"] = "I9"
@@ -775,7 +885,11 @@ def process_event(
         )
     if dry_run or mover is None or issue_number is None:
         return _payload(result="transition", state=q, to=result.to, reason=result.reason, message=message)
-    failed = _safe_move(mover, issue_number, result.to or "")
+    extras: dict[str, Any] = {}
+    if event == "submeter_design" and resolved_change_dir is not None:
+        # T5 carries the design digest: the executor keeps it and compares it on `/aprovar-design` (D7).
+        extras["digest"] = compute_digest(resolved_change_dir, resolved_proto)
+    failed = _safe_move(mover, issue_number, result.to or "", evento=event, de=q, extras=extras)
     if failed is not None:
         failed["state"] = q
         return failed
@@ -802,6 +916,15 @@ def main(argv: list[str] | None = None) -> int:
             json.dump(_payload(result="reject", state=None, to=None, reason="claude_evidence:parent_model", message=f"capture unreadable: {exc}"), sys.stdout, ensure_ascii=True)
             sys.stdout.write("\n")
             return 1
+    mover: BoardMover | None = None
+    try:
+        mover = default_mover()
+    except Exception as exc:  # a malformed board.executor fails visibly, never falls back to item-edit
+        json.dump(_payload(result="reject", state=None, to=None, reason="executor:config", message=str(exc)), sys.stdout, ensure_ascii=True)
+        sys.stdout.write("\n")
+        return 1
+    if args.dry_run and not getattr(mover, "via_executor", False):
+        mover = None
     payload = process_event(
         args.event,
         card=args.card,
@@ -809,7 +932,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         client=args.client,
         parent_capture=parent_capture,
-        mover=None if args.dry_run else GhBoardMover(),
+        mover=mover,
         checks_green_measurer=measure_checks_green,
         checks_green_classifier=classify_qa_gate,
         pr_lister=lambda q_git: _pr_list_json(str(q_git or ""), fields="number,headRefOid"),

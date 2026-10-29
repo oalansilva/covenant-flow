@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from board_status import (  # noqa: E402
+    is_executor_dispatch_command,
     is_sidecar_path,
     is_status_edit_command,
     sidecar_in_command,
@@ -462,6 +463,15 @@ def _command(payload: Mapping[str, Any]) -> str:
 def _sidecar_deny() -> dict[str, str]:
     message = (
         "process-fsm-guard deny reason=sidecar. .design-digest is written only by process_event T5."
+    )
+    return emit("deny", message)
+
+
+def _executor_dispatch_deny() -> dict[str, str]:
+    message = (
+        "process-fsm-guard deny reason=executor_dispatch. Only scripts/process-fsm/process_event.py asks the board "
+        "executor (`process_event <evento> --card N`); Alan's gate commands are captured only by the prompt hook. "
+        "Do not call portao_client / capturar or the `dispatches` endpoint directly (cooperative rule, not a guarantee)."
     )
     return emit("deny", message)
 
@@ -918,6 +928,8 @@ def _decide_core(
         return _sidecar_deny()
     if is_status_edit_command(command, overlay):
         return _status_edit_deny()
+    if is_executor_dispatch_command(command, overlay):
+        return _executor_dispatch_deny()
     source = environment_dev_source(overlay)
     if source and is_canonical_card_branch_create(command, cwd, source):
         message = (

@@ -225,3 +225,33 @@ def test_restart_rejects_noncanonical_path_on_canonical_source(tmp_path: Path):
     )
     with pytest.raises(T14Error, match="path"):
         runner.restart()
+
+
+def test_live_closeout_receipt_marks_t14_done_for_same_merged_pr(tmp_path: Path):
+    merged = json.dumps([{"number": 77, "state": "MERGED", "mergedAt": "2026-10-28T00:00:00Z", "headRefOid": "abc"}])
+    scripted = Scripted([_ok(merged), _ok("")])
+    runner = LiveT14Runner(source=tmp_path, restart_path=tmp_path / "restart", runner=scripted,
+                           closeout_dir=tmp_path / "closeout")
+    assert runner.closeout_done(q_git="card-801-x", bound_card="801") is False  # no receipt: no gh call
+    runner.squash(q_git="card-801-x", bound_card="801")  # already merged: no `gh pr merge`
+    runner.commit = "deadbeef"
+    runner.comment_done(bound_card="801", q_git="card-801-x")
+    receipt = json.loads((tmp_path / "closeout" / "801.json").read_text(encoding="utf-8"))
+    assert receipt == {"card": "801", "q_git": "card-801-x", "pr": "77", "head": "abc", "commit": "deadbeef"}
+
+    runner._run = Scripted([_ok(merged)])
+    assert runner.closeout_done(q_git="card-801-x", bound_card="801") is True
+    assert runner.closeout_done(q_git="card-801-other", bound_card="801") is False
+    runner._run = Scripted([_ok(json.dumps([{"number": 78, "state": "MERGED", "headRefOid": "abc"}]))])
+    assert runner.closeout_done(q_git="card-801-x", bound_card="801") is False  # a later PR is a new T14
+    runner._run = Scripted([_ok(json.dumps([{"number": 77, "state": "OPEN", "headRefOid": "abc"}]))])
+    assert runner.closeout_done(q_git="card-801-x", bound_card="801") is False
+
+
+def test_live_comment_failure_writes_no_receipt(tmp_path: Path):
+    runner = LiveT14Runner(source=tmp_path, restart_path=tmp_path / "restart",
+                           runner=Scripted([_ok("boom", returncode=1)]), closeout_dir=tmp_path / "closeout")
+    runner.pr, runner.commit = "77", "deadbeef"
+    with pytest.raises(T14Error):
+        runner.comment_done(bound_card="801", q_git="card-801-x")
+    assert not (tmp_path / "closeout").exists()

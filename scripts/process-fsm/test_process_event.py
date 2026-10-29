@@ -40,7 +40,7 @@ def _change_tree(tmp_path: Path) -> Path:
     return change
 
 
-def test_criar_card_not_implemented():
+def test_criar_card_not_implemented_without_executor():
     mover = FakeMover()
     out = process_event("criar_card", card="612", mover=mover, status=None)
     assert out["result"] == "reject"
@@ -606,7 +606,7 @@ def test_card_hash_prefix_matches_branch():
 
 def test_mover_failure_returns_json_reject():
     class Boom(FakeMover):
-        def set_status(self, issue_number: int, to: str) -> None:
+        def move(self, issue_number, evento, de, para, ator, extras=None) -> None:
             raise RuntimeError("item-edit failed")
 
     out = process_event(
@@ -852,6 +852,65 @@ def test_integrar_develop_oserror_is_i8():
     assert out["reason"] == "I8"
     assert out.get("message")
     assert mover.calls == []
+
+
+def test_integrar_develop_retry_after_squash_only_moves():
+    """D9: first T14 squashes and closes out but the executor refuses; the retry only asks the move."""
+    from process_event import MoveRefused
+
+    class FlakyMover(FakeMover):
+        def __init__(self) -> None:
+            super().__init__()
+            self.refuse = True
+
+        def move(self, issue_number, evento, de, para, ator, extras=None):  # noqa: ANN001
+            if self.refuse:
+                self.refuse = False
+                self.requests.append({"issue": issue_number, "evento": evento, "de": de, "para": para, "refused": True})
+                raise MoveRefused("indisponivel", "executor indisponível")
+            super().move(issue_number, evento, de, para, ator, extras)
+
+    mover = FlakyMover()
+    runner = RecordingT14Runner()
+    first = process_event("integrar_develop", mover=mover, t14_runner=runner, **_t14_kwargs())
+    assert first["result"] == "reject"
+    assert first["reason"] == "executor:indisponivel"
+    assert runner.calls == ["squash", "sync_dev_source", "restart", "comment_done"]
+    assert mover.calls == []
+
+    classified: list[str] = []
+
+    def no_pr(*_a, **_k):  # noqa: ANN002, ANN003
+        classified.append("no_pr")
+        return {"ok": False, "reason": "no_pr"}
+
+    second = process_event(
+        "integrar_develop",
+        mover=mover,
+        t14_runner=runner,
+        checks_green=None,
+        checks_green_classifier=no_pr,
+        **{k: v for k, v in _t14_kwargs().items() if k != "checks_green"},
+    )
+    assert second["result"] == "transition"
+    assert second["to"] == "Done"
+    assert runner.calls == ["squash", "sync_dev_source", "restart", "comment_done"]
+    assert classified == []
+    assert mover.calls == [(612, "Done")]
+    assert mover.requests[-1]["evento"] == "integrar_develop" and mover.requests[-1]["de"] == "QA"
+
+
+def test_integrar_develop_retry_after_partial_closeout_reruns_it():
+    """A sync failure after the squash is not a closed T14: the retry runs the closeout again."""
+    mover = FakeMover()
+    runner = RecordingT14Runner(fail_at="sync_dev_source")
+    first = process_event("integrar_develop", mover=mover, t14_runner=runner, **_t14_kwargs())
+    assert first["reason"] == "I8"
+    runner.fail_at = None
+    second = process_event("integrar_develop", mover=mover, t14_runner=runner, **_t14_kwargs())
+    assert second["result"] == "transition"
+    assert runner.calls == ["squash", "sync_dev_source", "squash", "sync_dev_source", "restart", "comment_done"]
+    assert mover.calls == [(612, "Done")]
 
 
 def test_cli_has_no_checks_green_flag():

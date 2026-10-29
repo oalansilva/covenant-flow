@@ -25,7 +25,9 @@ UNBOUND_PAGE = (
 )
 FOOTER = (
     "Resolva (q, bound_card, q_git). Não invente aresta. "
-    "Chat é wording; NLU ≠ δ. Overlay on-demand (portas, Drive, release)."
+    "Texto livre é wording; comando exato capturado fora do agente é evento do Alan. NLU ≠ δ. "
+    "Portões do Alan: T1, T2, T6, T7, T15, T18. "
+    "Overlay on-demand (portas, Drive, release)."
 )
 CODEX_CLIENT_CONTEXT = (
     "Cliente ativo: Codex CLI. No Code Review, o pai/orquestrador gravável primeiro "

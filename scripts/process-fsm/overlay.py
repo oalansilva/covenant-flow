@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -378,6 +379,34 @@ def board_owner_number(overlay: Mapping[str, Any] | None) -> tuple[str, int | No
     return owner, number if isinstance(number, int) else None
 
 
+_EXECUTOR_REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def board_executor(overlay: Mapping[str, Any] | None) -> dict[str, str] | None:
+    """Optional `board.executor` (card #1135): `{repo: owner/name[, event_type]}` of the board executor, or None.
+
+    Without the key every move keeps the previous path (`gh project item-edit`) and the prompt hook captures nothing.
+    A key that is present but malformed raises: a half-configured executor must fail visibly, not fall back silently.
+    """
+
+    if not overlay:
+        return None
+    board = overlay.get("board") or {}
+    raw = board.get("executor") if isinstance(board, Mapping) else None
+    if raw in (None, "", {}):
+        return None
+    if not isinstance(raw, Mapping):
+        raise OverlayInvalid("board.executor must be a mapping with repo: owner/name")
+    repo = str(raw.get("repo") or "").strip()
+    if not _EXECUTOR_REPO.match(repo):
+        raise OverlayInvalid("board.executor.repo must be owner/name")
+    out = {"repo": repo}
+    event_type = str(raw.get("event_type") or "").strip()
+    if event_type:
+        out["event_type"] = event_type
+    return out
+
+
 def glob_lists(overlay: Mapping[str, Any] | None) -> tuple[list[str], list[str]]:
     if not overlay:
         return [], []
@@ -439,11 +468,11 @@ def render_agents(overlay: Mapping[str, Any]) -> str:
         f"Board: {board}" if board else "Board: (overlay board.owner / board.number)",
         "",
         "Resolva `(q, bound_card, q_git)`; não invente aresta.",
-        "Chat é wording, não autorização. NLU ≠ δ. `implemente` ∉ δ.",
+        "Texto livre é wording; comando exato capturado fora do agente é evento do Alan. NLU ≠ δ. `implemente` ∉ δ.",
         "`Em Refinamento` é a entrada. Não pular Design / Aprovação de Design.",
         "`Todo` não é código; próxima = `iniciar_design` via `process_event`.",
         "Código / `/opsx:apply` só após `Status=Pronto para Dev` (T8).",
-        "Alan único em T1/T7/T15/T18. Agent não arrasta essas colunas. T16 = `process_event fechar_release`.",
+        "Portões do Alan: T1, T2, T6, T7, T15, T18 (board ou comando exato). Agent não move Status: pede pelo `process_event`. T16 = `process_event fechar_release`.",
         "Clientes: Cursor Agent (cooperativo); Codex CLI (cooperativo; hooks só após trust review); Grok Build, OpenCode e dsh (cooperativos até ensaio deny na branch de integração).",
         "Não reivindique modo Auto no Cursor, no Codex, no Grok, no OpenCode nem no dsh.",
         "Skills canônicas: `.cursor/skills/` neste repo. Overlay on-demand; runbook = skill `covenant-flow`.",

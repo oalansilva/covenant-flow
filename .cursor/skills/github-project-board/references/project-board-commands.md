@@ -35,10 +35,7 @@ Issue body/labels/comments: REST `gh api repos/<owner>/<repo>/issues/<n>` GET/PA
 - `gh project view <N> --owner <owner> --web`: abre o board no navegador.
 - `gh project field-list <N> --owner <owner>`: lista campos (inclui Status e opções de coluna).
 - `gh project item-list <N> --owner <owner> --format json`: fotografia completa do board (fecho de lote / `/kaizen` completo). MUST NOT para operar um card N.
-- `gh project item-add <N> --owner <owner> --url <issue_or_pr_url>`: adiciona issue/PR.
-- `gh project item-edit --id <item_id> --project-id <project_id> --field-id <field_id> --single-select-option-id <option_id>`: move status.
-- `gh project item-edit --id <item_id> --project-id <project_id> --clear --field-id <field_id>`: limpa valor de campo.
-- `gh project item-archive <N> --owner <owner> --id <item_id>`: arquiva item.
+- Escrita no Project (adicionar item, mover ou limpar Status, arquivar): **não é do agente.** O agente não move nem adiciona; pede pelo `process_event` (`process_event <evento> --card N`; `process_event criar_card --card N` põe no board uma issue que já existe), e o executor do board escreve. Portões do Alan (T1, T2, T6, T7, T15, T18) são do Alan, no board ou por comando exato.
 
 ## Snippets úteis
 
@@ -73,19 +70,9 @@ gh project field-list "$PROJECT_NUMBER" --owner "$OWNER" --format json \
   | jq -r '.[] | select(.name=="Fluxo") | .options[] | "\(.id)\t\(.name)"'
 ```
 
-### Atualizar status de um item para "Done"
+### Levar um item a "Done"
 
-1. Descubra se o contrato local usa `Status`, `Fluxo` ou outro campo principal.
-2. Descubra o `FIELD_ID` do campo correto e o `OPTION_ID` de `Done`.
-3. Edite o item:
-
-```bash
-gh project item-edit \
-  --id "ITEM_ID" \
-  --project-id "PROJECT_ID" \
-  --field-id "FIELD_ID" \
-  --single-select-option-id "OPTION_ID"
-```
+O agente não edita o Status. `Done` vem do T14: `process_event integrar_develop --card N`, que pede o movimento ao executor do board depois do squash.
 
 ## Pontos de falha comuns
 
@@ -98,7 +85,7 @@ gh project item-edit \
 - Siga o `AGENTS.md` do repo atual.
 - `Done` costuma significar tarefa concluida tecnicamente.
 - Em Done o par humano e `homologar` → Homologado e `nao_homologar` → Em desenvolvimento (T18). Destino de T18 e Em desenvolvimento, nao Homologado.
-- Arraste GitHub Done→Em desenvolvimento sem comentario `Não homologar:` + texto: restaurar Done e exigir o motivo. Nao inventar UI no board.
+- Arraste GitHub Done→Em desenvolvimento sem comentario `Não homologar:` + texto: o agente nao restaura o Status; comenta pedindo o motivo e nao segue o Apply ate o comentario existir. Nao inventar UI no board.
 - `Homologado` exige validacao/aprovacao do Alan. Sem aresta inversa neste recorte.
 - Nao descreva `Done` como card fechado/finalizado; use `Done tecnico` ou `aguardando homologacao`. Card fechado de verdade e `Pronto`.
 - Nos projetos do Alan, `Status` e a fonte principal das colunas e do workflow quando existir. Se houver `Fluxo`, trate como substatus/legado e sincronize valores equivalentes quando aplicavel. Se nao houver equivalente, `Status` prevalece.

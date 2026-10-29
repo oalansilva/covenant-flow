@@ -57,7 +57,7 @@ def _python_entries(adapter: str, events: tuple[str, ...]) -> dict[str, list[str
 
 
 ENTRYPOINTS: dict[str, dict[str, list[str]]] = {
-    "claude": _python_entries("claude_adapter.py", ("session-start", "pre-tool-use", "post-tool-use", "subagent-stop", "stop")),
+    "claude": _python_entries("claude_adapter.py", ("session-start", "pre-tool-use", "post-tool-use", "subagent-stop", "stop", "prompt-submit")),
     "codex": _python_entries("codex_adapter.py", ("session-start", "pre-tool-use", "post-tool-use", "stop")),
     "cursor": {
         "session-start": ["bash", ".cursor/hooks/process-fsm-session-start.sh"],

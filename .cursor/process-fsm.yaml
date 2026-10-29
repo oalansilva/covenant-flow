@@ -42,7 +42,7 @@ invariants:
   - id: I1
     text: "Write(produto) ⇒ q ∈ {Em desenvolvimento, Code Review} ∧ q_git=card-<id> ∧ bound_card=id ∧ path desse worktree"
   - id: I2
-    text: "T1, T7, T15, T18.ator ⊇ Alan. Agent ⇏ T7. T16.ator ⊇ Agent."
+    text: "T1, T2, T6, T7, T15, T18.ator = Alan (board ou comando exato capturado fora do agente). Agent ⇏ T7. T16.ator ⊇ Agent."
   - id: I3
     text: "Em Pronto para Dev, Write produto = deny. Allow só após Status já ser Em desenvolvimento."
   - id: I4
@@ -118,9 +118,9 @@ transitions:
   - { id: T2, from: Vivo, event: cancelar, actor: Alan, to: Cancelado, actions: [set_status, classify_branch] }
   - { id: T3, from: Todo, event: iniciar_design, actor: Agent, to: Design, actions: [set_status, declare_ui_impact] }
   - { id: T4, from: Design, event: recriticar, actor: Agent, to: Design, actions: [spawn_critique], exclusive_group: design-exit }
-  - { id: T5, from: Design, event: submeter_design, actor: Agent, to: Aprovação de Design, guard: G_design, actions: [gist, set_status], exclusive_group: design-exit }
+  - { id: T5, from: Design, event: submeter_design, actor: Agent, to: Aprovação de Design, guard: G_design, actions: [gist, set_status, freeze_digest], exclusive_group: design-exit }
   - { id: T6, from: Aprovação de Design, event: devolver_design, actor: Alan, to: Design, actions: [set_status] }
-  - { id: T7, from: Aprovação de Design, event: aprovar_design, actor: Alan, to: Pronto para Dev, actions: [set_status, freeze_digest] }
+  - { id: T7, from: Aprovação de Design, event: aprovar_design, actor: Alan, to: Pronto para Dev, actions: [set_status, check_digest] }
   - { id: T8, from: Pronto para Dev, event: iniciar_apply, actor: Agent, to: Em desenvolvimento, guard: q_git_card, actions: [set_status_first, opsx_apply] }
   - { id: T9, from: Em desenvolvimento, event: pedir_review, actor: Agent, to: Code Review, actions: [set_status, spawn_reviewers] }
   - { id: T10, from: Code Review, event: achar_bloqueante, actor: Agent, to: Em desenvolvimento, guard: open_p0_p1, actions: [set_status], exclusive_group: cr-exit }

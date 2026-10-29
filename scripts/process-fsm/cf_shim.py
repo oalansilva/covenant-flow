@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-SHIM_VERSION = "1.1.0"
+SHIM_VERSION = "1.2.0"
 SHIM_PROTOCOL = 1
 SUPPORTED_PROTOCOLS = (1,)
 CLIENTS = ("claude", "cursor", "codex", "opencode")
@@ -49,10 +49,17 @@ SHIM_FILES = {"claude": ("cf_shim.py",), "cursor": ("cf_shim.py",), "codex": ("c
 MANIFEST = Path(".covenant-flow") / "adapters.json"
 OVERLAY = Path(".covenant-flow") / "overlay.yaml"
 HOOK_TIMEOUT = 28
+# The prompt hook waits for the board executor (up to 90 s in the adapter): its own ceiling, below the account entry's
+# `timeout` (120 s), so a stuck run still ends in a visible message and never in the host killing the hook (D8).
+EVENT_TIMEOUTS = {"prompt-submit": 110}
+# The only prompts whose failure the shim shows: the start of a gate command (the full grammar lives in the adapter).
+GATE_PROMPT = re.compile(r"/(?:priorizar|aprovar-design|devolver-design|homologar|nao-homologar|cancelar|confirmar-cancelar)(?:\s|$)")
 PIN_PATTERN = re.compile(r"^pin:\s*[\"']?([^\s\"'#]+)", re.MULTILINE)
 SESSION_ID = re.compile(r"[A-Za-z0-9_.:-]{8,128}\Z")
 UNAVAILABLE = "unavailable"
 MAX_NESTING = 8
+# First pin whose claude adapter declares the `prompt-submit` entry point (gate commands, card #1135).
+GATE_HOOK_MIN_PIN = "v1.1.26"
 
 RECOVERY = {
     "shim_incompatible": "update the account shim with `install.sh --account` from the same covenant-flow checkout, then start a new session",
@@ -63,10 +70,15 @@ RECOVERY = {
     "consumer_ambiguous": "open the session in a single repository or worktree",
     "manifest_invalid": "re-run `install.sh --pin <tag>` to rewrite .covenant-flow/adapters.json",
     "shim_error": "check the shim with `install.sh --account --check` and start a new session",
+    "event_unsupported": f"raise this repo's pin to {GATE_HOOK_MIN_PIN} or newer (`install.sh --pin <tag>`) or use the board",
 }
+# A gate command typed outside any consumer: nothing captures it, and Alan must see that (not silence).
+OUTSIDE_CONSUMER_GATE = (
+    "esta sessão está fora de um repo consumidor do Covenant Flow. Abra a sessão no repo ou use o board."
+)
 
 GATING_EVENTS = {
-    "claude": {"pre-tool-use"},
+    "claude": {"pre-tool-use", "prompt-submit"},
     "codex": {"pre-tool-use"},
     "cursor": {"guard", "model-selection"},
 }
@@ -662,11 +674,32 @@ def _claude_pretool_deny(message: str) -> dict[str, Any]:
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": message}}
 
 
-def deny_output(client: str, event: str, message: str) -> dict[str, Any] | None:
-    """The host-native deny for a gating event; None for events that never gate."""
+def gate_prompt(payload: Mapping[str, Any] | None) -> bool:
+    prompt = (payload or {}).get("prompt")
+    return isinstance(prompt, str) and GATE_PROMPT.match(prompt.lstrip()) is not None
+
+
+def _claude_prompt_failure(message: str) -> dict[str, Any]:
+    """A gate command that cannot be captured: say so to Alan and to the agent, never `decision: block`."""
+
+    context = (
+        f"Covenant Flow: comando de portão NÃO capturado ({message}). É wording: não mova o card nem tente capturar; "
+        "diga ao Alan que o comando não foi capturado e aponte o board."
+    )
+    return {"systemMessage": f"Comando de portão não capturado: {message}", "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}}
+
+
+def deny_output(client: str, event: str, message: str, payload: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+    """The host-native deny for a gating event; None for events that never gate.
+
+    The prompt hook gates only gate commands: a failure on any other prompt stays out of Alan's way (the session page
+    already says what is wrong), and even on a gate command it never blocks the prompt.
+    """
 
     if event not in GATING_EVENTS.get(client, set()):
         return None
+    if client == "claude" and event == "prompt-submit":
+        return _claude_prompt_failure(message) if gate_prompt(payload) else None
     if client == "cursor":
         return {"permission": "deny", "decision": "deny", "user_message": message, "agent_message": message, "reason": message}
     return _claude_pretool_deny(message)
@@ -721,7 +754,7 @@ def run_adapter(root: Path, entry: Mapping[str, Any], event: str, raw: bytes, de
         CF_SHIM_ACTIVE="1", CF_SHIM_VERSION=SHIM_VERSION, CF_SHIM_ROOT=str(root),
         CF_SHIM_ADAPTER_DIGEST=decision.adapter_digest, CF_SHIM_REGISTRATION_DIGEST=decision.registration,
     )
-    return subprocess.run(argv, input=raw, cwd=root, env=env, check=False, capture_output=True, timeout=HOOK_TIMEOUT)
+    return subprocess.run(argv, input=raw, cwd=root, env=env, check=False, capture_output=True, timeout=EVENT_TIMEOUTS.get(event, HOOK_TIMEOUT))
 
 
 def _page_from_session_start(client: str, completed: subprocess.CompletedProcess[bytes] | None) -> str:
@@ -758,7 +791,7 @@ def handle_hook(client: str, event: str, raw: bytes, environ: Mapping[str, str] 
     except Exception as exc:  # the shim must never turn its own bug into silence on a gate
         decision = Decision("fail", "shim_error", f"{type(exc).__name__}: {exc}")
         message = failure_text(client, decision)
-        out = deny_output(client, event, message) or notice_output(client, event, message)
+        out = deny_output(client, event, message, payload) or notice_output(client, event, message)
         if out is not None:
             _emit(out)
         else:
@@ -782,10 +815,12 @@ def _handle(client: str, event: str, raw: bytes, payload: Mapping[str, Any], env
         except OSError:
             pass
     if decision.action == "none":
+        if client == "claude" and event == "prompt-submit" and decision.root is None and gate_prompt(payload):
+            _emit(_claude_prompt_failure(OUTSIDE_CONSUMER_GATE))
         return 0
     if decision.action == "fail":
         message = failure_text(client, decision)
-        out = deny_output(client, event, message) or notice_output(client, event, message)
+        out = deny_output(client, event, message, payload) or notice_output(client, event, message)
         if out is not None:
             _emit(out)
         else:
@@ -800,16 +835,20 @@ def _handle(client: str, event: str, raw: bytes, payload: Mapping[str, Any], env
     except (OSError, subprocess.SubprocessError) as exc:
         failed = Decision("fail", "shim_error", f"adapter did not run: {type(exc).__name__}: {exc}", root=root)
         message = failure_text(client, failed)
-        out = deny_output(client, event, message) or notice_output(client, event, message)
+        out = deny_output(client, event, message, payload) or notice_output(client, event, message)
         if out is not None:
             _emit(out)
         else:
             print(message, file=sys.stderr)
         return 0
     if completed is None:
-        failed = Decision("fail", "adapter_missing", f"the manifest declares no `{event}` entry point for {client}", root=root)
+        if client == "claude" and event == "prompt-submit" and gate_prompt(payload):
+            pin = pin_of(root) or "unknown"
+            failed = Decision("fail", "event_unsupported", f"this repo's pin ({pin}) predates the gate-command hook: the manifest declares no `prompt-submit` entry point for claude", root=root)
+        else:
+            failed = Decision("fail", "adapter_missing", f"the manifest declares no `{event}` entry point for {client}", root=root)
         message = failure_text(client, failed)
-        out = deny_output(client, event, message) or notice_output(client, event, message)
+        out = deny_output(client, event, message, payload) or notice_output(client, event, message)
         if out is not None:
             _emit(out)
         return 0

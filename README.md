@@ -71,6 +71,8 @@ A partir do pin com registro na conta, `--pin` **não grava** registro de hooks 
 python3 ~/.config/covenant-flow/shim/current/cf_shim.py trust --record   # operador, em terminal comum (confirmação digitada; recusa dentro de sessão de agente), depois de ler registro (R) e adapter (A)
 ```
 
+No Claude Code, `--account` também registra o hook de prompt (`UserPromptSubmit`) e os sete comandos de portão do Alan em `~/.claude/commands/` (`/priorizar`, `/aprovar-design`, `/devolver-design`, `/homologar`, `/nao-homologar`, `/cancelar`, `/confirmar-cancelar`); o hook manda o comando exato ao executor do board quando o overlay declara `board.executor` (sem a chave, o comando não é capturado e o board continua sendo o caminho). Nível cooperativo: ver a skill `covenant-flow`, "Comandos de portão".
+
 Nada disso grava confiança nem toca a seleção de modelos. Grok Build e dsh ficam como antes (registro de projeto). Pins anteriores continuam com o registro de projeto; o shim não age neles.
 
 v1 **não** instala via git submodule, ponteiros gitignore, marketplace nem template-clone.

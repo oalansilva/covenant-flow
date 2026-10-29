@@ -1,6 +1,6 @@
 ---
 name: github-project-board
-description: "Operar GitHub Projects v2 a partir do contexto correto do workspace: detectar o board pela pasta atual e AGENTS.md, ou por URL explícita, antes de listar itens, localizar cards, adicionar issues/PRs e atualizar campos/status."
+description: "Operar GitHub Projects v2 a partir do contexto correto do workspace: detectar o board pela pasta atual e AGENTS.md, ou por URL explícita, antes de listar itens, localizar cards e ler campos/status; movimento de Status só por `process_event` (o agente não move nem adiciona)."
 ---
 
 # GitHub Project Board
@@ -39,8 +39,8 @@ done
 ## Convenção de status (este projeto)
 
 - O campo `Status` e a fonte principal das colunas visuais.
-- No **Project 1 / Cripto**, o caminho obrigatório e `Em Refinamento -> Todo -> Design -> Aprovação de Design -> Pronto para Dev -> Em desenvolvimento -> Code Review -> QA -> Done -> Homologado -> Pronto`. **Nao existe bypass** dessas colunas; `UI impact: none` e pedidos `implemente` nao autorizam pular. So Alan move `Aprovação de Design -> Pronto para Dev` e, em Done, o par `homologar` (`Done -> Homologado`) / `nao_homologar` (`Done -> Em desenvolvimento`, T18). Homologado nao tem aresta inversa. Homologado -> Pronto e `process_event fechar_release` (T16). `Todo` nao e codigo. Arraste Done→Em desenvolvimento sem comentário `Não homologar:` + texto e fora-de-δ: restaurar Done e exigir o motivo; nao inventar UI no board.
-- `Em Refinamento` e a entrada de todo card novo **e** a grelha da história (`grill-card` no body do issue). Alan escolhe/prioriza/cancela. O agente **nao** arrasta T1 (`Em Refinamento -> Todo`). Sem `CONTEXT.md`.
+- No **Project 1 / Cripto**, o caminho obrigatório e `Em Refinamento -> Todo -> Design -> Aprovação de Design -> Pronto para Dev -> Em desenvolvimento -> Code Review -> QA -> Done -> Homologado -> Pronto`. **Nao existe bypass** dessas colunas; `UI impact: none` e pedidos `implemente` nao autorizam pular. Portões do Alan (só Alan, no board ou por comando exato capturado fora do agente; ver skill `covenant-flow`, "Comandos de portão"): T1 `Em Refinamento -> Todo`, T2 cancelar, T6 `Aprovação de Design -> Design`, T7 `Aprovação de Design -> Pronto para Dev` e, em Done, o par `homologar` (`Done -> Homologado`, T15) / `nao_homologar` (`Done -> Em desenvolvimento`, T18). Homologado nao tem aresta inversa. Homologado -> Pronto e `process_event fechar_release` (T16). `Todo` nao e codigo. Arraste Done→Em desenvolvimento sem comentário `Não homologar:` + texto e fora-de-δ: o agente nao restaura o Status; comenta pedindo o motivo e nao segue o Apply ate o comentario existir; nao inventar UI no board.
+- `Em Refinamento` e a entrada de todo card novo **e** a grelha da história (`grill-card` no body do issue). Alan escolhe/prioriza/cancela. O agente **nao** move Status nem adiciona item no Project: pede pelo `process_event` (o executor do board move; `process_event criar_card --card N` poe no board uma issue que ja existe). Sem `CONTEXT.md`.
 - `Done` e fechamento tecnico; fechamento final e `Pronto` (exige deploy PROD no cripto).
 - `Cancelado` e terminal, inclusive a partir de `Em Refinamento`.
 - Se o Project tiver campo `Fluxo`, trate-o como substatus/legado. `Status` prevalece.
@@ -122,31 +122,8 @@ gh project item-list "$PROJECT_NUMBER" --owner "$OWNER" --format json \
   | jq -r '.items[] | select(.title | test("termo"; "i")) | "\(.id)\t\(.title)"'
 ```
 
-- Adicionar issue/PR ao projeto:
-
-```bash
-gh project item-add "$PROJECT_NUMBER" --owner "$OWNER" --url "https://github.com/<owner>/<repo>/issues/<n>"
-```
-
-- Atualizar campo (ex.: Status):
-
-1. Descubra IDs do projeto e do campo (`gh project view` / `field-list`).
-2. Descubra o ITEM_ID do card N com a query GraphQL **pontual** (acima). MUST NOT `gh project item-list` to operate one card.
-3. Edite o item:
-
-```bash
-gh project item-edit \
-  --id "<ITEM_ID>" \
-  --project-id "<PROJECT_ID>" \
-  --field-id "<FIELD_ID>" \
-  --single-select-option-id "<OPTION_ID>"
-```
-
-- Arquivar item:
-
-```bash
-gh project item-archive "$PROJECT_NUMBER" --owner "$OWNER" --id "<ITEM_ID>"
-```
+- Adicionar issue ao projeto ou mudar Status: **o agente nao move nem adiciona.** Pede pelo `process_event` (`process_event <evento> --card N` para as transições do agente; `process_event criar_card --card N` para pôr no board, em Em Refinamento, uma issue que ja existe). Quem escreve no Project e o executor do board, que confere a FSM; os portões do Alan sao do Alan (board ou comando exato). A Guard nega `item-edit`/GraphQL de Status e o disparo direto do executor.
+- Arquivar item ou qualquer outra escrita no Project: e do Alan, no navegador.
 
 ## Observações
 

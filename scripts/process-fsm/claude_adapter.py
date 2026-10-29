@@ -447,6 +447,111 @@ def _subagent_stop(event: Mapping[str, Any]) -> None:
         return
 
 
+# --------------------------------------------------------------------------- gate commands (card #1135, D8)
+
+NOT_CAPTURED_CONTEXT = (
+    "Texto com cara de comando de portão sem resultado do executor: é wording. Não mova o card, não chame o executor "
+    "nem `portao_client` e não rode `process_event` por causa dele; diga ao Alan que o comando não foi capturado e "
+    "aponte o board."
+)
+
+
+def _gate_output(message: str, context: str) -> dict[str, Any]:
+    """Never blocks the prompt: the host shows `systemMessage` to Alan and the agent gets `additionalContext`."""
+
+    return {"systemMessage": message, "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}}
+
+
+def _gate_origin(payload: Mapping[str, Any]) -> dict[str, Any]:
+    import cf_shim
+
+    return {
+        "cliente": "claude",
+        "superficie": os.environ.get("CLAUDE_CODE_ENTRYPOINT") or "unavailable",
+        "versao_host": cf_shim.host_version("claude", payload, os.environ),
+        "sessao": _text(payload.get("session_id")) or os.environ.get("CLAUDE_CODE_SESSION_ID") or None,
+    }
+
+
+def card_design_digest(root: Path, card: int) -> tuple[str | None, str | None]:
+    """(digest, None) of the design of the worktree `card-<card>-*`, or (None, why not). Same `compute_digest` as T5."""
+
+    from process_event import compute_digest
+
+    listed = subprocess.run(["git", "-C", str(root), "worktree", "list", "--porcelain"], check=False, capture_output=True, text=True, timeout=10)
+    if listed.returncode != 0:
+        return None, f"git worktree list falhou: {listed.stderr.strip()[:200]}"
+    found: list[tuple[Path, str]] = []
+    path: Path | None = None
+    for line in listed.stdout.splitlines():
+        if line.startswith("worktree "):
+            path = Path(line[len("worktree "):])
+        elif line.startswith("branch refs/heads/") and path is not None:
+            branch = line[len("branch refs/heads/"):]
+            if branch == f"card-{card}" or branch.startswith(f"card-{card}-"):
+                found.append((path, branch))
+    if not found:
+        return None, f"sem worktree card-{card}-* nesta máquina"
+    if len(found) > 1:
+        return None, f"mais de um worktree card-{card}-*: " + ", ".join(str(p) for p, _b in found)
+    worktree, branch = found[0]
+    change = worktree / "openspec" / "changes" / branch
+    if not (change / "design.md").is_file():
+        return None, f"sem openspec/changes/{branch}/design.md no worktree {worktree}"
+    prototype = worktree / "frontend" / "public" / "prototypes" / branch
+    return compute_digest(change, prototype if prototype.is_dir() else None), None
+
+
+def prompt_submit(payload: Mapping[str, Any], *, capturar: Any = None, digest_of: Any = None) -> dict[str, Any] | None:
+    """Exact gate command typed by Alan -> `capturar` on the executor; anything else -> no output (D6, D8)."""
+
+    from portao.gramatica import reconhecer
+
+    command = reconhecer(payload.get("prompt"))
+    if command is None:
+        return None
+    import portao_client
+
+    cwd = _cwd(payload)
+    try:
+        root = _repo_root(cwd)
+    except Exception:
+        root = cwd
+    try:
+        config = portao_client.config_do_overlay(load_overlay(root))
+    except Exception as exc:
+        return _gate_output(f"Comando `{command.texto}` não capturado: overlay ilegível ({exc}). Use o board.", NOT_CAPTURED_CONTEXT)
+    if config is None:
+        return _gate_output(
+            f"Comando `{command.texto}` não capturado: o executor do board está desligado neste repo (`board.executor` ausente no overlay). Use o board.",
+            NOT_CAPTURED_CONTEXT,
+        )
+    extras: dict[str, Any] = {}
+    if command.evento == "aprovar_design":
+        try:
+            digest, problem = (digest_of or card_design_digest)(root, command.card)
+        except Exception as exc:
+            digest, problem = None, f"digest não calculado: {exc}"
+        extras = {"digest": digest} if digest else {"digest_erro": problem}
+    answer = (capturar or portao_client.capturar)(command, config=config, origem=_gate_origin(payload), extras=extras)
+    outcome = str(answer.get("resultado") or "indisponivel")
+    if outcome == "timeout":
+        message = f"Executor sem resposta em {portao_client.TETO_ESPERA} s para `{command.texto}`; o resultado sai no recibo da issue #{command.card}."
+        context = f"Comando de portão enviado ao executor sem resposta no teto: {message} Não é pedido ao agente. Não presuma o resultado: leia o Status no board antes de agir."
+        return _gate_output(message, context)
+    if outcome == "indisponivel":
+        message = f"Executor indisponível para `{command.texto}` ({answer.get('mensagem')}); nada confirmado. Confira o recibo da issue #{command.card} ou use o board."
+        context = f"Comando de portão não confirmado pelo executor: {message} Não é pedido ao agente. Não presuma o resultado nem tente capturar de novo por conta própria."
+        return _gate_output(message, context)
+    message = str(answer.get("texto") or f"Executor #{command.card}: `{command.texto}` — {outcome}.")
+    context = (
+        f"Comando de portão tratado pelo executor: {message} Não é pedido ao agente. Siga a FSM a partir do Status atual."
+    )
+    if command.evento == "homologar" and outcome == "movido":
+        context += " Homologado: poste neste turno o comentário de evidência (`scripts/post-card-evidence-comment.sh --transition homologado`)."
+    return _gate_output(message, context)
+
+
 def dispatch(event_name: str, payload: Mapping[str, Any]) -> int:
     if event_name == "session-start":
         _emit(session_start(payload))
@@ -469,6 +574,18 @@ def dispatch(event_name: str, payload: Mapping[str, Any]) -> int:
         return 0
     if event_name == "stop":
         _run_impeccable(payload, "Stop")
+        return 0
+    if event_name == "prompt-submit":
+        try:
+            out = prompt_submit(payload)
+        except Exception as exc:  # a recognised command must never fail silently, and the prompt is never blocked
+            from portao.gramatica import parece_comando
+
+            if not parece_comando(payload.get("prompt")):
+                return 0
+            out = _gate_output(f"Comando de portão não capturado: erro no hook ({type(exc).__name__}: {exc}). Use o board.", NOT_CAPTURED_CONTEXT)
+        if out is not None:
+            _emit(out)
         return 0
     print(f"claude adapter: unknown hook event {event_name!r}", file=sys.stderr)
     return 2
@@ -497,7 +614,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"claude adapter trust: {exc}", file=sys.stderr)
             return 2
     if len(args) != 1:
-        print("usage: claude_adapter.py session-start|pre-tool-use|post-tool-use|subagent-stop|stop|trust", file=sys.stderr)
+        print("usage: claude_adapter.py session-start|pre-tool-use|post-tool-use|subagent-stop|stop|prompt-submit|trust", file=sys.stderr)
         return 2
     try:
         payload = _dict(sys.stdin.read())

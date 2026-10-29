@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from overlay import repo_slug, try_load_overlay  # noqa: E402
 REPO_ROOT = ROOT.parents[1]
 QA_GATE = "qa-gate"
+CLOSEOUT_DIR = REPO_ROOT / ".cursor" / "tmp" / "t14-closeout"
 HEALTH_ATTEMPTS = 15
 HEALTH_SLEEP_S = 1
 _GIT_OVERRIDE_VARS = (
@@ -79,11 +80,16 @@ class T14Runner(Protocol):
 
     def comment_done(self, *, bound_card: str, q_git: str) -> None: ...
 
+    # Optional: `closeout_done(*, q_git, bound_card) -> bool`. True only when squash, sync, restart
+    # and the done comment already ran for this card's merged PR; a repeated T14 then only asks
+    # for the move (D9). Runners without it always run the whole closeout.
+
 
 class RecordingT14Runner:
-    def __init__(self, fail_at: str | None = None) -> None:
+    def __init__(self, fail_at: str | None = None, *, closed: bool = False) -> None:
         self.calls: list[str] = []
         self.fail_at = fail_at
+        self.closed = closed
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
@@ -101,6 +107,10 @@ class RecordingT14Runner:
 
     def comment_done(self, *, bound_card: str, q_git: str) -> None:
         self._step("comment_done")
+        self.closed = True
+
+    def closeout_done(self, *, q_git: str, bound_card: str) -> bool:
+        return self.closed
 
 
 def _git_env() -> dict[str, str]:
@@ -266,6 +276,7 @@ class LiveT14Runner:
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         health_get: Callable[[str], bool] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        closeout_dir: Path | None = None,
     ) -> None:
         overlay_source = _overlay_dev_source()
         self.source = source if source is not None else (overlay_source or REPO_ROOT)
@@ -280,11 +291,53 @@ class LiveT14Runner:
         self._sleep = sleep
         self.commit = ""
         self.pr: str | None = None
+        self.head: str | None = None
+        self.closeout_dir = closeout_dir if closeout_dir is not None else CLOSEOUT_DIR
+
+    def _receipt_path(self, bound_card: str) -> Path:
+        return Path(self.closeout_dir) / f"{str(bound_card).lstrip('#')}.json"
+
+    def closeout_done(self, *, q_git: str, bound_card: str) -> bool:
+        """True when this worktree already closed T14 for the same merged PR (receipt + live PR)."""
+        try:
+            receipt = json.loads(self._receipt_path(bound_card).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(receipt, dict) or receipt.get("q_git") != str(q_git) or not receipt.get("pr"):
+            return False
+        try:
+            rows = _pr_list_json(str(q_git), fields="number,state,mergedAt,headRefOid", runner=self._run)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return False
+        if not rows or not isinstance(rows[0], dict):
+            return False
+        row = rows[0]
+        merged = str(row.get("state") or "").upper() == "MERGED" or bool(row.get("mergedAt"))
+        same_pr = str(row.get("number")) == str(receipt.get("pr"))
+        same_head = not receipt.get("head") or str(row.get("headRefOid") or "") == str(receipt.get("head"))
+        return merged and same_pr and same_head
+
+    def _write_receipt(self, *, bound_card: str, q_git: str) -> None:
+        if not self.pr:
+            return
+        path = self._receipt_path(bound_card)
+        payload = {
+            "card": str(bound_card).lstrip("#"),
+            "q_git": str(q_git),
+            "pr": self.pr,
+            "head": self.head,
+            "commit": self.commit,
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        except OSError:
+            return  # without the receipt a repeated T14 runs the whole (idempotent) closeout again
 
     def squash(self, *, q_git: str, bound_card: str) -> None:
         del bound_card
         try:
-            rows = _pr_list_json(str(q_git), fields="number,state,mergedAt", runner=self._run)
+            rows = _pr_list_json(str(q_git), fields="number,state,mergedAt,headRefOid", runner=self._run)
         except json.JSONDecodeError as exc:
             raise T14Error("squash: pr list json") from exc
         if not rows:
@@ -297,6 +350,7 @@ class LiveT14Runner:
         if number is None:
             raise T14Error("squash: no PR number")
         self.pr = str(number)
+        self.head = str(rows[0].get("headRefOid") or "") or None
         if state == "MERGED" or merged:
             return
         merged_pr = _run(
@@ -368,7 +422,6 @@ class LiveT14Runner:
         raise T14Error("restart: public health")
 
     def comment_done(self, *, bound_card: str, q_git: str) -> None:
-        del q_git
         if not self.commit:
             raise T14Error("comment_done: no commit")
         script = self.comment_script
@@ -391,6 +444,7 @@ class LiveT14Runner:
         proc = _run(args, timeout=60, runner=self._run)
         if proc.returncode != 0:
             raise T14Error((proc.stderr or proc.stdout or "comment_done failed").strip())
+        self._write_receipt(bound_card=bound_card, q_git=q_git)
 
 
 def _http_health(url: str) -> bool:
@@ -398,6 +452,16 @@ def _http_health(url: str) -> bool:
         with urllib.request.urlopen(url, timeout=2) as resp:
             return int(getattr(resp, "status", 0) or 0) == 200
     except (OSError, urllib.error.URLError, ValueError):
+        return False
+
+
+def t14_closeout_done(runner: T14Runner, *, q_git: str, bound_card: str) -> bool:
+    probe = getattr(runner, "closeout_done", None)
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe(q_git=q_git, bound_card=bound_card))
+    except (OSError, RuntimeError, TypeError, ValueError, subprocess.TimeoutExpired):
         return False
 
 
