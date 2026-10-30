@@ -141,7 +141,7 @@ def test_generated_bridges_stay_current_and_modified_bridges_refuse_update(tmp_p
 def test_repository_skill_bridges_cover_all_canonical_names():
     expected = expected_bridges(REPO)
 
-    assert len(expected) == 18
+    assert len(expected) == 19
     assert install_bridges(REPO, REPO, check_only=True) == []
     manifest = json.loads(
         (REPO / ".agents" / "skills" / codex_skills.MANIFEST).read_text(encoding="utf-8")

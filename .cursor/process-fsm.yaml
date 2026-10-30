@@ -54,7 +54,7 @@ invariants:
   - id: I7
     text: "evento ∉ enabled_events(q) ⇒ reject, q inalterado."
   - id: I8
-    text: "T14 atômico: falha squash/restart ⇒ permanece QA."
+    text: "T14 atômico: falha squash/restart ⇒ permanece QA. Com qa_dev ligado, T14 tem duas fases na mesma aresta: fase 1 integra e permanece QA; fase 2 só move com qa_dev_ok; falha em qualquer fase ⇒ permanece QA."
   - id: I9
     text: "T16 exige M_lote."
 
@@ -102,7 +102,8 @@ context_file:
   Code Review: |
     Reviewers inherit readonly. Patch pequeno allow na card-<id>.
   QA: |
-    Não mexer fonte. Cursor/Grok: filho QA lê checks; MUST NOT process_event. dsh: root MUST NOT spawnar filho QA; espera qa-gate no turno (job_output wait, sem continue). Pai T14 no mesmo turno do verde; pending espera T14; no_pr / sync: dirty visíveis. T13 volta a Em desenvolvimento.
+    Não mexer fonte. Cursor/Grok: filho QA lê checks; MUST NOT process_event. dsh: root MUST NOT spawnar filho QA; espera qa-gate no turno (job_output wait, sem continue). Pai T14 no mesmo turno do verde; o primeiro reject não encerra o turno: pending espera T14; no_pr / sync: dirty visíveis. T13 volta a Em desenvolvimento.
+    Com qa_dev ligado, T14 tem duas fases. qa_dev_pendente depois da primeira T14: rode o teste no DEV (filhos qa-dev, só no Claude Code) e chame T14 de novo. qa_dev_ocupado: outro card está em teste; espere e repita. qa_dev_fail: pare e pergunte ao Alan; T13 só se ele confirmar o defeito, reteste sem diff se discordar. qa_dev_inconclusivo: pare e mostre as saídas ao Alan. O agente de teste MUST NOT process_event; nenhum agente posta /qa-dev-liberar.
   Done: |
     Done técnico. Espere T15/T18. Write produto deny.
   Homologado: |
@@ -127,7 +128,7 @@ transitions:
   - { id: T11, from: Code Review, event: aceitar_sha, actor: Agent, to: QA, guard: reviewers_ok, actions: [diff_vs_develop, push, set_status], exclusive_group: cr-exit }
   - { id: T12, from: QA, event: rerun_infra, actor: Agent, to: QA, guard: flaky_infra, actions: [rerun], exclusive_group: qa-exit }
   - { id: T13, from: QA, event: falha_codigo, actor: [CI, Agent], to: Em desenvolvimento, guard: source_failure, actions: [set_status], exclusive_group: qa-exit }
-  - { id: T14, from: QA, event: integrar_develop, actor: Agent, to: Done, guard: checks_green, actions: [squash, restart, comment_done, set_status], exclusive_group: qa-exit }
+  - { id: T14, from: QA, event: integrar_develop, actor: Agent, to: Done, guard: [checks_green, qa_dev_ok], actions: [squash, restart, comment_done, set_status], qa_dev_actions: { fase_1: [qa_dev_lock, squash, sync_dev_source, restart, receipt, comment_integrado], fase_2: [comment_done, set_status] }, exclusive_group: qa-exit }
   - { id: T15, from: Done, event: homologar, actor: Alan, to: Homologado, actions: [comment_homologado] }
   - { id: T18, from: Done, event: nao_homologar, actor: Alan, guard: motivo_visivel, to: Em desenvolvimento, actions: [set_status] }
   - { id: T16, from: Homologado, event: fechar_release, actor: Agent, guard: M_lote, to: Pronto, actions: [release_guard, deploy_prod, set_status] }

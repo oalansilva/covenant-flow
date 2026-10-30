@@ -297,6 +297,25 @@ O **pai**:
 
 **dsh:** o root MUST NOT spawnar filho QA. O mesmo turno abre o PR antes de T11, espera `qa-gate` no turno (`job_output wait`, sem `continue`) e chama T14 (Moore/plugin `covenant-flow:moore`, não só o texto desta skill).
 
+**Teste no DEV (`qa_dev.enabled` true no overlay; desligado, a T14 é a de sempre).** T14 tem duas fases na mesma aresta, sem estado nem evento novo:
+
+1. **Fase 1:** `integrar_develop` pega a trava, integra, reinicia o DEV, grava o recibo, comenta e devolve `qa_dev_pendente`. O card fica em `QA`. `qa_dev_ocupado` é outro card em teste: espere e repita.
+2. **Teste (só no Claude Code):** o pai roda `scripts/process-fsm/qa_dev.py plan --card <id>`, que devolve o plano com C1…Cn, protótipo, `admin` e FAIL abertos.
+   - `status=nada_para_testar` ou `inconclusivo` (DEV ou serviço parado antes do navegador): vá direto ao `report`, sem filho.
+   - `status=falha_ferramenta` (senha recusada, conta bloqueada): sem relatório; o `plan` já soltou a trava e comentou o que falta. O card fica em `QA`. Navegador que não abre: `qa_dev.py soltar --card <id> --motivo navegador`.
+   - `status=pronto`: agrupe por tela ou fluxo, até 3 critérios por bloco. Um filho `qa-dev` novo por bloco, em sequência (`description` `qa-dev <id> bloco-<n>`, captura `--role qa-dev`), com a skill `qa-dev`. Critério que estourou o teto vai para o bloco seguinte. Bloco parado por DEV fora do ar repete uma vez quando a saúde voltar. Depois dos blocos de critério, um filho final faz a volta rápida.
+3. **Relatório:** `qa_dev.py report --card <id> --run <run> --runtime "<linha do handoff>"` confere saúde e serviços de novo, junta os blocos, calcula o veredito, envia a evidência, passa o texto na varredura pública e posta. Varredura recusou: nada foi postado; reescreva no bloco o campo apontado, sem o valor, e rode de novo.
+4. **Fase 2:** `integrar_develop` de novo lê o último relatório do autor `qa_dev.autor_relatorio`. `PASS`, `NAO_TESTADO` e `NADA_PARA_TESTAR` levam a `Done`.
+
+O filho `qa-dev` MUST NOT `process_event`. Sem o navegador (Cursor, Codex, Grok, OpenCode, dsh), a T14 para em `qa_dev_pendente`, com mensagem para abrir a sessão `#<id>` no Claude Code; essa sessão continua do mesmo ponto.
+
+**`qa_dev_fail` pausa.** O pai MUST NOT chamar T13 no turno do `qa_dev_fail`: T13 depois da integração não tem reteste sem diff. Mostre os critérios em FAIL, pergunte ao Alan e pare, sem prazo.
+
+- Alan confirma o defeito: T13, depois o caminho pós-T18: branch nova a partir de `develop`, com o nome exato do change (a antiga, já integrada, é renomeada), Apply, Code Review, `QA` e T14. O reteste roda os critérios em FAIL e os tocados pelo diff: `plan --reteste-de <run> --criterios C3,C4`; os demais aparecem como PASS do run anterior.
+- Alan discorda: reteste sem diff de FAIL contestado, `plan --reteste-de <run> --leitura "<leitura dele>"`. Refaz só os critérios em FAIL, com a leitura no plano; nada é integrado e o Status não muda.
+
+**`qa_dev_inconclusivo` para com três saídas:** novo teste, sem diff; T13, se o card derrubou o DEV ou o worker; ou o comentário exato do próprio Alan, `/qa-dev-liberar <run>`. Nenhum agente posta essa linha. Depois dela, T14 de novo move para `Done` dizendo que houve liberação. FAIL não tem liberação.
+
 Homologado: no **mesmo turno** do arraste/confirmação, `scripts/post-card-evidence-comment.sh --transition homologado` (mesmo sem lote).
 
 ## Release

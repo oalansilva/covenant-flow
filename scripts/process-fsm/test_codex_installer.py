@@ -109,7 +109,7 @@ def test_pin_merges_codex_without_overwriting_cursor_map_or_vendor_skills(tmp_pa
     roles = target / ".codex" / "agents"
     assert (roles / "diff-reviewer.toml").is_file()
     assert (roles / "code-reviewer.toml").is_file()
-    assert len(list((target / ".agents" / "skills").glob("*/SKILL.md"))) == 20
+    assert len(list((target / ".agents" / "skills").glob("*/SKILL.md"))) == 21
 
     second = _pin(target)
     assert second.returncode == 0, second.stderr

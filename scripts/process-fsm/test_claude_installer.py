@@ -65,9 +65,9 @@ def test_pin_installs_claude_adapter_and_resolves_the_fixture_selection_without_
     assert (target / "CLAUDE.md").read_bytes() == (ROOT / "CLAUDE.md").read_bytes()
     assert (target / "CLAUDE.md").read_text(encoding="utf-8").startswith("@AGENTS.md")
     skills = sorted(path.parent.name for path in (target / ".claude" / "skills").glob("*/SKILL.md"))
-    assert len(skills) == 20 and {"covenant-flow", "impeccable", "playwright-cli"} <= set(skills)
+    assert len(skills) == 21 and {"covenant-flow", "impeccable", "playwright-cli"} <= set(skills)
     manifest = json.loads((target / ".claude" / "skills" / ".covenant-flow-bridges.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == 1 and len(manifest["files"]) == 20
+    assert manifest["version"] == 1 and len(manifest["files"]) == 21
     for role in ("diff-reviewer", "code-reviewer"):
         agent = (target / ".claude" / "agents" / f"{role}.md").read_text(encoding="utf-8")
         assert "tools: Read, Grep, Glob" in agent and "model:" not in agent and "effort:" not in agent
@@ -179,7 +179,7 @@ def test_existing_adapters_are_installed_byte_for_byte_and_claude_never_touches_
     codex = json.loads(codex_hooks.read_text(encoding="utf-8"))
     assert "claude_adapter.py" not in json.dumps(codex) and "codex_adapter.py" not in json.dumps(codex)
     assert set(codex["hooks"]) == {"Notification"}
-    assert len(list((target / ".agents" / "skills").glob("*/SKILL.md"))) == 20
+    assert len(list((target / ".agents" / "skills").glob("*/SKILL.md"))) == 21
     # Separate manifests: the Claude bridges also cover the vendored skills.
     assert (target / ".claude" / "skills" / ".covenant-flow-bridges.json").read_bytes() != (
         target / ".agents" / "skills" / ".covenant-flow-bridges.json"

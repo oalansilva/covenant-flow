@@ -54,7 +54,7 @@ def _legal_ctx(state, event, actor) -> EvalContext:
     elif event == "falha_codigo":
         kwargs.update(source_failure=True)
     elif event == "integrar_develop":
-        kwargs.update(checks_green=True)
+        kwargs.update(checks_green=True, qa_dev_ok=True)
     elif event == "fechar_release":
         kwargs.update(m_lote=True)
     elif event == "invalidar_aprovacao":

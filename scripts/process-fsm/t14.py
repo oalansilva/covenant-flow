@@ -83,6 +83,9 @@ class T14Runner(Protocol):
     # Optional: `closeout_done(*, q_git, bound_card) -> bool`. True only when squash, sync, restart
     # and the done comment already ran for this card's merged PR; a repeated T14 then only asks
     # for the move (D9). Runners without it always run the whole closeout.
+    #
+    # With `qa_dev` on (#1144) the runner also needs `write_receipt`, `comment_integrated`,
+    # `receipt_commit`, and `comment_done(..., qa=<text>)`: see `run_t14_phase1`.
 
 
 class RecordingT14Runner:
@@ -90,6 +93,7 @@ class RecordingT14Runner:
         self.calls: list[str] = []
         self.fail_at = fail_at
         self.closed = closed
+        self.qa: str | None = None
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
@@ -105,9 +109,20 @@ class RecordingT14Runner:
     def restart(self) -> None:
         self._step("restart")
 
-    def comment_done(self, *, bound_card: str, q_git: str) -> None:
+    def comment_done(self, *, bound_card: str, q_git: str, qa: str | None = None) -> None:
         self._step("comment_done")
         self.closed = True
+        self.qa = qa
+
+    def write_receipt(self, *, bound_card: str, q_git: str) -> None:
+        self._step("write_receipt")
+        self.closed = True
+
+    def comment_integrated(self, *, bound_card: str, q_git: str) -> None:
+        self._step("comment_integrated")
+
+    def receipt_commit(self, *, bound_card: str) -> str:
+        return "recibo-sha"
 
     def closeout_done(self, *, q_git: str, bound_card: str) -> bool:
         return self.closed
@@ -317,10 +332,7 @@ class LiveT14Runner:
         same_head = not receipt.get("head") or str(row.get("headRefOid") or "") == str(receipt.get("head"))
         return merged and same_pr and same_head
 
-    def _write_receipt(self, *, bound_card: str, q_git: str) -> None:
-        if not self.pr:
-            return
-        path = self._receipt_path(bound_card)
+    def _receipt_text(self, *, bound_card: str, q_git: str) -> str:
         payload = {
             "card": str(bound_card).lstrip("#"),
             "q_git": str(q_git),
@@ -328,11 +340,46 @@ class LiveT14Runner:
             "head": self.head,
             "commit": self.commit,
         }
+        return json.dumps(payload, sort_keys=True) + "\n"
+
+    def _write_receipt(self, *, bound_card: str, q_git: str) -> None:
+        if not self.pr:
+            return
+        path = self._receipt_path(bound_card)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+            path.write_text(self._receipt_text(bound_card=bound_card, q_git=q_git), encoding="utf-8")
         except OSError:
             return  # without the receipt a repeated T14 runs the whole (idempotent) closeout again
+
+    def write_receipt(self, *, bound_card: str, q_git: str) -> None:
+        """Phase 1 of `qa_dev`: unlike the closeout above, a missing receipt is a failure, because
+        without it every T14 would be phase 1 again, a restart per call, and never reach phase 2."""
+        if not self.pr or not self.commit:
+            raise T14Error("receipt: no PR or commit")
+        path = self._receipt_path(bound_card)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self._receipt_text(bound_card=bound_card, q_git=q_git), encoding="utf-8")
+        except OSError as exc:
+            raise T14Error(f"receipt: {exc}") from exc
+
+    def _read_receipt(self, bound_card: str) -> dict:
+        try:
+            receipt = json.loads(self._receipt_path(bound_card).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return receipt if isinstance(receipt, dict) else {}
+
+    def receipt_commit(self, *, bound_card: str) -> str:
+        return str(self._read_receipt(bound_card).get("commit") or "")
+
+    def comment_integrated(self, *, bound_card: str, q_git: str) -> None:
+        del q_git
+        text = f"Integrado no DEV (commit {self.commit}); teste em andamento. O card fica em `QA` até o relatório."
+        proc = _run(["gh", "issue", "comment", str(bound_card).lstrip("#"), "--repo", _overlay_repo(), "--body", text], timeout=60, runner=self._run)
+        if proc.returncode != 0:
+            raise T14Error((proc.stderr or proc.stdout or "comment_integrated failed").strip())
 
     def squash(self, *, q_git: str, bound_card: str) -> None:
         del bound_card
@@ -421,7 +468,12 @@ class LiveT14Runner:
             self._sleep(HEALTH_SLEEP_S)
         raise T14Error("restart: public health")
 
-    def comment_done(self, *, bound_card: str, q_git: str) -> None:
+    def comment_done(self, *, bound_card: str, q_git: str, qa: str | None = None) -> None:
+        if not self.commit:  # phase 2 is another process: the integrated commit is in the receipt
+            receipt = self._read_receipt(bound_card)
+            self.commit = str(receipt.get("commit") or "")
+            self.pr = self.pr or (str(receipt["pr"]) if receipt.get("pr") else None)
+            self.head = self.head or receipt.get("head")
         if not self.commit:
             raise T14Error("comment_done: no commit")
         script = self.comment_script
@@ -441,6 +493,8 @@ class LiveT14Runner:
         ]
         if self.pr:
             args.extend(["--pr", self.pr])
+        if qa:
+            args.extend(["--qa", qa])
         proc = _run(args, timeout=60, runner=self._run)
         if proc.returncode != 0:
             raise T14Error((proc.stderr or proc.stdout or "comment_done failed").strip())
@@ -463,6 +517,30 @@ def t14_closeout_done(runner: T14Runner, *, q_git: str, bound_card: str) -> bool
         return bool(probe(q_git=q_git, bound_card=bound_card))
     except (OSError, RuntimeError, TypeError, ValueError, subprocess.TimeoutExpired):
         return False
+
+
+def run_t14_phase1(runner: T14Runner, *, q_git: str, bound_card: str) -> None:
+    """`qa_dev` on: integrate and restart with the card still in QA. The move waits for the report."""
+    try:
+        runner.squash(q_git=q_git, bound_card=bound_card)
+        runner.sync_dev_source()
+        runner.restart()
+        runner.write_receipt(bound_card=bound_card, q_git=q_git)
+        runner.comment_integrated(bound_card=bound_card, q_git=q_git)
+    except T14Error:
+        raise
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise T14Error(str(exc)) from exc
+
+
+def run_t14_phase2(runner: T14Runner, *, q_git: str, bound_card: str, qa: str) -> None:
+    """`qa_dev` on, report accepted: only the done comment is left; the closeout already ran."""
+    try:
+        runner.comment_done(bound_card=bound_card, q_git=q_git, qa=qa)
+    except T14Error:
+        raise
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise T14Error(str(exc)) from exc
 
 
 def run_t14(runner: T14Runner, *, q_git: str, bound_card: str) -> None:

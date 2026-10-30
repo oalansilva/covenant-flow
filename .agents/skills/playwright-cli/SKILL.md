@@ -1,45 +1,31 @@
 ---
 name: playwright-cli
 description: Automates browser interactions for web testing, form filling, screenshots, and data extraction. Use when the user needs to navigate websites, interact with web pages, fill forms, take screenshots, test web applications, or extract information from web pages.
-allowed-tools: Bash(playwright-cli:*), Bash(playwright-cli-headed:*), Bash(xvfb-run:*), Bash(env:*)
+allowed-tools: Bash(playwright-cli:*), Bash(xvfb-run:*), Bash(env:*)
 ---
 
 # Browser Automation with playwright-cli
 
-## Server-specific rule for this repo
+## Before you start
 
-On this server, headed browser runs must use the wrapper `playwright-cli-headed` instead of plain `playwright-cli` because the environment runs as root and has no real X server. The wrapper already applies:
-
-- `xvfb-run -a`
-- `PLAYWRIGHT_MCP_SANDBOX=false`
-
-Use this rule of thumb:
-
-- Use `playwright-cli-headed` for headed runs on this server.
-- Use plain `playwright-cli` only for non-headed flows that are already known to work in the current environment.
+- This skill needs the `playwright-cli` binary on PATH. Check with `command -v playwright-cli`. If it is missing, stop and report it.
+- There is no `playwright-cli-headed` wrapper: do not look for one.
+- Headed runs need an X server. On a host without one, prefix the command: `xvfb-run -a playwright-cli -s=<name> open <url> --headed`.
 - Do not assume snapshot refs like `e21` or `e35` are stable across runs; capture a fresh snapshot before clicking/checking.
-- On this host, do not treat multi-invocation headed sessions as reliable by default.
-- Prefer one single `run-code` command that includes `page.goto(...)`, the full interaction flow, and `page.screenshot(...)`.
+- On a host without a real X server, do not treat multi-invocation headed sessions as reliable by default. Prefer one single `run-code` command that includes `page.goto(...)`, the full interaction flow, and `page.screenshot(...)`.
 - Use named sessions with `-s=<name>` only when a task has already proved stable across multiple invocations in the current environment.
-- If the wrapper is unavailable in PATH, call the full path `/usr/local/bin/playwright-cli-headed`.
-- The wrapper already redirects browser/cache state into project-controlled paths to avoid `/root/.cache/ms-playwright/daemon` permission issues.
-- For stable completion in this environment, prefer this pattern:
-  - one call to `playwright-cli-headed -s=<name> run-code "async page => { ... }"`
-  - include `await page.goto(...)`
-  - include all DOM interactions in the same script
-  - include `await page.screenshot({ path: ... })` in the same script or follow immediately with an explicit screenshot command only if the session is known-good
 
 ## Quick start
 
 ```bash
-# headed flow on this server
-playwright-cli-headed -s=todomvc open https://playwright.dev --headed
-playwright-cli-headed -s=todomvc snapshot
-playwright-cli-headed -s=todomvc click e15
-playwright-cli-headed -s=todomvc type "page.click"
-playwright-cli-headed -s=todomvc press Enter
-playwright-cli-headed -s=todomvc screenshot
-playwright-cli-headed -s=todomvc close
+# headed flow
+playwright-cli -s=todomvc open https://playwright.dev --headed
+playwright-cli -s=todomvc snapshot
+playwright-cli -s=todomvc click e15
+playwright-cli -s=todomvc type "page.click"
+playwright-cli -s=todomvc press Enter
+playwright-cli -s=todomvc screenshot
+playwright-cli -s=todomvc close
 ```
 
 ## Commands
@@ -47,27 +33,27 @@ playwright-cli-headed -s=todomvc close
 ### Core
 
 ```bash
-playwright-cli-headed -s=mysession open https://example.com/ --headed
-playwright-cli-headed -s=mysession goto https://playwright.dev
-playwright-cli-headed -s=mysession type "search query"
-playwright-cli-headed -s=mysession click e3
-playwright-cli-headed -s=mysession dblclick e7
-playwright-cli-headed -s=mysession fill e5 "user@example.com"
-playwright-cli-headed -s=mysession drag e2 e8
-playwright-cli-headed -s=mysession hover e4
-playwright-cli-headed -s=mysession select e9 "option-value"
-playwright-cli-headed -s=mysession upload ./document.pdf
-playwright-cli-headed -s=mysession check e12
-playwright-cli-headed -s=mysession uncheck e12
-playwright-cli-headed -s=mysession snapshot
-playwright-cli-headed -s=mysession snapshot --filename=after-click.yaml
-playwright-cli-headed -s=mysession eval "document.title"
-playwright-cli-headed -s=mysession eval "el => el.textContent" e5
-playwright-cli-headed -s=mysession dialog-accept
-playwright-cli-headed -s=mysession dialog-accept "confirmation text"
-playwright-cli-headed -s=mysession dialog-dismiss
-playwright-cli-headed -s=mysession resize 1920 1080
-playwright-cli-headed -s=mysession close
+playwright-cli -s=mysession open https://example.com/ --headed
+playwright-cli -s=mysession goto https://playwright.dev
+playwright-cli -s=mysession type "search query"
+playwright-cli -s=mysession click e3
+playwright-cli -s=mysession dblclick e7
+playwright-cli -s=mysession fill e5 "user@example.com"
+playwright-cli -s=mysession drag e2 e8
+playwright-cli -s=mysession hover e4
+playwright-cli -s=mysession select e9 "option-value"
+playwright-cli -s=mysession upload ./document.pdf
+playwright-cli -s=mysession check e12
+playwright-cli -s=mysession uncheck e12
+playwright-cli -s=mysession snapshot
+playwright-cli -s=mysession snapshot --filename=after-click.yaml
+playwright-cli -s=mysession eval "document.title"
+playwright-cli -s=mysession eval "el => el.textContent" e5
+playwright-cli -s=mysession dialog-accept
+playwright-cli -s=mysession dialog-accept "confirmation text"
+playwright-cli -s=mysession dialog-dismiss
+playwright-cli -s=mysession resize 1920 1080
+playwright-cli -s=mysession close
 ```
 
 ### Navigation

@@ -250,6 +250,7 @@ class EvalContext:
     digest_changed: bool | None = None
     m_lote: bool | None = None
     checks_green: bool | None = None
+    qa_dev_ok: bool | None = None
     open_p0_p1: bool | None = None
     reviewers_ok: bool | None = None
     flaky_infra: bool | None = None
@@ -270,6 +271,7 @@ NAMED_GUARDS = {
     "digest_changed": "digest_changed",
     "M_lote": "m_lote",
     "checks_green": "checks_green",
+    "qa_dev_ok": "qa_dev_ok",
     "open_p0_p1": "open_p0_p1",
     "reviewers_ok": "reviewers_ok",
     "flaky_infra": "flaky_infra",
@@ -292,21 +294,24 @@ def enabled_events(fsm: dict[str, Any], state: str | None) -> list[str]:
     return list(values)
 
 
+def _guard_names(row: dict[str, Any]) -> list[str]:
+    """`guard` is one name or a list read in order: the first one that fails names the reject."""
+    declared = row.get("guard")
+    if not declared:
+        return []
+    return [str(name) for name in declared] if isinstance(declared, list) else [str(declared)]
+
+
 def _guard_holds(row: dict[str, Any], ctx: EvalContext) -> EvalResult | None:
-    name = row.get("guard")
-    if not name:
-        return None
-    if name == "q_git_card":
-        if q_git_card(ctx.q_git):
-            return None
-        return EvalResult("reject", ctx.state, None, "guard:q_git_card")
-    field = NAMED_GUARDS.get(str(name))
-    if field is None:
-        return EvalResult("reject", ctx.state, None, f"guard:{name}")
-    value = getattr(ctx, field)
-    if value is True:
-        return None
-    return EvalResult("reject", ctx.state, None, f"guard:{name}")
+    for name in _guard_names(row):
+        if name == "q_git_card":
+            if q_git_card(ctx.q_git):
+                continue
+            return EvalResult("reject", ctx.state, None, "guard:q_git_card")
+        field = NAMED_GUARDS.get(name)
+        if field is None or getattr(ctx, field) is not True:
+            return EvalResult("reject", ctx.state, None, f"guard:{name}")
+    return None
 
 
 def evaluate(fsm: dict[str, Any], ctx: EvalContext) -> EvalResult:

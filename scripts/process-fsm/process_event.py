@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -39,6 +40,7 @@ from graphql_quota import (  # noqa: E402
     write_cache,
 )
 from guard import github_status_provider  # noqa: E402
+from qa_dev import Gate as QaDevGate, Medida as QaDevMedida, QaDevError, live_gate as qa_dev_live_gate  # noqa: E402
 from resolve import UNBOUND, resolve  # noqa: E402
 from t14 import (  # noqa: E402
     LiveT14Runner,
@@ -48,6 +50,8 @@ from t14 import (  # noqa: E402
     classify_qa_gate,
     measure_checks_green,
     run_t14,
+    run_t14_phase1,
+    run_t14_phase2,
     t14_closeout_done,
 )
 from t16 import (  # noqa: E402
@@ -470,6 +474,52 @@ def _fechar_message(
     return text
 
 
+def _t14_error_payload(exc: T14Error, state: str | None) -> dict[str, Any]:
+    text = str(exc)
+    if "sync: dirty" in text:
+        return _payload(result="reject", state=state, to=None, reason="sync: dirty", message=text)
+    if "squash: no PR" in text:
+        return _payload(result="reject", state=state, to=None, reason="no_pr", message=text)
+    return _payload(result="reject", state=state, to=None, reason="I8", message=text)
+
+
+def _qa_dev_hold(
+    gate: QaDevGate,
+    runner: T14Runner | None,
+    measured: QaDevMedida | None,
+    *,
+    state: str | None,
+    q_git: str,
+    bound_card: str,
+    client: str | None,
+) -> dict[str, Any]:
+    """`guard:qa_dev_ok` failed, so the card stays in QA: phase 1, or the reason phase 2 cannot move (D1)."""
+    no_browser = "" if client == "claude" else f"; o teste roda no Claude Code: abra a sessão #{bound_card}"
+    if measured is not None:
+        message = measured.message or measured.reason
+        if measured.reason == "qa_dev_pendente":
+            message = f"{message}{no_browser}"
+        return _payload(result="reject", state=state, to=None, reason=measured.reason, message=message)
+    if runner is None:
+        return _payload(result="reject", state=state, to=None, reason="I8")
+    holder = gate.pegar(bound_card)
+    if holder is not None:
+        return _payload(result="reject", state=state, to=None, reason="qa_dev_ocupado", message=f"card #{holder.get('card')} está em teste no DEV: espere e chame T14 de novo")
+    try:
+        run_t14_phase1(runner, q_git=q_git, bound_card=bound_card)
+    except T14Error as exc:
+        gate.soltar(bound_card)
+        return _t14_error_payload(exc, state)
+    message = f"integrado no DEV; rode o teste (skill qa-dev), poste o relatório e chame T14 de novo{no_browser}"
+    if client != "claude":
+        # D9: nobody here can run the test, so the lock goes now and the issue says what is missing.
+        try:
+            gate.soltar(bound_card, motivo="cliente_sem_navegador")
+        except (QaDevError, OSError, subprocess.TimeoutExpired) as exc:
+            message = f"{message}; {exc}"
+    return _payload(result="reject", state=state, to=None, reason="qa_dev_pendente", message=message)
+
+
 def _codex_stage_refusal(workdir: Path, event: str, state: str | None) -> dict[str, Any] | None:
     from codex_evidence import EvidenceError, preflight
 
@@ -504,6 +554,7 @@ def process_event(
     checks_green_classifier: Callable[..., dict[str, Any]] | None = None,
     pr_lister: Callable[..., list] | None = None,
     t14_runner: T14Runner | None = None,
+    qa_dev_gate: QaDevGate | None = None,
     t16_closer: T16Closer | None = None,
     status_provider: Callable[[str | None], str | None] | None = None,
     package_cards: list[int] | None = None,
@@ -738,6 +789,15 @@ def process_event(
             except (OSError, RuntimeError, TypeError, ValueError):
                 checks_green = False
 
+    # `qa_dev` on (#1144): one edge, two phases. Phase 1 is `guard:qa_dev_ok` with no receipt yet.
+    qa_dev_measured: QaDevMedida | None = None
+    qa_dev_ok: bool | None = True
+    if event == "integrar_develop" and qa_dev_gate is not None and not dry_run:
+        qa_dev_ok = False
+        if t14_closed and t14_runner is not None:
+            qa_dev_measured = qa_dev_gate.medir(str(bound), t14_runner.receipt_commit(bound_card=str(bound)))
+            qa_dev_ok = qa_dev_measured.ok
+
     homologado_ids: list[int] = []
     if event == "fechar_release" and m_lote:
         provider = status_provider if status_provider is not None else github_status_provider
@@ -760,6 +820,7 @@ def process_event(
         "digest_changed": digest_changed,
         "m_lote": m_lote,
         "checks_green": checks_green,
+        "qa_dev_ok": qa_dev_ok,
         "open_p0_p1": exclusive.get("open_p0_p1"),
         "reviewers_ok": exclusive.get("reviewers_ok"),
         "flaky_infra": exclusive.get("flaky_infra"),
@@ -825,6 +886,8 @@ def process_event(
         if event == "request_implement":
             extra = enabled
         reason = result.reason
+        if event == "integrar_develop" and reason == "guard:qa_dev_ok" and qa_dev_gate is not None:
+            return _qa_dev_hold(qa_dev_gate, t14_runner, qa_dev_measured, state=q, q_git=str(git), bound_card=str(bound), client=active_client)
         if event == "integrar_develop" and reason == "guard:checks_green" and classified_reason:
             reason = classified_reason
         return _payload(
@@ -841,15 +904,12 @@ def process_event(
         if t14_runner is None:
             return _payload(result="reject", state=q, to=None, reason="I8")
         try:
-            if not t14_closed:
+            if qa_dev_measured is not None:
+                run_t14_phase2(t14_runner, q_git=str(git), bound_card=str(bound), qa=qa_dev_measured.nota())
+            elif not t14_closed:
                 run_t14(t14_runner, q_git=str(git), bound_card=str(bound))
         except T14Error as exc:
-            text = str(exc)
-            if "sync: dirty" in text:
-                return _payload(result="reject", state=q, to=None, reason="sync: dirty", message=text)
-            if "squash: no PR" in text:
-                return _payload(result="reject", state=q, to=None, reason="no_pr", message=text)
-            return _payload(result="reject", state=q, to=None, reason="I8", message=text)
+            return _t14_error_payload(exc, q)
         if mover is None or issue_number is None:
             return _payload(result="transition", state=q, to=result.to, reason=result.reason, message=message)
         failed = _safe_move(mover, issue_number, result.to or "", evento=event, de=q)
@@ -925,6 +985,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.dry_run and not getattr(mover, "via_executor", False):
         mover = None
+    qa_dev_gate = None if args.dry_run else qa_dev_live_gate()
     payload = process_event(
         args.event,
         card=args.card,
@@ -936,7 +997,8 @@ def main(argv: list[str] | None = None) -> int:
         checks_green_measurer=measure_checks_green,
         checks_green_classifier=classify_qa_gate,
         pr_lister=lambda q_git: _pr_list_json(str(q_git or ""), fields="number,headRefOid"),
-        t14_runner=None if args.dry_run else LiveT14Runner(),
+        t14_runner=None if args.dry_run else LiveT14Runner(closeout_dir=qa_dev_gate.closeout_dir if qa_dev_gate else None),
+        qa_dev_gate=qa_dev_gate,
         m_lote_measurer=measure_m_lote,
         t16_closer=None if args.dry_run else LiveT16Closer(),
     )

@@ -36,7 +36,7 @@ def test_bridges_cover_the_codex_set_plus_the_two_vendored_skills():
     claude = claude_skills.expected_bridges(REPO)
     codex = codex_skills.expected_bridges(REPO)
     assert set(codex) < set(claude) and set(claude) - set(codex) == {"impeccable", "playwright-cli"}
-    assert len(claude) == 20
+    assert len(claude) == 21
     manifest = json.loads((REPO / ".claude/skills" / codex_skills.MANIFEST).read_text())
     assert set(manifest["files"]) == {f"{n}/SKILL.md" for n in claude}
 

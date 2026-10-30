@@ -9,7 +9,7 @@ Complementa `covenant-flow`. Decide **onde agir**: `DEV`, `PROD` ou `DEV->PROD`.
 
 Valores de topologia vêm de `.covenant-flow/overlay.yaml`:
 
-- `environments.dev` (obrigatório se o projeto tem runtime DEV): `source`, `url`, `db`, `services[]`
+- `environments.dev` (obrigatório se o projeto tem runtime DEV): `source`, `url`, `db`, `services[]`, `oneshot_services[]` (opcional; subconjunto de `services`, fora da checagem de serviço do teste no DEV)
 - `environments.prod` (omitir se o projeto é só DEV): `services[]`, `oneshot_services[]` (subconjunto de `services`; jobs de uma execução fora da janela do publish)
 - `canonical_paths` / `forbidden_worktrees` (two-path)
 - `release.restart` / `migrate` / `build` / `health_url`

@@ -10,6 +10,7 @@ roles:
   assessment-b: juizo
   apply-coluna: execucao
   qa-gate: execucao
+  qa-dev: execucao
   diff-reviewer: execucao
   code-reviewer: execucao
   same-card-search: execucao

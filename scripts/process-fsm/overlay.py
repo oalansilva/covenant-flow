@@ -30,6 +30,9 @@ LAW_TOP_KEYS = frozenset(
 ENV_KEYS = ("source", "url", "db", "services")
 RELEASE_KEYS = ("restart", "migrate", "build", "health_url")
 CLIENT_KEYS = ("cursor", "grok", "opencode")
+QA_DEV_TEXT_KEYS = ("autor_relatorio", "session_cmd", "scan_cmd", "evidence_cmd")
+QA_DEV_LIST_KEYS = ("telas_regressao", "caminhos_sem_produto")
+QA_DEV_INT_DEFAULTS = {"espera_max_min": 20, "teto_total_min": 120}
 
 
 class OverlayError(ValueError):
@@ -186,6 +189,26 @@ def _reject_law_table(raw_text: str, data: Mapping[str, Any]) -> None:
         raise OverlayInvalid(f"overlay must not copy law keys {sorted(overlap)}")
 
 
+def _validate_qa_dev(raw: Any) -> None:
+    """Optional `qa_dev` key (card #1144). Absent means off; present and malformed must fail visibly."""
+    if raw is None:
+        return
+    section = _as_mapping(raw, "qa_dev")
+    if not isinstance(section.get("enabled", False), bool):
+        raise OverlayInvalid("qa_dev.enabled must be a boolean")
+    for key in QA_DEV_TEXT_KEYS:
+        if key in section and not isinstance(section[key], str):
+            raise OverlayInvalid(f"qa_dev.{key} must be a string")
+    for key in QA_DEV_LIST_KEYS:
+        if key in section:
+            items = _as_list(section[key], f"qa_dev.{key}")
+            if not all(isinstance(item, str) and item.strip() for item in items):
+                raise OverlayInvalid(f"qa_dev.{key} items must be non-empty strings")
+    for key in QA_DEV_INT_DEFAULTS:
+        if key in section and (not isinstance(section[key], int) or isinstance(section[key], bool) or section[key] < 1):
+            raise OverlayInvalid(f"qa_dev.{key} must be a positive int")
+
+
 def validate_overlay(
     data: Mapping[str, Any],
     *,
@@ -241,6 +264,7 @@ def validate_overlay(
     for key in RELEASE_KEYS:
         if key not in release:
             raise OverlayInvalid(f"release.{key} is required")
+    _validate_qa_dev(data.get("qa_dev"))
     if not require_filled:
         # Join names (ids may be empty on --init).
         names = column_names(fsm)
@@ -405,6 +429,21 @@ def board_executor(overlay: Mapping[str, Any] | None) -> dict[str, str] | None:
     if event_type:
         out["event_type"] = event_type
     return out
+
+
+def qa_dev_settings(overlay: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The optional `qa_dev` key with defaults. A missing key is `enabled: False` (card #1144)."""
+
+    raw = overlay.get("qa_dev") if overlay else None
+    section = raw if isinstance(raw, Mapping) else {}
+    settings: dict[str, Any] = {"enabled": section.get("enabled") is True}
+    for key in QA_DEV_TEXT_KEYS:
+        settings[key] = str(section.get(key) or "").strip()
+    for key in QA_DEV_LIST_KEYS:
+        settings[key] = [str(item).strip() for item in (section.get(key) or [])]
+    for key, default in QA_DEV_INT_DEFAULTS.items():
+        settings[key] = section.get(key) or default
+    return settings
 
 
 def glob_lists(overlay: Mapping[str, Any] | None) -> tuple[list[str], list[str]]:
